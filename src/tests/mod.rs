@@ -7,6 +7,7 @@ mod test_input_backend;
 
 mod animations;
 mod binds;
+mod color_management;
 mod confine_mouse;
 mod floating;
 mod fullscreen;

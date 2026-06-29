@@ -5,6 +5,8 @@ mod layer_shell;
 pub mod virtual_keyboard;
 mod xdg_shell;
 
+use crate::delegate_color_management;
+
 use std::fs::File;
 use std::io::Write;
 use std::os::fd::OwnedFd;
@@ -79,6 +81,11 @@ use crate::niri::{DndIcon, NewClient, State};
 use crate::protocols::ext_workspace::{self, ExtWorkspaceHandler, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
+};
+use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_info_v1::WpImageDescriptionInfoV1;
+
+use crate::protocols::color_management::{
+    send_image_description_info, ColorManagementHandler, ColorManagementState, ImageDescription,
 };
 use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
@@ -873,6 +880,30 @@ impl GammaControlHandler for State {
         }
     }
 }
+
+impl ColorManagementHandler for State {
+    fn color_management_state(&mut self) -> &mut ColorManagementState {
+        &mut self.niri.color_management_state
+    }
+
+    fn image_description_changed(&mut self, _surface: &WlSurface) {
+        // The stored description is picked up by the TTY render loop on the next frame, which
+        // reconciles HDR signalling. A redraw is already scheduled by the surface commit.
+    }
+
+    fn schedule_image_description_info(
+        &mut self,
+        info: WpImageDescriptionInfoV1,
+        desc: ImageDescription,
+    ) {
+        // Deferred to an idle so the destructor `done` event is sent after the creating request
+        // dispatch returns (see the trait method docs).
+        self.niri.event_loop.insert_idle(move |_state| {
+            send_image_description_info(&info, &desc);
+        });
+    }
+}
+delegate_color_management!(State);
 
 struct UrgentOnlyMarker;
 

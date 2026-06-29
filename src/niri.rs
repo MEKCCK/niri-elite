@@ -169,6 +169,9 @@ use crate::layout::{
 use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
+use crate::protocols::color_management::{
+    surface_image_description, ColorManagementState, ImageDescription,
+};
 use crate::protocols::gamma_control::GammaControlManagerState;
 use crate::protocols::kde_blur::KdeBlurState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
@@ -389,6 +392,7 @@ pub struct Niri {
     pub content_type_state: ContentTypeState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
+    pub color_management_state: ColorManagementState,
     pub activation_state: XdgActivationState,
     pub mutter_x11_interop_state: MutterX11InteropManagerState,
     pub fifo_manager_state: FifoManagerState,
@@ -3286,6 +3290,20 @@ impl Niri {
         }
     }
 
+    /// For Phase 1 HDR passthrough: if `output` is showing a fullscreen window whose surface carries
+    /// an HDR (PQ / BT.2020) image description, returns that description. The TTY backend uses this
+    /// to decide whether to signal HDR on the connector. Requires the window to be fullscreen so the
+    /// HDR signal covers the whole output and doesn't wash out surrounding SDR content.
+    pub fn output_hdr_image_description(&self, output: &Output) -> Option<ImageDescription> {
+        let window = self.layout.monitor_for_output(output)?.active_window()?;
+        if !window.sizing_mode().is_fullscreen() {
+            return None;
+        }
+        let desc = surface_image_description(window.toplevel().wl_surface())?;
+        desc.is_hdr().then_some(desc)
+
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,
@@ -3429,6 +3447,17 @@ impl Niri {
         let gamma_control_manager_state =
             GammaControlManagerState::new::<State, _>(&display_handle, move |client| {
                 is_tty && !client.get_data::<ClientState>().unwrap().restricted
+            });
+        // Advertise color management only when at least one output opts into HDR in the config. This
+        // keeps HDR fully opt-in and off by default — with no `hdr` config, niri behaves exactly as
+        // before. Actual HDR signalling is additionally restricted to the TTY backend (it lives in
+        // `Tty::render`), so advertising on winit/headless is harmless. (Snapshot taken at startup;
+        // toggling `hdr` in the config needs a restart to (un)advertise the global.)
+        let advertise_color_management =
+            config.borrow().outputs.0.iter().any(|o| o.hdr.is_some());
+        let color_management_state =
+            ColorManagementState::new::<State, _>(&display_handle, move |_client| {
+                advertise_color_management
             });
         let activation_state = XdgActivationState::new::<State>(&display_handle);
         event_loop
@@ -3693,6 +3722,7 @@ impl Niri {
             content_type_state,
             security_context_state,
             gamma_control_manager_state,
+            color_management_state,
             activation_state,
             mutter_x11_interop_state,
             fifo_manager_state,

@@ -41,6 +41,14 @@ use wayland_client::protocol::wl_surface::{self, WlSurface};
 use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
 use crate::utils::id::IdCounter;
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_output_v1::{self, WpColorManagementOutputV1};
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_v1::WpColorManagementSurfaceV1;
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_manager_v1::{
+    Primaries, RenderIntent, TransferFunction, WpColorManagerV1,
+};
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_creator_params_v1::WpImageDescriptionCreatorParamsV1;
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_info_v1::{self, WpImageDescriptionInfoV1};
+use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_v1::{self, WpImageDescriptionV1};
 
 pub struct Client {
     pub id: ClientId,
@@ -67,6 +75,7 @@ pub struct State {
     pub spbm: Option<WpSinglePixelBufferManagerV1>,
     pub viewporter: Option<WpViewporter>,
     pub ksim: Option<ZwpKeyboardShortcutsInhibitManagerV1>,
+    pub color_manager: Option<WpColorManagerV1>,
 
     pub windows: Vec<Window>,
     pub layers: Vec<LayerSurface>,
@@ -268,6 +277,7 @@ impl Client {
             spbm: None,
             viewporter: None,
             ksim: None,
+            color_manager: None,
             windows: Vec::new(),
             layers: Vec::new(),
         };
@@ -305,6 +315,47 @@ impl Client {
 
     pub fn window(&mut self, surface: &WlSurface) -> &mut Window {
         self.state.window(surface)
+    }
+
+    pub fn probe_output_color_management(&mut self) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+        let output = self
+            .state
+            .outputs
+            .keys()
+            .next()
+            .expect("no output")
+            .clone();
+
+        let output_cm = manager.get_output(&output, &self.qh, ());
+        let image = output_cm.get_image_description(&self.qh, ());
+        let _info = image.get_information(&self.qh, ());
+        self.connection.flush().unwrap();
+    }
+
+    /// Drives the color-management requests an HDR client (mpv gpu-next) sends: build a parametric
+    /// image description and attach it to a surface.
+    pub fn create_and_attach_hdr_description(
+        &mut self,
+        surface: &WlSurface,
+        tf: TransferFunction,
+        primaries: Primaries,
+        intent: RenderIntent,
+    ) {
+        let manager = self.state.color_manager.clone().expect("manager not bound");
+
+        let creator = manager.create_parametric_creator(&self.qh, ());
+        creator.set_tf_named(tf);
+        creator.set_primaries_named(primaries);
+        // min L = 0.005 cd/m² (×10000), max L = 1000 cd/m².
+        creator.set_mastering_luminance(50, 1000);
+        creator.set_max_cll(1000);
+        creator.set_max_fall(400);
+        let image = creator.create(&self.qh, ());
+
+        let cm_surface = manager.get_surface(surface, &self.qh, ());
+        cm_surface.set_image_description(&image, intent);
+        self.connection.flush().unwrap();
     }
 
     pub fn create_layer(
@@ -662,6 +713,9 @@ impl Dispatch<WlRegistry, ()> for State {
                 } else if interface == WpViewporter::interface().name {
                     let version = min(version, WpViewporter::interface().version);
                     state.viewporter = Some(registry.bind(name, version, qh, ()));
+                } else if interface == WpColorManagerV1::interface().name {
+                    let version = min(version, WpColorManagerV1::interface().version);
+                    state.color_manager = Some(registry.bind(name, version, qh, ()));
                 } else if interface == WlOutput::interface().name {
                     let version = min(version, WlOutput::interface().version);
                     let output = registry.bind(name, version, qh, ());
@@ -1067,5 +1121,83 @@ impl Dispatch<ZwpKeyboardShortcutsInhibitorV1, ()> for State {
             zwp_keyboard_shortcuts_inhibitor_v1::Event::Inactive => (),
             _ => unreachable!(),
         }
+    }
+}
+
+impl Dispatch<WpColorManagerV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpColorManagerV1,
+        _event: <WpColorManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // supported_intent / supported_feature / supported_tf_named / supported_primaries_named /
+        // done — all ignored; binding alone exercises the server's bind handler.
+    }
+}
+
+impl Dispatch<WpColorManagementOutputV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpColorManagementOutputV1,
+        _event: wp_color_management_output_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpImageDescriptionV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpImageDescriptionV1,
+        _event: wp_image_description_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // ready / failed — ignored for these tests.
+    }
+}
+
+impl Dispatch<WpImageDescriptionInfoV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpImageDescriptionInfoV1,
+        _event: wp_image_description_info_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // primaries_named / tf_named / done / ... — ignored.
+    }
+}
+
+impl Dispatch<WpImageDescriptionCreatorParamsV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpImageDescriptionCreatorParamsV1,
+        _event: <WpImageDescriptionCreatorParamsV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // No events.
+    }
+}
+
+impl Dispatch<WpColorManagementSurfaceV1, ()> for State {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WpColorManagementSurfaceV1,
+        _event: <WpColorManagementSurfaceV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        // No events.
     }
 }
