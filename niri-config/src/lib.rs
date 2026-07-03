@@ -1529,7 +1529,7 @@ mod tests {
                 position x=10 y=20
                 mode "1920x1080@144"
                 max-bpc 10
-                hdr {
+                hdr mode="on" {
                     reference-luminance 203
                 }
                 variable-refresh-rate on-demand=true
@@ -1981,6 +1981,7 @@ mod tests {
                         ),
                         hdr: Some(
                             Hdr {
+                                mode: On,
                                 reference_luminance: Some(
                                     FloatOrInt(
                                         203.0,
