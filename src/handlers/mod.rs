@@ -5,7 +5,7 @@ mod layer_shell;
 pub mod virtual_keyboard;
 mod xdg_shell;
 
-use crate::delegate_color_management;
+use smithay::delegate_color_management;
 
 use std::fs::File;
 use std::io::Write;
@@ -83,10 +83,10 @@ use crate::protocols::foreign_toplevel::{
     self, ForeignToplevelHandler, ForeignToplevelManagerState,
 };
 use smithay::reexports::wayland_protocols::wp::color_management::v1::server::wp_image_description_info_v1::WpImageDescriptionInfoV1;
-
-use crate::protocols::color_management::{
+use smithay::wayland::color::management::{
     send_image_description_info, ColorManagementHandler, ColorManagementState, ImageDescription,
 };
+
 use crate::protocols::gamma_control::{GammaControlHandler, GammaControlManagerState};
 use crate::protocols::mutter_x11_interop::MutterX11InteropHandler;
 use crate::protocols::output_management::{OutputManagementHandler, OutputManagementManagerState};

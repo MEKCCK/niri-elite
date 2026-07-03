@@ -319,13 +319,7 @@ impl Client {
 
     pub fn probe_output_color_management(&mut self) {
         let manager = self.state.color_manager.clone().expect("manager not bound");
-        let output = self
-            .state
-            .outputs
-            .keys()
-            .next()
-            .expect("no output")
-            .clone();
+        let output = self.state.outputs.keys().next().expect("no output").clone();
 
         let output_cm = manager.get_output(&output, &self.qh, ());
         let image = output_cm.get_image_description(&self.qh, ());
