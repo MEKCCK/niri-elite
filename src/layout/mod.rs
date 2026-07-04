@@ -62,6 +62,7 @@ use crate::input::swipe_tracker::SwipeTracker;
 use crate::layout::scrolling::ScrollDirection;
 use crate::niri_render_elements;
 use crate::render_helpers::background_effect::BackgroundEffectElement;
+use crate::render_helpers::blend::BlendSurfaceRenderElement;
 use crate::render_helpers::offscreen::OffscreenData;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::snapshot::RenderSnapshot;
@@ -118,7 +119,7 @@ pub struct SizeFrac;
 
 niri_render_elements! {
     LayoutElementRenderElement<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = BlendSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         BackgroundEffect = BackgroundEffectElement,
         AgentCursor = MemoryRenderBufferRenderElement<R>,

@@ -23,6 +23,8 @@ uniform float tint;
 // x is left edge, y is right edge of the gradient.
 uniform vec2 cutoff;
 
+vec4 niri_blend(vec4 color);
+
 void main() {
     // Sample the texture.
     vec4 color = texture2D(tex, v_coords);
@@ -43,5 +45,5 @@ void main() {
         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
 
-    gl_FragColor = color;
+    gl_FragColor = niri_blend(color);
 }

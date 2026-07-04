@@ -180,6 +180,7 @@ use crate::protocols::kde_blur::KdeBlurState;
 use crate::protocols::mutter_x11_interop::MutterX11InteropManagerState;
 use crate::protocols::output_management::OutputManagementManagerState;
 use crate::protocols::screencopy::{Screencopy, ScreencopyBuffer, ScreencopyManagerState};
+use crate::render_helpers::blend::BlendSurfaceRenderElement;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::debug::push_opaque_regions;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
@@ -3297,10 +3298,10 @@ impl Niri {
         }
     }
 
-    /// For Phase 1 HDR passthrough: if `output` is showing a fullscreen window whose surface carries
-    /// an HDR (PQ / BT.2020) image description, returns that description. The TTY backend uses this
-    /// to decide whether to signal HDR on the connector. Requires the window to be fullscreen so the
-    /// HDR signal covers the whole output and doesn't wash out surrounding SDR content.
+    /// For fullscreen HDR passthrough: if `output` is showing a fullscreen window whose surface
+    /// carries an HDR (PQ / BT.2020) image description, returns that description. The TTY backend
+    /// uses this to decide whether to signal HDR on the connector in auto mode, and which metadata
+    /// to attach.
     ///
     /// The whole surface tree is searched, not just the toplevel surface: winewayland (Proton)
     /// presents Vulkan content on a subsurface of the toplevel and attaches the HDR image
@@ -9869,9 +9870,9 @@ fn scale_relocate_crop<E: Element>(
 
 niri_render_elements! {
     PointerRenderElements<R> => {
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = BlendSurfaceRenderElement<R>,
         NamedPointer = MemoryRenderBufferRenderElement<R>,
-        RescaledWayland = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+        RescaledWayland = RescaleRenderElement<BlendSurfaceRenderElement<R>>,
         RescaledNamedPointer = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     }
 }
@@ -9895,7 +9896,7 @@ niri_render_elements! {
             SolidColorRenderElement
         >>>,
         Pointer = PointerRenderElements<R>,
-        Wayland = WaylandSurfaceRenderElement<R>,
+        Wayland = BlendSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
         ScreenCastPicker = ScreenCastPickerRenderElement<R>,

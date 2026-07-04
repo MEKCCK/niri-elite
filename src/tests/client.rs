@@ -53,13 +53,6 @@ use wayland_client::{Connection, Dispatch, Proxy as _, QueueHandle};
 
 use crate::utils::id::IdCounter;
 use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_output_v1::{self, WpColorManagementOutputV1};
-use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_management_surface_v1::WpColorManagementSurfaceV1;
-use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_color_manager_v1::{
-    Primaries, RenderIntent, TransferFunction, WpColorManagerV1,
-};
-use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_creator_params_v1::WpImageDescriptionCreatorParamsV1;
-use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_info_v1::{self, WpImageDescriptionInfoV1};
-use smithay::reexports::wayland_protocols::wp::color_management::v1::client::wp_image_description_v1::{self, WpImageDescriptionV1};
 
 pub struct Client {
     pub id: ClientId,
