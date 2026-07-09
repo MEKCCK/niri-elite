@@ -5,7 +5,6 @@ mod layer_shell;
 pub mod virtual_keyboard;
 mod xdg_shell;
 
-use smithay::delegate_color_management;
 
 use std::fs::File;
 use std::io::Write;
@@ -911,7 +910,6 @@ impl ColorManagementHandler for State {
         });
     }
 }
-delegate_color_management!(State);
 
 struct UrgentOnlyMarker;
 
