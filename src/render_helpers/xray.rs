@@ -16,6 +16,7 @@ use smithay::utils::{Buffer, Logical, Physical, Point, Rectangle, Scale, Size, T
 use crate::backend::tty::{TtyFrame, TtyRenderer, TtyRendererError};
 use crate::render_helpers::background_effect::RenderParams;
 use crate::render_helpers::effect_buffer::EffectBuffer;
+use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::renderer::AsGlesFrame as _;
 use crate::render_helpers::shaders::{mat3_uniform, Shaders};
 use crate::render_helpers::{RenderCtx, RenderTarget};
@@ -81,6 +82,8 @@ pub struct XrayElement {
     saturation: f32,
     bg_color: Color32F,
     program: Option<GlesTexProgram>,
+    liquid_glass: Option<LiquidGlassOptions>,
+    padding_pixels: f32,
 }
 
 impl Xray {
@@ -102,6 +105,8 @@ impl Xray {
         blur: bool,
         noise: f32,
         saturation: f32,
+        liquid_glass_options: Option<LiquidGlassOptions>,
+        padding_pixels: f32,
         push: &mut dyn FnMut(XrayElement),
     ) {
         let program = Shaders::get(ctx.renderer).postprocess_and_clip.clone();
@@ -125,6 +130,7 @@ impl Xray {
         let mut skip_backdrop = intersection_with_backdrop.is_none();
 
         let mut background = self.background[ctx.target as usize].borrow_mut();
+
         let prev = background.commit();
         if background.prepare(ctx.renderer, blur) {
             if background.commit() != prev {
@@ -202,6 +208,8 @@ impl Xray {
                     saturation,
                     bg_color: *bg_color,
                     program: program.clone(),
+                    liquid_glass: liquid_glass_options,
+                    padding_pixels,
                 };
                 push(elem);
             }
@@ -252,6 +260,8 @@ impl Xray {
                 saturation,
                 bg_color: self.backdrop_color,
                 program: program.clone(),
+                liquid_glass: liquid_glass_options,
+                padding_pixels,
             };
             push(elem);
         }
@@ -259,8 +269,8 @@ impl Xray {
 }
 
 impl XrayElement {
-    fn compute_uniforms(&self) -> [Uniform<'static>; 7] {
-        [
+    fn compute_uniforms(&self) -> Vec<Uniform<'static>> {
+        let mut uniforms = vec![
             Uniform::new("niri_scale", self.scale),
             Uniform::new("geo_size", <[f32; 2]>::from(self.clip_geo_size)),
             Uniform::new("corner_radius", <[f32; 4]>::from(self.corner_radius)),
@@ -268,7 +278,69 @@ impl XrayElement {
             Uniform::new("noise", self.noise),
             Uniform::new("saturation", self.saturation),
             Uniform::new("bg_color", self.bg_color.components()),
-        ]
+        ];
+
+        if let Some(lg) = &self.liquid_glass {
+            uniforms.extend([
+                Uniform::new("lg_refraction_strength", lg.refraction_strength as f32),
+                Uniform::new("lg_power_factor", lg.power_factor as f32),
+                Uniform::new("lg_refraction_a", lg.refraction_a as f32),
+                Uniform::new("lg_refraction_b", lg.refraction_b as f32),
+                Uniform::new("lg_refraction_c", lg.refraction_c as f32),
+                Uniform::new("lg_refraction_d", lg.refraction_d as f32),
+                Uniform::new("lg_refraction_power", lg.refraction_power as f32),
+                Uniform::new("lg_physical_refraction", lg.physical_refraction as f32),
+                Uniform::new("lg_glow_weight", lg.glow_weight as f32),
+                Uniform::new("lg_glow_bias", lg.glow_bias as f32),
+                Uniform::new("lg_glow_edge0", lg.glow_edge0 as f32),
+                Uniform::new("lg_glow_edge1", lg.glow_edge1 as f32),
+                Uniform::new("lg_edge_lighting", lg.edge_lighting as f32),
+                Uniform::new("lg_fringing", lg.fringing as f32),
+                Uniform::new("lg_refraction_dilute", lg.refraction_dilute as f32),
+                Uniform::new("lg_dilute_strength", lg.dilute_strength as f32),
+                Uniform::new("lg_dilute_fringing", lg.dilute_fringing as f32),
+                Uniform::new("lg_lens_distortion", lg.lens_distortion as f32),
+                Uniform::new("lg_brightness", lg.brightness as f32),
+                Uniform::new("lg_contrast", lg.contrast as f32),
+                Uniform::new("lg_saturation", lg.saturation as f32),
+                Uniform::new("lg_vibrancy", lg.vibrancy as f32),
+                Uniform::new("lg_adaptive_dim", lg.adaptive_dim as f32),
+                Uniform::new("lg_adaptive_boost", lg.adaptive_boost as f32),
+                Uniform::new("lg_edge_thickness", lg.edge_thickness as f32),
+                Uniform::new("lg_padding_pixels", self.padding_pixels),
+            ]);
+        } else {
+            uniforms.extend([
+                Uniform::new("lg_refraction_strength", 0.0f32),
+                Uniform::new("lg_power_factor", 0.0f32),
+                Uniform::new("lg_refraction_a", 0.0f32),
+                Uniform::new("lg_refraction_b", 0.0f32),
+                Uniform::new("lg_refraction_c", 0.0f32),
+                Uniform::new("lg_refraction_d", 0.0f32),
+                Uniform::new("lg_refraction_power", 0.0f32),
+                Uniform::new("lg_physical_refraction", 0.0f32),
+                Uniform::new("lg_glow_weight", 0.0f32),
+                Uniform::new("lg_glow_bias", 0.0f32),
+                Uniform::new("lg_glow_edge0", 0.0f32),
+                Uniform::new("lg_glow_edge1", 0.0f32),
+                Uniform::new("lg_edge_lighting", 0.0f32),
+                Uniform::new("lg_fringing", 0.0f32),
+                Uniform::new("lg_refraction_dilute", 0.0f32),
+                Uniform::new("lg_dilute_strength", 0.0f32),
+                Uniform::new("lg_dilute_fringing", 0.0f32),
+                Uniform::new("lg_lens_distortion", 0.0f32),
+                Uniform::new("lg_brightness", 0.0f32),
+                Uniform::new("lg_contrast", 0.0f32),
+                Uniform::new("lg_saturation", 0.0f32),
+                Uniform::new("lg_vibrancy", 0.0f32),
+                Uniform::new("lg_adaptive_dim", 0.0f32),
+                Uniform::new("lg_adaptive_boost", 0.0f32),
+                Uniform::new("lg_edge_thickness", 0.15f32),
+                Uniform::new("lg_padding_pixels", self.padding_pixels),
+            ]);
+        }
+
+        uniforms
     }
 }
 

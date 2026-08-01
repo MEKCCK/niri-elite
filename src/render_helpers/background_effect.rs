@@ -11,6 +11,7 @@ use crate::niri_render_elements;
 use crate::render_helpers::blur::BlurOptions;
 use crate::render_helpers::damage::ExtraDamage;
 use crate::render_helpers::framebuffer_effect::{FramebufferEffect, FramebufferEffectElement};
+use crate::render_helpers::liquid_glass::LiquidGlassOptions;
 use crate::render_helpers::xray::{XrayElement, XrayPos};
 use crate::render_helpers::RenderCtx;
 use crate::utils::region::TransformedRegion;
@@ -36,6 +37,7 @@ pub struct Options {
     pub xray: bool,
     pub noise: Option<f64>,
     pub saturation: Option<f64>,
+    pub liquid_glass: Option<LiquidGlassOptions>,
 }
 
 impl Options {
@@ -44,14 +46,17 @@ impl Options {
             || self.blur
             || self.noise.is_some_and(|x| x > 0.)
             || self.saturation.is_some_and(|x| x != 1.)
+            || self.liquid_glass.is_some()
     }
 }
 
 /// Render-time parameters.
 #[derive(Debug)]
 pub struct RenderParams {
-    /// Geometry of the background effect.
+    /// Geometry of the background effect (may be expanded by edge_padding).
     pub geometry: Rectangle<f64, Logical>,
+    /// Original window geometry before expansion (used by xray shader for SDF).
+    pub original_geometry: Rectangle<f64, Logical>,
     /// Effect subregion, will be clipped to `geometry`.
     ///
     /// `subregion.iter()` should return `geometry`-relative rectangles.
@@ -121,11 +126,18 @@ impl BackgroundEffect {
             effect.blur == Some(true)
         };
 
+        let liquid_glass = effect.liquid_glass.map(LiquidGlassOptions::from);
+
+        if liquid_glass.is_some() {
+            warn!("LIQUID GLASS: update_render_elements liquid_glass={:?}", liquid_glass);
+        }
+
         let mut options = Options {
             blur,
             xray: effect.xray == Some(true),
             noise: effect.noise,
             saturation: effect.saturation,
+            liquid_glass,
         };
 
         // If we have some background effect but xray wasn't explicitly set, default it to true
@@ -154,6 +166,7 @@ impl BackgroundEffect {
         ns: Option<usize>,
         mut params: RenderParams,
         xray_pos: XrayPos,
+        padding_pixels: f32,
         push: &mut dyn FnMut(BackgroundEffectElement),
     ) {
         if !self.is_visible() {
@@ -167,8 +180,6 @@ impl BackgroundEffect {
 
         let damage = self.damage.render(params.geometry);
 
-        // Use noise/saturation from options, falling back to blur defaults if blurred, and
-        // to no effect if not blurred.
         let blur = self.options.blur && !self.blur_config.off;
         let blur_options = blur.then_some(BlurOptions::from(self.blur_config));
         let noise = if blur { self.blur_config.noise } else { 0. };
@@ -185,21 +196,30 @@ impl BackgroundEffect {
                 return;
             };
 
+            // Xray doesn't need expanded geometry — it samples from the scene-wide
+            // background buffer. Use original window geometry for correct SDF.
+            // Undo the xray_pos offset that render_for_tile added for expanded geometry.
+            let expansion_offset = params.geometry.loc - params.original_geometry.loc;
+            let xray_xray_pos = xray_pos.offset(Point::new(-expansion_offset.x, -expansion_offset.y));
+            params.geometry = params.original_geometry;
+
             push(damage.into());
             xray.render(
                 ctx,
                 params,
-                xray_pos,
+                xray_xray_pos,
                 blur,
                 noise,
                 saturation,
+                self.options.liquid_glass,
+                0.0,
                 &mut |elem| push(elem.into()),
             );
         } else {
-            // Render non-xray effect.
+            warn!("LIQUID GLASS: non-xray path, padding_pixels={}, liquid_glass={:?}", padding_pixels, self.options.liquid_glass);
             let elem = self
                 .nonxray
-                .render(ns, params, blur_options, noise, saturation);
+                .render(ns, params, blur_options, noise, saturation, self.options.liquid_glass, padding_pixels);
             push(elem.into());
         }
     }
@@ -213,11 +233,21 @@ fn render_params_for_tile(
     blur_region: Option<Arc<Vec<Rectangle<i32, Logical>>>>,
     surface_geo: Rectangle<f64, Logical>,
     surface_anim_scale: Scale<f64>,
+    padding: f64,
 ) -> Option<RenderParams> {
     // Effects not requested by the surface itself are drawn to match the geometry.
     let mut clip = true;
 
     let mut effect_geometry = geometry;
+
+    // Expand geometry by padding for liquid glass (captures content beyond window)
+    if padding > 0.0 {
+        effect_geometry.loc.x -= padding;
+        effect_geometry.loc.y -= padding;
+        effect_geometry.size.w += padding * 2.0;
+        effect_geometry.size.h += padding * 2.0;
+    }
+
     let mut subregion = None;
     if let Some(rects) = blur_region {
         if rects.is_empty() {
@@ -255,6 +285,7 @@ fn render_params_for_tile(
 
     Some(RenderParams {
         geometry: effect_geometry,
+        original_geometry: geometry,
         subregion,
         clip,
         scale,
@@ -314,6 +345,14 @@ pub fn render_for_tile(
         let mut surface_geo = surface_geo(states).unwrap_or_default().to_f64();
         surface_geo.loc += surface_off;
 
+        // Compute padding from liquid glass edge_padding
+        let padding = if let Some(lg) = &background_effect.options.liquid_glass {
+            let min_dim = geometry.size.w.min(geometry.size.h);
+            lg.edge_padding * min_dim
+        } else {
+            0.0
+        };
+
         let Some(params) = render_params_for_tile(
             geometry,
             scale,
@@ -322,11 +361,12 @@ pub fn render_for_tile(
             blur_region,
             surface_geo,
             surface_anim_scale,
+            padding,
         ) else {
             return;
         };
 
         let xray_pos = xray_pos.offset(params.geometry.loc - geometry.loc);
-        background_effect.render(ctx, ns, params, xray_pos, push);
+        background_effect.render(ctx, ns, params, xray_pos, padding as f32, push);
     });
 }
