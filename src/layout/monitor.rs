@@ -5,11 +5,12 @@ use std::time::Duration;
 
 use niri_config::{CornerRadius, LayoutPart};
 use smithay::backend::renderer::element::utils::{
-    CropRenderElement, Relocate, RelocateRenderElement, RescaleRenderElement,
+    CropRenderElement, Relocate, RelocateRenderElement,
 };
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
+use super::grid_overview::GridDirection;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
 use super::tile::Tile;
@@ -21,6 +22,7 @@ use super::{compute_overview_zoom, ActivateWindow, HitType, LayoutElement, Optio
 use crate::animation::{Animation, Clock};
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::niri_render_elements;
+use crate::render_helpers::overview_rescale::OverviewRescaleRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::solid_color::SolidColorRenderElement;
@@ -80,6 +82,8 @@ pub struct Monitor<W: LayoutElement> {
     pub(super) overview_open: bool,
     /// Progress of the overview zoom animation, 1 is fully in overview.
     overview_progress: Option<OverviewProgress>,
+    /// Whether grid overview is enabled for this monitor.
+    grid_overview_open: bool,
     /// Clock for driving animations.
     pub(super) clock: Clock,
     /// Configurable properties of the layout as received from the parent layout.
@@ -143,6 +147,7 @@ pub(super) enum InsertWorkspace {
 pub(super) struct InsertHint {
     pub workspace: InsertWorkspace,
     pub position: InsertPosition,
+    pub area: Option<Rectangle<f64, Logical>>,
     pub corner_radius: CornerRadius,
 }
 
@@ -194,7 +199,7 @@ niri_render_elements! {
 }
 
 pub type MonitorRenderElement<R> =
-    RelocateRenderElement<RescaleRenderElement<MonitorInnerRenderElement<R>>>;
+    RelocateRenderElement<OverviewRescaleRenderElement<MonitorInnerRenderElement<R>>>;
 
 impl WorkspaceSwitch {
     pub fn current_idx(&self) -> f64 {
@@ -341,6 +346,7 @@ impl<W: LayoutElement> Monitor<W> {
             insert_hint_render_loc: None,
             overview_open: false,
             overview_progress: None,
+            grid_overview_open: false,
             workspace_switch: None,
             clock,
             base_options,
@@ -552,6 +558,17 @@ impl<W: LayoutElement> Monitor<W> {
             workspace_idx += 1;
         }
 
+        self.open_grid_for_workspace_if_needed(workspace_idx);
+
+        if activate {
+            if let Some(id) = self.workspaces[workspace_idx]
+                .active_window()
+                .map(|window| window.id().clone())
+            {
+                self.workspaces[workspace_idx].on_window_added_in_grid(&id);
+            }
+        }
+
         if activate {
             self.activate_workspace(workspace_idx);
         }
@@ -590,6 +607,8 @@ impl<W: LayoutElement> Monitor<W> {
             workspace_idx += 1;
         }
 
+        self.open_grid_for_workspace_if_needed(workspace_idx);
+
         if allow_to_activate_workspace && activate.map_smart(|| false) {
             self.activate_workspace(workspace_idx);
         }
@@ -616,6 +635,8 @@ impl<W: LayoutElement> Monitor<W> {
 
         // Since we're adding window to an existing column, the workspace isn't empty, and
         // therefore cannot be the last one, so we never need to insert a new empty workspace.
+
+        self.open_grid_for_workspace_if_needed(workspace_idx);
 
         if allow_to_activate_workspace && activate {
             self.activate_workspace(workspace_idx);
@@ -708,6 +729,8 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.workspaces.insert(idx, ws);
 
+        self.open_grid_for_workspace_if_needed(idx);
+
         if idx <= self.active_workspace_idx {
             self.active_workspace_idx += 1;
         }
@@ -771,13 +794,23 @@ impl<W: LayoutElement> Monitor<W> {
     }
 
     pub fn focus_window_or_workspace_down(&mut self) {
-        if !self.active_workspace().focus_down() {
+        let grid_open = self.active_workspace_ref().is_grid_overview_open();
+        if grid_open {
+            if !self.active_workspace().grid_navigate(GridDirection::Down) {
+                self.switch_workspace_down();
+            }
+        } else if !self.active_workspace().focus_down() {
             self.switch_workspace_down();
         }
     }
 
     pub fn focus_window_or_workspace_up(&mut self) {
-        if !self.active_workspace().focus_up() {
+        let grid_open = self.active_workspace_ref().is_grid_overview_open();
+        if grid_open {
+            if !self.active_workspace().grid_navigate(GridDirection::Up) {
+                self.switch_workspace_up();
+            }
+        } else if !self.active_workspace().focus_up() {
             self.switch_workspace_up();
         }
     }
@@ -1109,7 +1142,9 @@ impl<W: LayoutElement> Monitor<W> {
             match hint.workspace {
                 InsertWorkspace::Existing(ws_id) => {
                     if let Some(ws) = self.workspaces.iter().find(|ws| ws.id() == ws_id) {
-                        if let Some(mut area) = ws.insert_hint_area(hint.position) {
+                        if let Some(mut area) =
+                            hint.area.or_else(|| ws.insert_hint_area(hint.position))
+                        {
                             let scale = ws.scale().fractional_scale();
                             let view_size = ws.view_size();
 
@@ -1391,6 +1426,39 @@ impl<W: LayoutElement> Monitor<W> {
         }
     }
 
+    pub(super) fn is_grid_overview_open(&self) -> bool {
+        self.grid_overview_open
+    }
+
+    pub(super) fn set_grid_overview_open(&mut self, open: bool) {
+        self.grid_overview_open = open;
+
+        if open {
+            for ws in &mut self.workspaces {
+                if ws.has_windows() {
+                    ws.open_grid_overview();
+                }
+            }
+        } else {
+            for ws in &mut self.workspaces {
+                ws.activate_grid_focused_window_before_close();
+                ws.close_grid_overview();
+            }
+        }
+    }
+
+    fn open_grid_for_workspace_if_needed(&mut self, workspace_idx: usize) {
+        if !self.grid_overview_open {
+            return;
+        }
+
+        if let Some(ws) = self.workspaces.get_mut(workspace_idx) {
+            if ws.has_windows() {
+                ws.open_grid_overview();
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn overview_progress_value(&self) -> Option<f64> {
         self.overview_progress.as_ref().map(|p| p.value())
@@ -1562,12 +1630,37 @@ impl<W: LayoutElement> Monitor<W> {
     pub fn window_under(&self, pos_within_output: Point<f64, Logical>) -> Option<(&W, HitType)> {
         let (ws, geo) = self.workspace_under(pos_within_output)?;
 
+        if ws.is_grid_overview_open() {
+            let zoom = self.overview_zoom();
+            let pos_within_workspace = if self.overview_progress.is_some() {
+                (pos_within_output - geo.loc).downscale(zoom)
+            } else {
+                pos_within_output - geo.loc
+            };
+            if let Some((win, hit)) = ws.ignored_floating_window_under(pos_within_workspace) {
+                let hit = if self.overview_progress.is_some() {
+                    hit.to_activate()
+                } else {
+                    hit.offset_win_pos(geo.loc)
+                };
+                return Some((win, hit));
+            }
+            if let Some(id) = ws.grid_window_at(pos_within_workspace) {
+                let win = ws.windows().find(|w| *w.id() == id)?;
+                return Some((
+                    win,
+                    HitType::Activate {
+                        is_tab_indicator: false,
+                    },
+                ));
+            }
+            return None;
+        }
+
         if self.overview_progress.is_some() {
             let zoom = self.overview_zoom();
             let pos_within_workspace = (pos_within_output - geo.loc).downscale(zoom);
             let (win, hit) = ws.window_under(pos_within_workspace)?;
-            // During the overview animation, we cannot do input hits because we cannot really
-            // represent scaled windows properly.
             Some((win, hit.to_activate()))
         } else {
             let (win, hit) = ws.window_under(pos_within_output - geo.loc)?;
@@ -1661,7 +1754,7 @@ impl<W: LayoutElement> Monitor<W> {
         self.insert_hint_element
             .render(renderer, render_loc.location, &mut |elem| {
                 let elem = MonitorInnerRenderElement::UncroppedInsertHint(elem);
-                let elem = RescaleRenderElement::from_element(elem, Point::default(), 1.);
+                let elem = OverviewRescaleRenderElement::from_element(elem, Point::default(), 1.);
                 let elem =
                     RelocateRenderElement::from_element(elem, Point::default(), Relocate::Relative);
                 push(elem);
@@ -1709,7 +1802,7 @@ impl<W: LayoutElement> Monitor<W> {
             .filter(|_| !self.options.layout.insert_hint.off);
 
         let scale_relocate = move |geo: Rectangle<f64, Logical>, elem| {
-            let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
+            let elem = OverviewRescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
             RelocateRenderElement::from_element(
                 elem,
                 // The offset we get from workspaces_with_render_geo() is already
@@ -1735,6 +1828,45 @@ impl<W: LayoutElement> Monitor<W> {
             }
 
             let xray_pos = XrayPos::new(geo.loc, zoom);
+
+            if ws.is_grid_overview_open() || ws.is_grid_overview_animation() {
+                let grid_scale_relocate = move |elem| {
+                    let elem =
+                        OverviewRescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
+                    RelocateRenderElement::from_element(
+                        elem,
+                        geo.loc.to_physical_precise_round(scale),
+                        Relocate::Relative,
+                    )
+                };
+                if let Some(loc) = insert_hint_render_loc {
+                    if loc.workspace == InsertWorkspace::Existing(ws.id()) {
+                        let mut grid_hint_push = |elem| {
+                            let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                            if let Some(elem) = elem {
+                                let elem = MonitorInnerRenderElement::from(elem);
+                                push(grid_scale_relocate(elem));
+                            }
+                        };
+                        self.insert_hint_element.render(
+                            ctx.renderer,
+                            loc.location,
+                            &mut grid_hint_push,
+                        );
+                    }
+                }
+                {
+                    let mut grid_push = |elem| {
+                        let elem = CropRenderElement::from_element(elem, scale, crop_bounds);
+                        if let Some(elem) = elem {
+                            let elem = MonitorInnerRenderElement::from(elem);
+                            push(grid_scale_relocate(elem));
+                        }
+                    };
+                    ws.render_grid_overview(ctx.r(), &mut grid_push, xray_pos, focus_ring);
+                }
+                continue;
+            }
 
             ws.render_floating(ctx.r(), xray_pos, focus_ring, push!());
 
@@ -1768,7 +1900,8 @@ impl<W: LayoutElement> Monitor<W> {
             ws.render_shadow(renderer, &mut |elem| {
                 let elem = elem.with_alpha(alpha);
                 let elem = MonitorInnerRenderElement::Shadow(elem);
-                let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
+                let elem =
+                    OverviewRescaleRenderElement::from_element(elem, Point::from((0, 0)), zoom);
                 let elem = RelocateRenderElement::from_element(
                     elem,
                     geo.loc.to_physical_precise_round(scale),

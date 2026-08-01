@@ -501,6 +501,24 @@ window-rule {
 }
 ```
 
+#### `ignore-grid-overview`
+
+Keep a floating window out of the grid overview. The window stays visible in its normal floating
+position and can still be clicked, but it does not become a grid item and is not selected by grid
+navigation.
+
+This only applies to floating windows. Tiled windows keep their normal grid behavior even if this
+rule matches them.
+
+```kdl
+// Keep short-lived notification-style windows out of the grid overview.
+window-rule {
+    match app-id="steam" is-floating=true
+
+    ignore-grid-overview true
+}
+```
+
 #### `open-focused`
 
 <sup>Since: 25.01</sup>

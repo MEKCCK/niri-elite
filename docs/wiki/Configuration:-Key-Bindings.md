@@ -369,6 +369,10 @@ binds {
 
 In the interactive screenshot UI, pressing <kbd>Ctrl</kbd><kbd>C</kbd> will copy the screenshot to the clipboard without writing it to disk.
 
+When using these actions through `niri msg`, you can also pass `--stdout` to pipe the PNG data to another program.
+This is an IPC/CLI option, not a key binding property.
+See [Screenshots To Stdout](./IPC.md#screenshots-to-stdout).
+
 <sup>Since: 25.05</sup> You can hide the mouse pointer in screenshots with the `show-pointer=false` property:
 
 ```kdl
@@ -414,5 +418,36 @@ They will always be handled by niri and never passed to the window.
 binds {
     // This bind will always work, even when using a virtual machine.
     Super+Alt+L allow-inhibiting=false { spawn "swaylock"; }
+}
+```
+
+#### `toggle-grid-overview`
+
+Toggle the grid overview on or off. The grid overview shows all windows in a grid layout, allowing you to navigate between them with the arrow keys.
+
+```kdl
+binds {
+    Mod+G { toggle-grid-overview; }
+}
+```
+
+#### `toggle-magnifier`
+
+Toggle the screen magnifier on or off. When toggled on, the screen zooms in centered on the cursor. The zoom factor is configured via [`magnifier.zoom-factor`](./Configuration:-Miscellaneous.md#zoom-factor) (defaults to `2.0`). Toggling off smoothly animates back to normal.
+
+```kdl
+binds {
+    Mod+Shift+Z { toggle-magnifier; }
+}
+```
+
+<sup>Since: 26.04</sup>
+
+Adjust the screen magnifier zoom by the given delta. Positive values zoom in, negative values zoom out. The zoom ranges from `1.0` (no zoom) to `10.0`. Zooming down to `1.0` turns the magnifier off. This action responds instantly without animation, making it suitable for scroll wheel binds.
+
+```kdl
+binds {
+    Mod+WheelScrollUp   { adjust-magnifier-zoom 0.1; }
+    Mod+WheelScrollDown { adjust-magnifier-zoom -0.1; }
 }
 ```

@@ -261,6 +261,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
         self.tiles.iter().any(Tile::are_animations_ongoing) || !self.closing_windows.is_empty()
     }
 
+    pub fn closing_windows(&self) -> impl Iterator<Item = &ClosingWindow> {
+        self.closing_windows.iter()
+    }
+
     pub fn are_transitions_ongoing(&self) -> bool {
         self.tiles.iter().any(Tile::are_transitions_ongoing) || !self.closing_windows.is_empty()
     }
@@ -558,6 +562,25 @@ impl<W: LayoutElement> FloatingSpace<W> {
         };
 
         let tile_size = tile.tile_size();
+
+        self.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker);
+    }
+
+    pub fn start_close_animation_for_window_at(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        id: &W::Id,
+        tile_size: Size<f64, Logical>,
+        tile_pos: Point<f64, Logical>,
+        blocker: TransactionBlocker,
+    ) {
+        let Some(snapshot) = self
+            .tiles_with_render_positions_mut(false)
+            .find(|(tile, _)| tile.window().id() == id)
+            .and_then(|(tile, _)| tile.take_unmap_snapshot())
+        else {
+            return;
+        };
 
         self.start_close_animation_for_tile(renderer, snapshot, tile_size, tile_pos, blocker);
     }

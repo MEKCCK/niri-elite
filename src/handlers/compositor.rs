@@ -161,7 +161,7 @@ impl CompositorHandler for State {
                     let activate = activate.unwrap_or_else(|| {
                         // Check the token timestamp again in case the window took a while between
                         // requesting activation and mapping.
-                        let token = activation_token_data.filter(|token| {
+                        let token = activation_token_data.as_ref().filter(|token| {
                             token.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT
                         });
                         if token.is_some() {

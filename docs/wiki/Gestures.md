@@ -91,9 +91,9 @@ This will bring a floating window to the top for example.
 
 In the overview, you can also hold the mouse over a workspace to switch to it.
 
-#### Hot Corner to Toggle the Overview
+#### Hot Corners to Toggle Overviews
 
 <sup>Since: 25.05</sup>
 
-Put your mouse at the very top-left corner of a monitor to toggle the overview.
+Put your mouse at the very top-left corner of a monitor to toggle the overview, or at the bottom-left corner to toggle the grid overview.
 Also works during drag-and-dropping something.

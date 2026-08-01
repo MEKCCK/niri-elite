@@ -83,6 +83,8 @@ pub struct Config {
     pub blur: Blur,
     pub gestures: Gestures,
     pub overview: Overview,
+    pub grid_overview: GridOverview,
+    pub magnifier: Magnifier,
     pub environment: Environment,
     pub xwayland_satellite: XwaylandSatellite,
     pub window_rules: Vec<WindowRule>,
@@ -200,6 +202,8 @@ where
                 "blur" => m_merge!(blur),
                 "gestures" => m_merge!(gestures),
                 "overview" => m_merge!(overview),
+                "grid-overview" => m_merge!(grid_overview),
+                "magnifier" => m_merge!(magnifier),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
@@ -648,6 +652,59 @@ mod tests {
         assert_eq!(config.input.keyboard.repeat_rate, 25);
     }
 
+    #[test]
+    fn grid_overview_padding_parses_uniform_value() {
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                padding 42
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.grid_overview.padding.left, 42.);
+        assert_eq!(config.grid_overview.padding.right, 42.);
+        assert_eq!(config.grid_overview.padding.top, 42.);
+        assert_eq!(config.grid_overview.padding.bottom, 42.);
+    }
+
+    #[test]
+    fn grid_overview_padding_parses_per_edge_values() {
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                padding {
+                    left 1
+                    right 2
+                    top 3
+                    bottom 4
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.grid_overview.padding.left, 1.);
+        assert_eq!(config.grid_overview.padding.right, 2.);
+        assert_eq!(config.grid_overview.padding.top, 3.);
+        assert_eq!(config.grid_overview.padding.bottom, 4.);
+    }
+
+    #[test]
+    fn grid_overview_grid_all_monitors_parses() {
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                grid-all-monitors false
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert!(!config.grid_overview.grid_all_monitors);
+    }
+
     #[track_caller]
     fn do_parse(text: &str) -> Config {
         Config::parse_mem(text)
@@ -888,6 +945,7 @@ mod tests {
                 open-fullscreen false
                 open-floating false
                 open-focused true
+                ignore-grid-overview true
                 default-window-height { fixed 500; }
                 default-column-display "tabbed"
                 default-floating-position x=100 y=-200 relative-to="bottom-left"
@@ -1197,10 +1255,18 @@ mod tests {
                         hot_corners: Some(
                             HotCorners {
                                 off: true,
-                                top_left: true,
-                                top_right: true,
-                                bottom_left: true,
-                                bottom_right: true,
+                                top_left: Some(
+                                    Overview,
+                                ),
+                                top_right: Some(
+                                    Overview,
+                                ),
+                                bottom_left: Some(
+                                    Overview,
+                                ),
+                                bottom_right: Some(
+                                    Overview,
+                                ),
                             },
                         ),
                         layout: None,
@@ -1490,6 +1556,16 @@ mod tests {
                 hide_after_inactive_ms: Some(
                     3000,
                 ),
+                shake_to_enlarge: Some(
+                    ShakeToEnlarge {
+                        off: false,
+                        zoom_factor: 5.0,
+                        hold_duration_ms: 1500,
+                        threshold: 2000.0,
+                        grow: false,
+                        grow_speed: 0.01,
+                    },
+                ),
             },
             screenshot_path: ScreenshotPath(
                 Some(
@@ -1633,6 +1709,30 @@ mod tests {
                         ),
                     },
                 ),
+                grid_overview_open_close: GridOverviewOpenCloseAnim(
+                    Animation {
+                        off: false,
+                        kind: Spring(
+                            SpringParams {
+                                damping_ratio: 1.0,
+                                stiffness: 800,
+                                epsilon: 0.0001,
+                            },
+                        ),
+                    },
+                ),
+                magnifier: MagnifierAnim(
+                    Animation {
+                        off: false,
+                        kind: Spring(
+                            SpringParams {
+                                damping_ratio: 1.0,
+                                stiffness: 800,
+                                epsilon: 0.0001,
+                            },
+                        ),
+                    },
+                ),
                 recent_windows_close: RecentWindowsCloseAnim(
                     Animation {
                         off: true,
@@ -1641,6 +1741,18 @@ mod tests {
                                 damping_ratio: 1.0,
                                 stiffness: 800,
                                 epsilon: 0.001,
+                            },
+                        ),
+                    },
+                ),
+                cursor_enlarge: CursorEnlargeAnim(
+                    Animation {
+                        off: false,
+                        kind: Spring(
+                            SpringParams {
+                                damping_ratio: 0.82,
+                                stiffness: 400,
+                                epsilon: 0.0001,
                             },
                         ),
                     },
@@ -1666,10 +1778,10 @@ mod tests {
                 },
                 hot_corners: HotCorners {
                     off: false,
-                    top_left: false,
-                    top_right: false,
-                    bottom_left: false,
-                    bottom_right: false,
+                    top_left: None,
+                    top_right: None,
+                    bottom_left: None,
+                    bottom_right: None,
                 },
             },
             overview: Overview {
@@ -1699,6 +1811,24 @@ mod tests {
                         a: 0.3137255,
                     },
                 },
+            },
+            grid_overview: GridOverview {
+                gap: 16.0,
+                padding: GridOverviewPadding {
+                    left: 80.0,
+                    right: 80.0,
+                    top: 80.0,
+                    bottom: 80.0,
+                },
+                min_scale: 0.08,
+                focused_column_scale: 1.04,
+                grid_all_monitors: true,
+            },
+            magnifier: Magnifier {
+                off: false,
+                zoom_factor: 2.0,
+                track_cursor: true,
+                scale_cursor: true,
             },
             environment: Environment(
                 [
@@ -1882,6 +2012,9 @@ mod tests {
                     ),
                     scroll_factor: None,
                     tiled_state: None,
+                    ignore_grid_overview: Some(
+                        true,
+                    ),
                     background_effect: BackgroundEffectRule {
                         xray: None,
                         blur: None,

@@ -39,6 +39,7 @@ use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerCons
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 use touch_overview_grab::TouchOverviewGrab;
 
+use self::magnifier_center_grab::MagnifierCenterGrab;
 use self::move_grab::MoveGrab;
 use self::pick_color_grab::PickColorGrab;
 use self::pick_window_grab::PickWindowGrab;
@@ -48,13 +49,14 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
-use crate::niri::{CastTarget, PointerVisibility, State};
+use crate::niri::{CastTarget, KeyboardFocus, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
 use crate::utils::{center, get_monotonic_time, CastSessionId, ResizeEdge};
 
 pub mod backend_ext;
+pub mod magnifier_center_grab;
 pub mod move_grab;
 pub mod pick_color_grab;
 pub mod pick_window_grab;
@@ -73,6 +75,12 @@ pub const DOUBLE_CLICK_TIME: Duration = Duration::from_millis(400);
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TabletData {
     pub aspect_ratio: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingModifierBind {
+    pub key_code: Keycode,
+    pub bind: Bind,
 }
 
 pub enum PointerOrTouchStartData<D: SeatHandler> {
@@ -146,6 +154,11 @@ impl State {
 
         let hide_exit_confirm_dialog =
             self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
+
+        if should_cancel_pending_modifier_bind(&event) {
+            self.niri.pending_modifier_bind = None;
+            self.niri.pending_default_mod_tap = None;
+        }
 
         let mut consumed_by_a11y = false;
         use InputEvent::*;
@@ -444,7 +457,7 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let Some(Some(bind)) = self.niri.seat.get_keyboard().unwrap().input(
+        let maybe_bind = self.niri.seat.get_keyboard().unwrap().input(
             self,
             event.key_code(),
             event.state(),
@@ -455,6 +468,20 @@ impl State {
                 let modified = keysym.modified_sym();
                 let raw = keysym.raw_latin_sym_or_raw_current_sym();
                 let modifiers = modifiers_from_state(*mods);
+
+                if pressed {
+                    cancel_pending_modifier_bind_for_key(
+                        &mut this.niri.pending_modifier_bind,
+                        key_code,
+                    );
+                    if this
+                        .niri
+                        .pending_default_mod_tap
+                        .is_some_and(|pending| pending != key_code)
+                    {
+                        this.niri.pending_default_mod_tap = None;
+                    }
+                }
 
                 // After updating XKB state from accessibility-grabbed keys, return right away and
                 // don't handle them.
@@ -494,6 +521,59 @@ impl State {
                     }
                 }
 
+                if let Some(raw) = raw {
+                    if pressed && modifier_from_keysym(raw).is_some() {
+                        let config = this.niri.config.borrow();
+                        let bindings =
+                            make_binds_iter(&config, &mut this.niri.window_mru_ui, modifiers)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                        maybe_start_pending_modifier_bind(
+                            &mut this.niri.pending_modifier_bind,
+                            bindings.iter(),
+                            mod_key,
+                            key_code,
+                            raw,
+                            *mods,
+                            &this.niri.screenshot_ui,
+                            is_inhibiting_shortcuts,
+                        );
+
+                        // If no config bind was found for this modifier tap, and this is the
+                        // mod key, track it as a potential default mod tap (for grid-overview).
+                        if this.niri.pending_modifier_bind.is_none()
+                            && modifier_from_keysym(raw) == Some(mod_key.to_modifiers())
+                            && config.grid_overview.default_mod_action
+                            && !this.niri.screenshot_ui.is_open()
+                            && !is_inhibiting_shortcuts
+                        {
+                            this.niri.pending_default_mod_tap = Some(key_code);
+                        }
+                    } else if !pressed
+                        && this
+                            .niri
+                            .pending_modifier_bind
+                            .as_ref()
+                            .is_some_and(|pending| pending.key_code == key_code)
+                    {
+                        finish_pending_modifier_bind(
+                            &mut this.niri.pending_modifier_bind,
+                            &mut this.niri.completed_modifier_bind,
+                            key_code,
+                            is_inhibiting_shortcuts,
+                        );
+                    } else if !pressed
+                        && this
+                            .niri
+                            .pending_default_mod_tap
+                            .is_some_and(|pending_key| pending_key == key_code)
+                    {
+                        this.niri.pending_default_mod_tap = None;
+                        this.do_action(Action::ToggleGridOverview, false);
+                        return FilterResult::Intercept(None);
+                    }
+                }
+
                 if this.niri.exit_confirm_dialog.is_open() && pressed {
                     if raw == Some(Keysym::Return) {
                         info!("quitting after confirming exit dialog");
@@ -517,7 +597,18 @@ impl State {
                     }
                 }
 
+                let is_grid_overview_open = this.niri.layout.is_grid_overview_open();
+
                 if pressed && raw == Some(Keysym::Escape) {
+                    // Close grid overview on Escape.
+                    if grid_should_close_on_escape(is_grid_overview_open, &this.niri.keyboard_focus)
+                    {
+                        this.niri.layout.close_grid_overview();
+                        this.niri.suppressed_keys.insert(key_code);
+                        this.niri.queue_redraw_all();
+                        return FilterResult::Intercept(None);
+                    }
+
                     // Cancel certain grabs on Escape.
                     let pointer = this.niri.seat.get_pointer().unwrap();
                     if pointer
@@ -526,6 +617,19 @@ impl State {
                     {
                         pointer.unset_grab(this, serial, time);
                         this.niri.suppressed_keys.insert(key_code);
+                        return FilterResult::Intercept(None);
+                    }
+                }
+
+                if pressed && raw == Some(Keysym::Return) {
+                    if grid_should_confirm_on_return(
+                        is_grid_overview_open,
+                        &this.niri.keyboard_focus,
+                        this.niri.layout.grid_focused_window_id().is_some(),
+                    ) {
+                        this.niri.layout.confirm_grid_selection();
+                        this.niri.suppressed_keys.insert(key_code);
+                        this.niri.queue_redraw_all();
                         return FilterResult::Intercept(None);
                     }
                 }
@@ -556,9 +660,17 @@ impl State {
 
                 if matches!(res, FilterResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
-                    if this.niri.keyboard_focus.is_overview() && pressed {
-                        if let Some(bind) = raw.and_then(|raw| hardcoded_overview_bind(raw, *mods))
-                        {
+                    if pressed {
+                        let hardcoded_bind = raw.and_then(|raw| {
+                            hardcoded_grid_or_overview_bind(
+                                raw,
+                                *mods,
+                                is_grid_overview_open,
+                                &this.niri.keyboard_focus,
+                            )
+                        });
+
+                        if let Some(bind) = hardcoded_bind {
                             this.niri.suppressed_keys.insert(key_code);
                             return FilterResult::Intercept(Some(bind));
                         }
@@ -571,7 +683,14 @@ impl State {
 
                 res
             },
-        ) else {
+        );
+
+        if let Some(bind) = self.niri.completed_modifier_bind.take() {
+            self.handle_bind(bind);
+            return;
+        }
+
+        let Some(Some(bind)) = maybe_bind else {
             return;
         };
 
@@ -839,7 +958,9 @@ impl State {
                 let focus = self.niri.layout.focus().map(|m| m.window.clone());
                 if let Some(window) = focus {
                     self.niri.layout.toggle_fullscreen(&window);
-                    // FIXME: granular
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -848,7 +969,9 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_fullscreen(&window);
-                    // FIXME: granular
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -856,7 +979,9 @@ impl State {
                 let focus = self.niri.layout.focus().map(|m| m.window.clone());
                 if let Some(window) = focus {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
-                    // FIXME: granular
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -865,7 +990,9 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
-                    // FIXME: granular
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -1599,21 +1726,36 @@ impl State {
             }
             Action::SwitchPresetColumnWidth => {
                 self.niri.layout.toggle_width(true);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::SwitchPresetColumnWidthBack => {
                 self.niri.layout.toggle_width(false);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::SwitchPresetWindowWidth => {
                 self.niri.layout.toggle_window_width(None, true);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::SwitchPresetWindowWidthBack => {
                 self.niri.layout.toggle_window_width(None, false);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::SwitchPresetWindowWidthById(id) => {
                 let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), true);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SwitchPresetWindowWidthBackById(id) => {
@@ -1621,10 +1763,16 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), false);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SwitchPresetWindowHeight => {
                 self.niri.layout.toggle_window_height(None, true);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::SwitchPresetWindowHeightBack => {
                 self.niri.layout.toggle_window_height(None, false);
@@ -1669,12 +1817,17 @@ impl State {
             }
             Action::MaximizeColumn => {
                 self.niri.layout.toggle_full_width();
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::MaximizeWindowToEdges => {
                 let focus = self.niri.layout.focus().map(|m| m.window.clone());
                 if let Some(window) = focus {
                     self.niri.layout.toggle_maximized(&window);
-                    // FIXME: granular
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -1992,21 +2145,23 @@ impl State {
             Action::SetColumnWidth(change) => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.set_width(change);
-
-                    // FIXME: granular
                     self.niri.queue_redraw_all();
                 } else {
                     self.niri.layout.set_column_width(change);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SetWindowWidth(change) => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.set_width(change);
-
-                    // FIXME: granular
                     self.niri.queue_redraw_all();
                 } else {
                     self.niri.layout.set_window_width(None, change);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SetWindowWidthById { id, change } => {
@@ -2014,16 +2169,20 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_width(Some(&window), change);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SetWindowHeight(change) => {
                 if self.niri.screenshot_ui.is_open() {
                     self.niri.screenshot_ui.set_height(change);
-
-                    // FIXME: granular
                     self.niri.queue_redraw_all();
                 } else {
                     self.niri.layout.set_window_height(None, change);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::SetWindowHeightById { id, change } => {
@@ -2031,20 +2190,32 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_height(Some(&window), change);
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::ResetWindowHeight => {
                 self.niri.layout.reset_window_height(None);
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::ResetWindowHeightById(id) => {
                 let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.reset_window_height(Some(&window));
+                    if self.niri.layout.is_grid_overview_open() {
+                        self.niri.layout.confirm_grid_selection();
+                    }
                 }
             }
             Action::ExpandColumnToAvailableWidth => {
                 self.niri.layout.expand_column_to_available_width();
+                if self.niri.layout.is_grid_overview_open() {
+                    self.niri.layout.confirm_grid_selection();
+                }
             }
             Action::ShowHotkeyOverlay => {
                 if self.niri.hotkey_overlay.show() {
@@ -2271,9 +2442,30 @@ impl State {
             Action::StopCast(session_id) => {
                 self.niri.stop_cast(CastSessionId::from(session_id));
             }
+            Action::ToggleMagnifier => {
+                self.niri.toggle_magnifier();
+                self.niri.queue_redraw_all();
+            }
+            Action::AdjustMagnifierZoom(delta) => {
+                self.niri.adjust_magnifier_zoom(delta);
+            }
             Action::ToggleOverview => {
                 self.niri.layout.toggle_overview();
                 self.niri.queue_redraw_all();
+            }
+            Action::ToggleGridOverview => {
+                self.niri.layout.toggle_grid_overview();
+                self.niri.queue_redraw_all();
+            }
+            Action::OpenGridOverview => {
+                if self.niri.layout.open_grid_overview() {
+                    self.niri.queue_redraw_all();
+                }
+            }
+            Action::CloseGridOverview => {
+                if self.niri.layout.close_grid_overview() {
+                    self.niri.queue_redraw_all();
+                }
             }
             Action::OpenOverview => {
                 if self.niri.layout.open_overview() {
@@ -2427,8 +2619,9 @@ impl State {
 
         let pos = pointer.current_location();
 
-        // We have an output, so we can compute the new location and focus.
         let mut new_pos = pos + event.delta();
+
+        self.niri.pointer_motion_absolute_shake(new_pos);
 
         // We received an event for the regular pointer, so show it now.
         self.niri.pointer_visibility = PointerVisibility::Visible;
@@ -2625,13 +2818,16 @@ impl State {
 
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
+        if let Some(action) = under
+            .hot_corner
+            .filter(|_| pointer.current_focus().is_none())
+        {
             if !was_inside_hot_corner
                 && pointer
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.layout.toggle_overview();
+                self.niri.trigger_hot_corner(action);
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -2679,6 +2875,8 @@ impl State {
 
         let pointer = self.niri.seat.get_pointer().unwrap();
 
+        self.niri.pointer_motion_absolute_shake(pos);
+
         if let Some(output) = self.niri.screenshot_ui.selection_output() {
             let geom = self.niri.global_space.output_geometry(output).unwrap();
             let point = (pos - geom.loc.to_f64())
@@ -2716,13 +2914,16 @@ impl State {
 
         // contents_under() will return no surface when the hot corner should trigger, so
         // pointer.motion() will set the current focus to None.
-        if under.hot_corner && pointer.current_focus().is_none() {
+        if let Some(action) = under
+            .hot_corner
+            .filter(|_| pointer.current_focus().is_none())
+        {
             if !was_inside_hot_corner
                 && pointer
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.layout.toggle_overview();
+                self.niri.trigger_hot_corner(action);
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -2829,6 +3030,24 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
+            let is_grid_overview_open = self.niri.layout.is_grid_overview_open();
+
+            let magnifier_can_drag = self.niri.can_drag_magnifier_center();
+
+            if should_close_window_on_middle_click(
+                button,
+                is_grid_overview_open,
+                is_overview_open,
+                pointer.is_grabbed(),
+                mod_down,
+                magnifier_can_drag,
+            ) {
+                if let Some(mapped) = self.niri.window_under_cursor() {
+                    mapped.toplevel().send_close();
+                    self.niri.suppressed_buttons.insert(button_code);
+                    return;
+                }
+            }
 
             if is_overview_open && !pointer.is_grabbed() && button == Some(MouseButton::Right) {
                 if let Some((output, ws)) = self.niri.workspace_under_cursor(true) {
@@ -2854,6 +3073,29 @@ impl State {
 
                     // FIXME: granular.
                     self.niri.queue_redraw_all();
+                    return;
+                }
+            }
+
+            if button == Some(MouseButton::Middle)
+                && !pointer.is_grabbed()
+                && !mod_down
+                && magnifier_can_drag
+            {
+                let location = pointer.current_location();
+                if let Some((output, start_center)) =
+                    self.niri.begin_magnifier_center_drag(location)
+                {
+                    let start_data = PointerGrabStartData {
+                        focus: None,
+                        button: button_code,
+                        location,
+                    };
+                    let grab = MagnifierCenterGrab::new(start_data, output, start_center);
+                    pointer.set_grab(self, grab, serial, Focus::Clear);
+                    self.niri
+                        .cursor_manager
+                        .set_cursor_image(CursorImageStatus::Named(CursorIcon::AllScroll));
                     return;
                 }
             }
@@ -2898,6 +3140,44 @@ impl State {
 
             if let Some(mapped) = self.niri.window_under_cursor() {
                 let window = mapped.window.clone();
+
+                // In grid overview, left-click can either confirm on release or start a move.
+                if self.niri.layout.window_is_in_open_grid_overview(&window)
+                    && button == Some(MouseButton::Left)
+                    && !pointer.is_grabbed()
+                {
+                    let location = pointer.current_location();
+                    let start_data = PointerGrabStartData {
+                        focus: None,
+                        button: button_code,
+                        location,
+                    };
+                    let start_data = PointerOrTouchStartData::Pointer(start_data);
+                    let icon = CursorIcon::Grabbing;
+                    if let Some(grab) =
+                        MoveGrab::new(self, start_data, window.clone(), false, Some(icon))
+                    {
+                        pointer.set_grab(self, grab, serial, Focus::Clear);
+                        self.niri
+                            .cursor_manager
+                            .set_cursor_image(CursorImageStatus::Named(icon));
+
+                        // Notify smithay about the button press so that pressed_buttons is
+                        // updated, allowing the grab to correctly detect when the initiating
+                        // button is released.
+                        pointer.button(
+                            self,
+                            &ButtonEvent {
+                                button: button_code,
+                                state: button_state,
+                                serial,
+                                time: event.time_msec(),
+                            },
+                        );
+                        pointer.frame(self);
+                    }
+                    return;
+                }
 
                 // Check if we need to start an interactive move.
                 if button == Some(MouseButton::Left) && !pointer.is_grabbed() {
@@ -3007,6 +3287,27 @@ impl State {
 
                 // FIXME: granular.
                 self.niri.queue_redraw_all();
+            } else if !is_overview_open
+                && self.niri.layout.is_grid_overview_open()
+                && button == Some(MouseButton::Left)
+                && !pointer.is_grabbed()
+                && !self.niri.screenshot_ui.is_open()
+            {
+                let output_under_cursor = self.niri.output_under_cursor();
+                let active_output = self.niri.layout.active_output().cloned();
+                if let Some(output) =
+                    output_under_cursor.filter(|output| active_output.as_ref() != Some(output))
+                {
+                    self.niri.layout.focus_output(&output);
+                    self.niri.queue_redraw_all();
+                } else {
+                    let location = pointer.current_location();
+                    let over_layer_shell = self.niri.contents_under(location).layer.is_some();
+                    if !over_layer_shell {
+                        self.niri.layout.close_grid_overview();
+                        self.niri.queue_redraw_all();
+                    }
+                }
             } else if let Some((output, ws)) = is_overview_open
                 .then(|| self.niri.workspace_under_cursor(false))
                 .flatten()
@@ -3037,12 +3338,7 @@ impl State {
             if button_state == ButtonState::Pressed {
                 let pos = pointer.current_location();
 
-                // If we'll be moving the existing selection, use the selection output.
-                let output = if mod_down {
-                    self.niri.screenshot_ui.selection_output()
-                } else {
-                    self.niri.output_under(pos).map(|(out, _)| out)
-                };
+                let output = self.niri.output_under(pos).map(|(out, _)| out);
 
                 if let Some(output) = output.cloned() {
                     let geom = self.niri.global_space.output_geometry(&output).unwrap();
@@ -3050,11 +3346,7 @@ impl State {
                         .to_physical(output.current_scale().fractional_scale())
                         .to_i32_round();
 
-                    if self
-                        .niri
-                        .screenshot_ui
-                        .pointer_down(output, point, None, mod_down)
-                    {
+                    if self.niri.screenshot_ui.pointer_down(output, point, None) {
                         self.niri.queue_redraw_all();
                     }
                 }
@@ -3127,9 +3419,19 @@ impl State {
             // Wayland. If there's no bind, reset the accumulator.
             let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
             let modifiers = modifiers_from_state(mods);
+            let has_wheel_binds = self.niri.mods_with_wheel_binds.contains(&modifiers);
+            let should_handle_grid_workspace_scroll = grid_should_handle_workspace_wheel(
+                self.niri.layout.is_grid_overview_open(),
+                is_overview_open,
+                is_mru_open,
+                self.niri.screenshot_ui.is_open(),
+                modifiers,
+                has_wheel_binds,
+            );
             let should_handle = should_handle_in_overview
                 || is_mru_open
-                || self.niri.mods_with_wheel_binds.contains(&modifiers);
+                || has_wheel_binds
+                || should_handle_grid_workspace_scroll;
             if should_handle {
                 let horizontal = horizontal_amount_v120.unwrap_or(0.);
                 let ticks = self.niri.horizontal_wheel_tracker.accumulate(horizontal);
@@ -3205,6 +3507,32 @@ impl State {
                 if ticks != 0 {
                     let (bind_up, bind_down) = if should_handle_in_overview && modifiers.is_empty()
                     {
+                        let bind_up = Some(Bind {
+                            key: Key {
+                                trigger: Trigger::WheelScrollUp,
+                                modifiers: Modifiers::empty(),
+                            },
+                            action: Action::FocusWorkspaceUpUnderMouse,
+                            repeat: true,
+                            cooldown: Some(Duration::from_millis(50)),
+                            allow_when_locked: false,
+                            allow_inhibiting: false,
+                            hotkey_overlay_title: None,
+                        });
+                        let bind_down = Some(Bind {
+                            key: Key {
+                                trigger: Trigger::WheelScrollDown,
+                                modifiers: Modifiers::empty(),
+                            },
+                            action: Action::FocusWorkspaceDownUnderMouse,
+                            repeat: true,
+                            cooldown: Some(Duration::from_millis(50)),
+                            allow_when_locked: false,
+                            allow_inhibiting: false,
+                            hotkey_overlay_title: None,
+                        });
+                        (bind_up, bind_down)
+                    } else if should_handle_grid_workspace_scroll {
                         let bind_up = Some(Bind {
                             key: Key {
                                 trigger: Trigger::WheelScrollUp,
@@ -3404,7 +3732,10 @@ impl State {
                 }
             }
 
-            if is_mru_open || self.niri.mods_with_finger_scroll_binds.contains(&modifiers) {
+            if is_mru_open
+                || self.niri.mods_with_finger_scroll_binds.contains(&modifiers)
+                || self.niri.mods_with_wheel_binds.contains(&modifiers)
+            {
                 let ticks = self
                     .niri
                     .horizontal_finger_scroll_tracker
@@ -3419,16 +3750,37 @@ impl State {
                         Trigger::TouchpadScrollLeft,
                         mods,
                     )
+                    .or_else(|| {
+                        find_configured_bind(
+                            bindings.clone(),
+                            mod_key,
+                            Trigger::WheelScrollLeft,
+                            mods,
+                        )
+                    })
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
                             || allowed_during_screenshot(&bind.action)
                     });
-                    let bind_right =
-                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollRight, mods)
-                            .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(&bind.action)
-                            });
+                    let bind_right = find_configured_bind(
+                        bindings.clone(),
+                        mod_key,
+                        Trigger::TouchpadScrollRight,
+                        mods,
+                    )
+                    .or_else(|| {
+                        find_configured_bind(
+                            bindings.clone(),
+                            mod_key,
+                            Trigger::WheelScrollRight,
+                            mods,
+                        )
+                    })
+                    .filter(|bind| {
+                        !self.niri.screenshot_ui.is_open()
+                            || allowed_during_screenshot(&bind.action)
+                    });
+                    drop(bindings);
                     drop(config);
 
                     if let Some(right) = bind_right {
@@ -3457,16 +3809,37 @@ impl State {
                         Trigger::TouchpadScrollUp,
                         mods,
                     )
+                    .or_else(|| {
+                        find_configured_bind(
+                            bindings.clone(),
+                            mod_key,
+                            Trigger::WheelScrollUp,
+                            mods,
+                        )
+                    })
                     .filter(|bind| {
                         !self.niri.screenshot_ui.is_open()
                             || allowed_during_screenshot(&bind.action)
                     });
-                    let bind_down =
-                        find_configured_bind(bindings, mod_key, Trigger::TouchpadScrollDown, mods)
-                            .filter(|bind| {
-                                !self.niri.screenshot_ui.is_open()
-                                    || allowed_during_screenshot(&bind.action)
-                            });
+                    let bind_down = find_configured_bind(
+                        bindings.clone(),
+                        mod_key,
+                        Trigger::TouchpadScrollDown,
+                        mods,
+                    )
+                    .or_else(|| {
+                        find_configured_bind(
+                            bindings.clone(),
+                            mod_key,
+                            Trigger::WheelScrollDown,
+                            mods,
+                        )
+                    })
+                    .filter(|bind| {
+                        !self.niri.screenshot_ui.is_open()
+                            || allowed_during_screenshot(&bind.action)
+                    });
+                    drop(bindings);
                     drop(config);
 
                     if let Some(down) = bind_down {
@@ -3646,17 +4019,7 @@ impl State {
                     let under = self.niri.contents_under(pos);
 
                     if self.niri.screenshot_ui.is_open() {
-                        let mod_key = self.backend.mod_key(&self.niri.config.borrow());
-                        let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
-                        let modifiers = modifiers_from_state(mods);
-                        let mod_down = modifiers.contains(mod_key.to_modifiers());
-
-                        // If we'll be moving the existing selection, use the selection output.
-                        let output = if mod_down {
-                            self.niri.screenshot_ui.selection_output()
-                        } else {
-                            under.output.as_ref()
-                        };
+                        let output = under.output.as_ref();
 
                         if let Some(output) = output.cloned() {
                             let geom = self.niri.global_space.output_geometry(&output).unwrap();
@@ -3664,11 +4027,7 @@ impl State {
                                 .to_physical(output.current_scale().fractional_scale())
                                 .to_i32_round();
 
-                            if self
-                                .niri
-                                .screenshot_ui
-                                .pointer_down(output, point, None, mod_down)
-                            {
+                            if self.niri.screenshot_ui.pointer_down(output, point, None) {
                                 self.niri.queue_redraw_all();
                             }
                         }
@@ -4177,12 +4536,7 @@ impl State {
         let mod_down = mods.contains(mod_key.to_modifiers());
 
         if self.niri.screenshot_ui.is_open() {
-            // If we'll be moving the existing selection, use the selection output.
-            let output = if mod_down {
-                self.niri.screenshot_ui.selection_output()
-            } else {
-                under.output.as_ref()
-            };
+            let output = under.output.as_ref();
 
             if let Some(output) = output.cloned() {
                 let geom = self.niri.global_space.output_geometry(&output).unwrap();
@@ -4193,7 +4547,7 @@ impl State {
                 if self
                     .niri
                     .screenshot_ui
-                    .pointer_down(output, point, Some(slot), mod_down)
+                    .pointer_down(output, point, Some(slot))
                 {
                     self.niri.queue_redraw_all();
                 }
@@ -4398,7 +4752,10 @@ impl State {
     fn grab_can_be_cancelled_with_esc(grab: &(dyn PointerGrab<State> + 'static)) -> bool {
         let grab = grab.as_any();
 
-        grab.is::<PickWindowGrab>() || grab.is::<PickColorGrab>() || Self::is_dnd_grab(grab)
+        grab.is::<PickWindowGrab>()
+            || grab.is::<PickColorGrab>()
+            || grab.is::<MagnifierCenterGrab>()
+            || Self::is_dnd_grab(grab)
     }
 }
 
@@ -4570,6 +4927,128 @@ fn find_configured_bind<'a>(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
+fn maybe_start_pending_modifier_bind<'a>(
+    pending_modifier_bind: &mut Option<PendingModifierBind>,
+    bindings: impl IntoIterator<Item = &'a Bind>,
+    mod_key: ModKey,
+    key_code: Keycode,
+    raw: Keysym,
+    mods: ModifiersState,
+    screenshot_ui: &ScreenshotUi,
+    is_inhibiting_shortcuts: bool,
+) {
+    let Some(modifier) = modifier_from_keysym(raw) else {
+        return;
+    };
+
+    let Some(bind) = find_standalone_modifier_bind(bindings, mod_key, modifier, mods) else {
+        return;
+    };
+
+    if screenshot_ui.is_open() && !allowed_during_screenshot(&bind.action) {
+        return;
+    }
+
+    if is_inhibiting_shortcuts && bind.allow_inhibiting {
+        return;
+    }
+
+    *pending_modifier_bind = Some(PendingModifierBind { key_code, bind });
+}
+
+fn finish_pending_modifier_bind(
+    pending_modifier_bind: &mut Option<PendingModifierBind>,
+    completed_modifier_bind: &mut Option<Bind>,
+    key_code: Keycode,
+    is_inhibiting_shortcuts: bool,
+) {
+    let Some(pending) = pending_modifier_bind.take() else {
+        return;
+    };
+
+    if pending.key_code != key_code {
+        *pending_modifier_bind = Some(pending);
+        return;
+    }
+
+    if is_inhibiting_shortcuts && pending.bind.allow_inhibiting {
+        return;
+    }
+
+    *completed_modifier_bind = Some(pending.bind);
+}
+
+fn cancel_pending_modifier_bind_for_key(
+    pending_modifier_bind: &mut Option<PendingModifierBind>,
+    key_code: Keycode,
+) {
+    if pending_modifier_bind
+        .as_ref()
+        .is_some_and(|pending| pending.key_code != key_code)
+    {
+        *pending_modifier_bind = None;
+    }
+}
+
+fn find_standalone_modifier_bind<'a>(
+    bindings: impl IntoIterator<Item = &'a Bind>,
+    mod_key: ModKey,
+    modifier: Modifiers,
+    mods: ModifiersState,
+) -> Option<Bind> {
+    let mut modifiers = modifiers_from_state(mods);
+    modifiers.remove(modifier);
+
+    let compositor_modifier = mod_key.to_modifiers();
+    if modifiers.contains(compositor_modifier) {
+        modifiers |= Modifiers::COMPOSITOR;
+    }
+
+    for bind in bindings {
+        let Trigger::Modifier(trigger) = bind.key.trigger else {
+            continue;
+        };
+        if !modifier_trigger_matches(trigger, mod_key, modifier) {
+            continue;
+        }
+
+        let mut bind_modifiers = bind.key.modifiers;
+        if bind_modifiers.contains(Modifiers::COMPOSITOR) {
+            bind_modifiers |= compositor_modifier;
+        } else if bind_modifiers.contains(compositor_modifier) {
+            bind_modifiers |= Modifiers::COMPOSITOR;
+        }
+
+        if bind_modifiers == modifiers {
+            return Some(bind.clone());
+        }
+    }
+
+    None
+}
+
+fn modifier_trigger_matches(trigger: Modifiers, mod_key: ModKey, modifier: Modifiers) -> bool {
+    if trigger == Modifiers::COMPOSITOR {
+        modifier == mod_key.to_modifiers()
+    } else {
+        trigger == modifier
+    }
+}
+
+fn modifier_from_keysym(keysym: Keysym) -> Option<Modifiers> {
+    #[allow(non_upper_case_globals)]
+    match keysym.raw() {
+        keysyms::KEY_Shift_L | keysyms::KEY_Shift_R => Some(Modifiers::SHIFT),
+        keysyms::KEY_Control_L | keysyms::KEY_Control_R => Some(Modifiers::CTRL),
+        keysyms::KEY_Alt_L | keysyms::KEY_Alt_R => Some(Modifiers::ALT),
+        keysyms::KEY_Super_L | keysyms::KEY_Super_R => Some(Modifiers::SUPER),
+        keysyms::KEY_ISO_Level3_Shift => Some(Modifiers::ISO_LEVEL3_SHIFT),
+        keysyms::KEY_ISO_Level5_Shift => Some(Modifiers::ISO_LEVEL5_SHIFT),
+        _ => None,
+    }
+}
+
 fn find_configured_switch_action(
     bindings: &SwitchBinds,
     switch: Switch,
@@ -4661,6 +5140,23 @@ fn should_hide_exit_confirm_dialog<I: InputBackend>(event: &InputEvent<I>) -> bo
     }
 }
 
+fn should_cancel_pending_modifier_bind<I: InputBackend>(event: &InputEvent<I>) -> bool {
+    match event {
+        InputEvent::PointerButton { event } => event.state() == ButtonState::Pressed,
+        InputEvent::PointerAxis { .. }
+        | InputEvent::GestureSwipeBegin { .. }
+        | InputEvent::GesturePinchBegin { .. }
+        | InputEvent::GestureHoldBegin { .. }
+        | InputEvent::TouchDown { .. }
+        | InputEvent::TouchMotion { .. }
+        | InputEvent::TouchUp { .. }
+        | InputEvent::TouchCancel { .. }
+        | InputEvent::TabletToolButton { .. } => true,
+        InputEvent::TabletToolTip { event } => event.tip_state() == TabletToolTipState::Down,
+        _ => false,
+    }
+}
+
 fn should_notify_activity<I: InputBackend>(event: &InputEvent<I>) -> bool {
     !matches!(
         event,
@@ -4706,6 +5202,9 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             // Intended for binds such as volume up/down, lock the screen, etc.
             | Action::Spawn(_)
             | Action::SpawnSh(_)
+            // Magnifier can be toggled and adjusted during screenshot.
+            | Action::ToggleMagnifier
+            | Action::AdjustMagnifierZoom(_)
             // The screenshot UI can handle these.
             | Action::MoveColumnLeft
             | Action::MoveColumnLeftOrToMonitorLeft
@@ -4735,6 +5234,74 @@ fn allowed_during_screenshot(action: &Action) -> bool {
     )
 }
 
+fn grid_should_close_on_escape(
+    is_grid_overview_open: bool,
+    keyboard_focus: &KeyboardFocus,
+) -> bool {
+    is_grid_overview_open && keyboard_focus.is_layout()
+}
+
+fn grid_should_confirm_on_return(
+    is_grid_overview_open: bool,
+    keyboard_focus: &KeyboardFocus,
+    has_grid_focus: bool,
+) -> bool {
+    is_grid_overview_open
+        && has_grid_focus
+        && (keyboard_focus.is_layout() || keyboard_focus.is_overview())
+}
+
+fn grid_should_handle_workspace_wheel(
+    is_grid_overview_open: bool,
+    is_overview_open: bool,
+    is_mru_open: bool,
+    is_screenshot_open: bool,
+    modifiers: Modifiers,
+    has_wheel_binds: bool,
+) -> bool {
+    is_grid_overview_open
+        && !is_overview_open
+        && !is_mru_open
+        && !is_screenshot_open
+        && modifiers.is_empty()
+        && !has_wheel_binds
+}
+
+fn should_close_window_on_middle_click(
+    button: Option<MouseButton>,
+    is_grid_overview_open: bool,
+    is_overview_open: bool,
+    pointer_is_grabbed: bool,
+    mod_down: bool,
+    magnifier_can_drag: bool,
+) -> bool {
+    button == Some(MouseButton::Middle)
+        && !pointer_is_grabbed
+        && !mod_down
+        && (is_grid_overview_open || is_overview_open)
+        && !magnifier_can_drag
+}
+
+fn hardcoded_grid_or_overview_bind(
+    raw: Keysym,
+    mods: ModifiersState,
+    is_grid_overview_open: bool,
+    keyboard_focus: &KeyboardFocus,
+) -> Option<Bind> {
+    if is_grid_overview_open && (keyboard_focus.is_layout() || keyboard_focus.is_overview()) {
+        let bind = hardcoded_grid_overview_bind(raw, mods);
+        if bind.is_none() && keyboard_focus.is_overview() {
+            hardcoded_overview_bind(raw, mods)
+        } else {
+            bind
+        }
+    } else if keyboard_focus.is_overview() {
+        hardcoded_overview_bind(raw, mods)
+    } else {
+        None
+    }
+}
+
 fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
     let mods = modifiers_from_state(mods);
     if !mods.is_empty() {
@@ -4751,6 +5318,10 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
         Keysym::Right => Action::FocusColumnRight,
         Keysym::Up => Action::FocusWindowOrWorkspaceUp,
         Keysym::Down => Action::FocusWindowOrWorkspaceDown,
+        Keysym::h => Action::FocusColumnLeft,
+        Keysym::l => Action::FocusColumnRight,
+        Keysym::k => Action::FocusWindowOrWorkspaceUp,
+        Keysym::j => Action::FocusWindowOrWorkspaceDown,
         _ => {
             return None;
         }
@@ -4766,6 +5337,34 @@ fn hardcoded_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
         cooldown: None,
         allow_when_locked: false,
         allow_inhibiting: false,
+        hotkey_overlay_title: None,
+    })
+}
+
+fn hardcoded_grid_overview_bind(raw: Keysym, mods: ModifiersState) -> Option<Bind> {
+    let mods = modifiers_from_state(mods);
+    if !mods.is_empty() {
+        return None;
+    }
+
+    let action = match raw {
+        Keysym::h => Action::FocusColumnLeft,
+        Keysym::l => Action::FocusColumnRight,
+        Keysym::k => Action::FocusWindowOrWorkspaceUp,
+        Keysym::j => Action::FocusWindowOrWorkspaceDown,
+        _ => return None,
+    };
+
+    Some(Bind {
+        key: Key {
+            trigger: Trigger::Keysym(raw),
+            modifiers: Modifiers::empty(),
+        },
+        action,
+        repeat: true,
+        cooldown: None,
+        allow_when_locked: false,
+        allow_inhibiting: true,
         hotkey_overlay_title: None,
     })
 }
@@ -5142,7 +5741,10 @@ fn grab_allows_hot_corner(grab: &(dyn PointerGrab<State> + 'static)) -> bool {
     // - DnDGrab allows hot corner to DnD across workspaces.
     // - ClickGrab keeps pointer focus on the window, so the hot corner doesn't trigger.
     // - Touch grabs: touch doesn't trigger the hot corner.
-    if grab.is::<ResizeGrab>() || grab.is::<SpatialMovementGrab>() {
+    if grab.is::<ResizeGrab>()
+        || grab.is::<SpatialMovementGrab>()
+        || grab.is::<MagnifierCenterGrab>()
+    {
         return false;
     }
 
@@ -5370,6 +5972,304 @@ mod tests {
         let filter = close_key_event(&mut suppressed_keys, mods, false);
         assert!(matches!(filter, FilterResult::Intercept(None)));
         assert!(suppressed_keys.is_empty());
+    }
+
+    #[test]
+    fn grid_return_confirm_handles_overview_focus() {
+        let layout_focus = KeyboardFocus::Layout { surface: None };
+
+        assert!(grid_should_confirm_on_return(true, &layout_focus, true));
+        assert!(grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Overview,
+            true
+        ));
+        assert!(!grid_should_confirm_on_return(
+            false,
+            &KeyboardFocus::Overview,
+            true
+        ));
+        assert!(!grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Overview,
+            false
+        ));
+        assert!(!grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Mru,
+            true
+        ));
+
+        assert!(grid_should_close_on_escape(true, &layout_focus));
+        assert!(!grid_should_close_on_escape(true, &KeyboardFocus::Overview));
+        assert!(!grid_should_close_on_escape(false, &layout_focus));
+    }
+
+    #[test]
+    fn grid_workspace_wheel_is_fallback_only() {
+        assert!(grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            false,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            true,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            Modifiers::SHIFT,
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            true,
+        ));
+    }
+
+    #[test]
+    fn grid_and_overview_hjkl_are_hardcoded_focus_binds() {
+        let no_mods = ModifiersState::default();
+        let with_mod = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let overview_focus = KeyboardFocus::Overview;
+
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::h, no_mods).map(|bind| bind.action),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::j, no_mods).map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::k, no_mods).map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::l, no_mods).map(|bind| bind.action),
+            Some(Action::FocusColumnRight)
+        ));
+        assert!(hardcoded_grid_overview_bind(Keysym::h, with_mod).is_none());
+
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::h, no_mods).map(|bind| bind.action),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::j, no_mods).map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::k, no_mods).map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::l, no_mods).map(|bind| bind.action),
+            Some(Action::FocusColumnRight)
+        ));
+        assert!(hardcoded_overview_bind(Keysym::h, with_mod).is_none());
+
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::j, no_mods, true, &overview_focus)
+                .map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::k, no_mods, true, &overview_focus)
+                .map(|bind| bind.action),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+    }
+
+    #[test]
+    fn grid_without_a_matching_bind_falls_back_to_overview() {
+        let no_mods = ModifiersState::default();
+        let overview_focus = KeyboardFocus::Overview;
+
+        for keysym in [Keysym::Return, Keysym::Escape] {
+            assert!(matches!(
+                hardcoded_grid_or_overview_bind(keysym, no_mods, true, &overview_focus)
+                    .map(|bind| bind.action),
+                Some(Action::ToggleOverview)
+            ));
+        }
+
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::Left, no_mods, true, &overview_focus)
+                .map(|bind| bind.action),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(hardcoded_grid_or_overview_bind(
+            Keysym::Return,
+            no_mods,
+            true,
+            &KeyboardFocus::Layout { surface: None },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn middle_click_close_is_limited_to_grid_and_overview() {
+        assert!(should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            false,
+            true,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            false,
+            true,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Left),
+            true,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn standalone_modifier_bind_forwarded_then_completed() {
+        let bind = Bind {
+            key: Key {
+                trigger: Trigger::Modifier(Modifiers::SUPER),
+                modifiers: Modifiers::empty(),
+            },
+            action: Action::CloseWindow,
+            repeat: true,
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: true,
+            hotkey_overlay_title: None,
+        };
+        let bindings = Binds(vec![bind.clone()]);
+
+        let mut pending_modifier_bind = None;
+        let mut completed_modifier_bind = None;
+        let mut suppressed_keys = HashSet::new();
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let key_code = Keycode::from(Keysym::Super_L.raw() + 8);
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+
+        maybe_start_pending_modifier_bind(
+            &mut pending_modifier_bind,
+            &bindings.0,
+            ModKey::Super,
+            key_code,
+            Keysym::Super_L,
+            mods,
+            &screenshot_ui,
+            false,
+        );
+
+        assert_eq!(
+            pending_modifier_bind,
+            Some(PendingModifierBind {
+                key_code,
+                bind: bind.clone(),
+            })
+        );
+
+        let filter = should_intercept_key(
+            &mut suppressed_keys,
+            &bindings.0,
+            ModKey::Super,
+            key_code,
+            Keysym::Super_L,
+            Some(Keysym::Super_L),
+            true,
+            mods,
+            &screenshot_ui,
+            false,
+            false,
+        );
+        assert!(matches!(filter, FilterResult::Forward));
+        assert!(suppressed_keys.is_empty());
+
+        finish_pending_modifier_bind(
+            &mut pending_modifier_bind,
+            &mut completed_modifier_bind,
+            key_code,
+            false,
+        );
+
+        let filter = should_intercept_key(
+            &mut suppressed_keys,
+            &bindings.0,
+            ModKey::Super,
+            key_code,
+            Keysym::Super_L,
+            Some(Keysym::Super_L),
+            false,
+            ModifiersState::default(),
+            &screenshot_ui,
+            false,
+            false,
+        );
+        assert!(matches!(filter, FilterResult::Forward));
+        assert!(suppressed_keys.is_empty());
+        assert!(pending_modifier_bind.is_none());
+        assert_eq!(completed_modifier_bind, Some(bind));
     }
 
     #[test]

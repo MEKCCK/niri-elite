@@ -9,6 +9,7 @@ use std::{env, io, process};
 
 use anyhow::Context;
 use async_channel::{Receiver, Sender, TrySendError};
+use base64::Engine as _;
 use calloop::futures::Scheduler;
 use calloop::io::Async;
 use directories::BaseDirs;
@@ -381,6 +382,10 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::Action(action) => {
             validate_action(&action)?;
 
+            if action_writes_screenshot_to_stdout(&action) {
+                return process_screenshot_stdout(ctx, action).await;
+            }
+
             let (tx, rx) = async_channel::bounded(1);
 
             let action = niri_config::Action::from(action);
@@ -458,6 +463,31 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
     };
 
     Ok(response)
+}
+
+async fn process_screenshot_stdout(ctx: &ClientCtx, action: Action) -> Reply {
+    let (tx, rx) = async_channel::bounded(1);
+
+    ctx.event_loop.insert_idle(move |state| {
+        state.screenshot_for_ipc_stdout(action, tx);
+    });
+
+    let png = rx
+        .recv()
+        .await
+        .map_err(|_| String::from("error taking screenshot"))??;
+    let png_base64 = base64::engine::general_purpose::STANDARD.encode(&*png);
+
+    Ok(Response::Screenshot { png_base64 })
+}
+
+fn action_writes_screenshot_to_stdout(action: &Action) -> bool {
+    matches!(
+        action,
+        Action::Screenshot { stdout: true, .. }
+            | Action::ScreenshotScreen { stdout: true, .. }
+            | Action::ScreenshotWindow { stdout: true, .. }
+    )
 }
 
 fn validate_action(action: &Action) -> Result<(), String> {
@@ -700,6 +730,13 @@ impl State {
 
         let mut batch_change_layouts: Vec<(u64, WindowLayout)> = Vec::new();
 
+        // While the grid overview is open, report the grid-focused window as focused so that
+        // IPC consumers (e.g. waybar's focused-window title) follow the selection.
+        let grid_focused_window = (self.niri.keyboard_focus.is_layout()
+            && layout.is_grid_overview_open())
+        .then(|| layout.grid_focused_window_id())
+        .flatten();
+
         // Check for window changes.
         let mut seen = HashSet::new();
         let mut focused_id = None;
@@ -707,12 +744,17 @@ impl State {
             let id = mapped.id().get();
             seen.insert(id);
 
-            if mapped.is_focused() {
+            let is_focused = match &grid_focused_window {
+                Some(win) => mapped.window == *win,
+                None => mapped.is_focused(),
+            };
+            if is_focused {
                 focused_id = Some(id);
             }
 
             let Some(ipc_win) = state.windows.get(&id) else {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let mut window = make_ipc_window(mapped, ws_id, window_layout);
+                window.is_focused = is_focused;
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             };
@@ -726,7 +768,8 @@ impl State {
             });
 
             if changed {
-                let window = make_ipc_window(mapped, ws_id, window_layout);
+                let mut window = make_ipc_window(mapped, ws_id, window_layout);
+                window.is_focused = is_focused;
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
             }
@@ -735,7 +778,7 @@ impl State {
                 batch_change_layouts.push((id, window_layout));
             }
 
-            if mapped.is_focused() && !ipc_win.is_focused {
+            if is_focused && !ipc_win.is_focused {
                 events.push(Event::WindowFocusChanged { id: Some(id) });
             }
 

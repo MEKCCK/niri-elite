@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::iter::zip;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Context;
 use arrayvec::ArrayVec;
@@ -43,6 +44,8 @@ const TEXT_SHOW_P: &str =
     "Press <span face='mono' bgcolor='#2C2C2C'> Space </span> to save the screenshot.\n\
      Press <span face='mono' bgcolor='#2C2C2C'> P </span> to show the pointer.";
 
+pub type ScreenshotReplySender = async_channel::Sender<Result<Arc<[u8]>, String>>;
+
 // Ideally the screenshot UI should support cross-output selections. However, that poses some
 // technical challenges when the outputs have different scales and such. So, this implementation
 // allows only single-output selections for now.
@@ -64,6 +67,7 @@ pub enum ScreenshotUi {
         clock: Clock,
         config: Rc<RefCell<Config>>,
         path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
     },
 }
 
@@ -143,6 +147,7 @@ impl ScreenshotUi {
         default_output: Output,
         show_pointer: bool,
         path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
     ) -> bool {
         if screenshots.is_empty() {
             return false;
@@ -238,6 +243,7 @@ impl ScreenshotUi {
             clock: clock.clone(),
             config: config.clone(),
             path,
+            ipc_reply,
         };
 
         self.update_buffers();
@@ -250,12 +256,14 @@ impl ScreenshotUi {
             selection,
             clock,
             config,
+            ipc_reply,
             ..
         } = self
         else {
             return false;
         };
 
+        let ipc_reply = ipc_reply.take();
         let last_selection = Some((
             selection.0.downgrade(),
             rect_from_corner_points(selection.1, selection.2),
@@ -266,6 +274,10 @@ impl ScreenshotUi {
             clock: clock.clone(),
             config: config.clone(),
         };
+
+        if let Some(ipc_reply) = ipc_reply {
+            let _ = ipc_reply.try_send(Err(String::from("screenshot was canceled")));
+        }
 
         true
     }
@@ -852,7 +864,6 @@ impl ScreenshotUi {
         output: Output,
         point: Point<i32, Physical>,
         slot: Option<TouchSlot>,
-        move_existing: bool,
     ) -> bool {
         let Self::Open {
             selection,
@@ -885,23 +896,6 @@ impl ScreenshotUi {
 
         if button.is_down() {
             return false;
-        }
-
-        if move_existing {
-            if output != selection.0 {
-                return false;
-            }
-
-            *button = Button::Down {
-                touch_slot: slot,
-                on_capture_button: false,
-                last_pos: (output, point),
-                move_state: Some(MoveState {
-                    pointer_offset: point - selection.1,
-                    touch_slot: slot,
-                }),
-            };
-            return true;
         }
 
         let Some(output_data) = output_data.get(&output) else {

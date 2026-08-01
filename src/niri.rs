@@ -14,15 +14,18 @@ use _server_decoration::server::org_kde_kwin_server_decoration_manager::Mode as 
 use anyhow::{bail, ensure, Context};
 use calloop::futures::Scheduler;
 use niri_config::debug::PreviewRender;
+use niri_config::gestures::HotCornerAction;
 use niri_config::output::MaxBpc;
 use niri_config::{
-    Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
+    Bind, Config, FloatOrInt, Key, Modifiers, OutputName, TrackLayout, WarpMouseToFocusMode,
     WorkspaceReference, Xkb,
 };
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::Keycode;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
+use smithay::backend::renderer::element::memory::{
+    MemoryRenderBuffer, MemoryRenderBufferRenderElement,
+};
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, CropRenderElement, Relocate, RelocateRenderElement,
@@ -134,7 +137,7 @@ use crate::input::scroll_swipe_gesture::ScrollSwipeGesture;
 use crate::input::scroll_tracker::ScrollTracker;
 use crate::input::{
     apply_libinput_settings, mods_with_finger_scroll_binds, mods_with_mouse_binds,
-    mods_with_tablet_stylus_binds, mods_with_wheel_binds, TabletData,
+    mods_with_tablet_stylus_binds, mods_with_wheel_binds, PendingModifierBind, TabletData,
 };
 use crate::ipc::server::IpcServer;
 use crate::layer::mapped::LayerSurfaceRenderElement;
@@ -158,7 +161,7 @@ use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::renderer::NiriRenderer;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::surface::push_elements_from_surface_tree;
-use crate::render_helpers::texture::TextureBuffer;
+use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
     encompassing_geo, render_to_dmabuf, render_to_encompassing_texture, render_to_shm,
@@ -171,7 +174,9 @@ use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderE
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
 use crate::ui::screen_transition::{self, ScreenTransition};
-use crate::ui::screenshot_ui::{OutputScreenshot, ScreenshotUi, ScreenshotUiRenderElement};
+use crate::ui::screenshot_ui::{
+    OutputScreenshot, ScreenshotReplySender, ScreenshotUi, ScreenshotUiRenderElement,
+};
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
 use crate::utils::spawning::{CHILD_DISPLAY, CHILD_ENV};
 use crate::utils::vblank_throttle::VBlankThrottle;
@@ -270,6 +275,21 @@ pub struct Niri {
     pub devices: HashSet<input::Device>,
     pub tablets: HashMap<input::Device, TabletData>,
     pub touch: HashSet<input::Device>,
+
+    // Shake-to-enlarge tracking
+    pub pointer_shake_energy: f64,
+    pub pointer_last_position: Option<smithay::utils::Point<f64, smithay::utils::Logical>>,
+    pub pointer_last_time: Option<std::time::Instant>,
+    pub pointer_enlarged_until: Option<std::time::Instant>,
+    pub pointer_scale_animation: Option<crate::animation::Animation>,
+    pub pointer_grow_zoom: f64,
+
+    // Magnifier
+    pub magnifier_active: bool,
+    pub magnifier_zoom: f64,
+    pub magnifier_animation: Option<crate::animation::Animation>,
+    pub magnifier_capture: Cell<bool>,
+    pub magnifier_center: RefCell<Option<(WeakOutput, Point<i32, Physical>)>>,
 
     // Smithay state.
     pub compositor_state: CompositorState,
@@ -380,6 +400,9 @@ pub struct Niri {
     pub vertical_finger_scroll_tracker: ScrollTracker,
     pub horizontal_finger_scroll_tracker: ScrollTracker,
     pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
+    pub pending_modifier_bind: Option<PendingModifierBind>,
+    pub completed_modifier_bind: Option<Bind>,
+    pub pending_default_mod_tap: Option<Keycode>,
 
     pub lock_state: LockState,
 
@@ -538,7 +561,7 @@ pub struct PointContents {
     // If surface belongs to a layer surface, this is that layer surface.
     pub layer: Option<LayerSurface>,
     // Pointer is over a hot corner.
-    pub hot_corner: bool,
+    pub hot_corner: Option<HotCornerAction>,
 }
 
 #[derive(Debug, Default)]
@@ -993,6 +1016,27 @@ impl State {
 
     pub fn confirm_mru(&mut self) {
         if let Some(window) = self.niri.close_mru(MruCloseRequest::Confirm) {
+            if self.niri.layout.is_grid_overview_open() {
+                let active_output = self.niri.layout.active_output().cloned();
+                if self.niri.layout.confirm_grid_selection_for_window(&window) {
+                    let new_active = self.niri.layout.active_output().cloned();
+                    if new_active != active_output {
+                        if let Some(output) = new_active {
+                            if !self.maybe_warp_cursor_to_focus_centered() {
+                                self.move_cursor_to_output(&output);
+                            }
+                        }
+                    } else {
+                        self.maybe_warp_cursor_to_focus();
+                    }
+
+                    self.niri.queue_redraw_all();
+                    return;
+                }
+
+                self.niri.layout.dismiss_grid_overview();
+            }
+
             // focus_window() will warp the cursor to the window only when the keyboard focus is on
             // the layout. However, right now the keyboard focus is still on the MRU (that we had
             // just closed) since it's only updated at the end of the event loop cycle. Force-update
@@ -1545,6 +1589,9 @@ impl State {
                 mods_with_tablet_stylus_binds(new_mod_key, &config.binds);
             self.niri.mods_with_finger_scroll_binds =
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
+            self.niri.pending_modifier_bind = None;
+            self.niri.completed_modifier_bind = None;
+            self.niri.pending_default_mod_tap = None;
         }
 
         if config.window_rules != old_config.window_rules {
@@ -1615,6 +1662,22 @@ impl State {
             xwls_changed = true;
         }
 
+        let old_magnifier_off = old_config.magnifier.off;
+        let old_magnifier_zoom = old_config.magnifier.zoom_factor;
+        let old_shake_off = old_config
+            .cursor
+            .shake_to_enlarge
+            .as_ref()
+            .is_none_or(|s| s.off);
+
+        let new_magnifier_off = config.magnifier.off;
+        let new_magnifier_zoom = config.magnifier.zoom_factor;
+        let new_shake_off = config
+            .cursor
+            .shake_to_enlarge
+            .as_ref()
+            .is_none_or(|s| s.off);
+
         *old_config = config;
 
         if let Some(outputs) = preserved_output_config {
@@ -1623,6 +1686,15 @@ impl State {
 
         // Release the borrow.
         drop(old_config);
+
+        self.niri.reconcile_magnifier_config(
+            old_magnifier_off,
+            old_magnifier_zoom,
+            new_magnifier_off,
+            new_magnifier_zoom,
+        );
+        self.niri
+            .reconcile_shake_config(old_shake_off, new_shake_off);
 
         // Now with a &mut self we can reload the xkb config.
         if let Some(mut xkb) = reload_xkb {
@@ -1967,7 +2039,23 @@ impl State {
     }
 
     pub fn open_screenshot_ui(&mut self, show_pointer: bool, path: Option<String>) {
+        self.open_screenshot_ui_with_reply(show_pointer, path, None);
+    }
+
+    pub fn open_screenshot_ui_with_reply(
+        &mut self,
+        show_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+    ) {
+        let send_error = |ipc_reply: Option<ScreenshotReplySender>, message: &str| {
+            if let Some(ipc_reply) = ipc_reply {
+                let _ = ipc_reply.try_send(Err(String::from(message)));
+            }
+        };
+
         if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
+            send_error(ipc_reply, "cannot open screenshot UI right now");
             return;
         }
 
@@ -1976,6 +2064,7 @@ impl State {
             .output_under_cursor()
             .or_else(|| self.niri.layout.active_output().cloned());
         let Some(default_output) = default_output else {
+            send_error(ipc_reply, "no output available for screenshot");
             return;
         };
 
@@ -1985,6 +2074,7 @@ impl State {
             .backend
             .with_primary_renderer(|renderer| self.niri.capture_screenshots(renderer).collect())
         else {
+            send_error(ipc_reply, "primary renderer is not available");
             return;
         };
 
@@ -1998,11 +2088,24 @@ impl State {
             touch.unset_grab(self);
         }
 
-        self.backend.with_primary_renderer(|renderer| {
-            self.niri
-                .screenshot_ui
-                .open(renderer, screenshots, default_output, show_pointer, path)
-        });
+        let ipc_reply_on_failure = ipc_reply.clone();
+        let opened = self
+            .backend
+            .with_primary_renderer(|renderer| {
+                self.niri.screenshot_ui.open(
+                    renderer,
+                    screenshots,
+                    default_output,
+                    show_pointer,
+                    path,
+                    ipc_reply,
+                )
+            })
+            .unwrap_or(false);
+        if !opened {
+            send_error(ipc_reply_on_failure, "error opening screenshot UI");
+            return;
+        }
 
         self.niri
             .cursor_manager
@@ -2027,20 +2130,39 @@ impl State {
     }
 
     pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open { path, .. } = &mut self.niri.screenshot_ui else {
+        let ScreenshotUi::Open {
+            path, ipc_reply, ..
+        } = &mut self.niri.screenshot_ui
+        else {
             return;
         };
         let path = path.take();
+        let ipc_reply = ipc_reply.take();
 
         self.backend.with_primary_renderer(|renderer| {
             match self.niri.screenshot_ui.capture(renderer) {
                 Ok((size, pixels)) => {
-                    if let Err(err) = self.niri.save_screenshot(size, pixels, write_to_disk, path) {
+                    let ipc_reply_on_error = ipc_reply.clone();
+                    if let Err(err) = self.niri.save_screenshot_with_reply(
+                        size,
+                        pixels,
+                        write_to_disk,
+                        path,
+                        ipc_reply,
+                    ) {
                         warn!("error saving screenshot: {err:?}");
+                        if let Some(ipc_reply) = ipc_reply_on_error {
+                            let _ =
+                                ipc_reply.try_send(Err(format!("error saving screenshot: {err}")));
+                        }
                     }
                 }
                 Err(err) => {
                     warn!("error capturing screenshot: {err:?}");
+                    if let Some(ipc_reply) = ipc_reply {
+                        let _ =
+                            ipc_reply.try_send(Err(format!("error capturing screenshot: {err}")));
+                    }
                 }
             }
         });
@@ -2050,6 +2172,121 @@ impl State {
             .cursor_manager
             .set_cursor_image(CursorImageStatus::default_named());
         self.niri.queue_redraw_all();
+    }
+
+    pub fn screenshot_for_ipc_stdout(
+        &mut self,
+        action: niri_ipc::Action,
+        ipc_reply: ScreenshotReplySender,
+    ) {
+        let result = match action {
+            niri_ipc::Action::Screenshot {
+                show_pointer, path, ..
+            } => {
+                self.open_screenshot_ui_with_reply(show_pointer, path, Some(ipc_reply));
+                return;
+            }
+            niri_ipc::Action::ScreenshotScreen {
+                write_to_disk,
+                show_pointer,
+                path,
+                ..
+            } => {
+                let active = self
+                    .niri
+                    .layout
+                    .active_output()
+                    .cloned()
+                    .context("no active output to screenshot");
+                active.and_then(|active| {
+                    let ipc_reply_for_screenshot = ipc_reply.clone();
+                    self.backend
+                        .with_primary_renderer(|renderer| {
+                            self.niri.screenshot_with_reply(
+                                renderer,
+                                &active,
+                                write_to_disk,
+                                show_pointer,
+                                path,
+                                Some(ipc_reply_for_screenshot),
+                            )
+                        })
+                        .context("primary renderer is not available")
+                        .and_then(|res| res)
+                })
+            }
+            niri_ipc::Action::ScreenshotWindow {
+                id: None,
+                write_to_disk,
+                show_pointer,
+                path,
+                ..
+            } => {
+                let focus = self.niri.layout.focus_with_output();
+                let Some((mapped, output)) = focus else {
+                    let _ =
+                        ipc_reply.try_send(Err(String::from("no focused window to screenshot")));
+                    return;
+                };
+
+                let ipc_reply_for_screenshot = ipc_reply.clone();
+                self.backend
+                    .with_primary_renderer(|renderer| {
+                        self.niri.screenshot_window_with_reply(
+                            renderer,
+                            output,
+                            mapped,
+                            write_to_disk,
+                            show_pointer,
+                            path,
+                            Some(ipc_reply_for_screenshot),
+                        )
+                    })
+                    .context("primary renderer is not available")
+                    .and_then(|res| res)
+            }
+            niri_ipc::Action::ScreenshotWindow {
+                id: Some(id),
+                write_to_disk,
+                show_pointer,
+                path,
+                ..
+            } => {
+                let mut windows = self.niri.layout.windows();
+                let window = windows.find(|(_, mapped)| mapped.id().get() == id);
+                let Some((Some(monitor), mapped)) = window else {
+                    let _ = ipc_reply.try_send(Err(format!("window {id} was not found")));
+                    return;
+                };
+
+                let output = monitor.output();
+                let ipc_reply_for_screenshot = ipc_reply.clone();
+                self.backend
+                    .with_primary_renderer(|renderer| {
+                        self.niri.screenshot_window_with_reply(
+                            renderer,
+                            output,
+                            mapped,
+                            write_to_disk,
+                            show_pointer,
+                            path,
+                            Some(ipc_reply_for_screenshot),
+                        )
+                    })
+                    .context("primary renderer is not available")
+                    .and_then(|res| res)
+            }
+            _ => {
+                let _ = ipc_reply.try_send(Err(String::from(
+                    "action does not support screenshot stdout",
+                )));
+                return;
+            }
+        };
+
+        if let Err(err) = result {
+            let _ = ipc_reply.try_send(Err(err.to_string()));
+        }
     }
 
     pub fn store_unmap_snapshot(&mut self, window: &Window, output: Option<&Output>) {
@@ -2493,6 +2730,7 @@ impl Niri {
             )
             .unwrap();
 
+        let magnifier_zoom_factor = config_.magnifier.zoom_factor;
         drop(config_);
         let mut niri = Self {
             config,
@@ -2526,6 +2764,19 @@ impl Niri {
             devices: HashSet::new(),
             tablets: HashMap::new(),
             touch: HashSet::new(),
+
+            pointer_shake_energy: 0.0,
+            pointer_last_position: None,
+            pointer_last_time: None,
+            pointer_enlarged_until: None,
+            pointer_scale_animation: None,
+            pointer_grow_zoom: 1.0,
+
+            magnifier_active: false,
+            magnifier_zoom: magnifier_zoom_factor,
+            magnifier_animation: None,
+            magnifier_capture: Cell::new(false),
+            magnifier_center: RefCell::new(None),
 
             compositor_state,
             xdg_shell_state,
@@ -2604,6 +2855,9 @@ impl Niri {
             vertical_finger_scroll_tracker: ScrollTracker::new(10),
             horizontal_finger_scroll_tracker: ScrollTracker::new(10),
             mods_with_finger_scroll_binds,
+            pending_modifier_bind: None,
+            completed_modifier_bind: None,
+            pending_default_mod_tap: None,
 
             lock_state: LockState::Unlocked,
             locked_hint: None,
@@ -3067,17 +3321,22 @@ impl Niri {
         Some((output, pos_within_output))
     }
 
-    fn is_inside_hot_corner(&self, output: &Output, pos: Point<f64, Logical>) -> bool {
+    fn hot_corner_action(
+        &self,
+        output: &Output,
+        pos: Point<f64, Logical>,
+    ) -> Option<HotCornerAction> {
         let config = self.config.borrow();
         let hot_corners = output
             .user_data()
             .get::<OutputName>()
             .and_then(|name| config.outputs.find(name))
             .and_then(|c| c.hot_corners)
-            .unwrap_or(config.gestures.hot_corners);
+            .unwrap_or(config.gestures.hot_corners)
+            .with_default_corners();
 
         if hot_corners.off {
-            return false;
+            return None;
         }
 
         // Use size from the ceiled output geometry, since that's what we currently use for pointer
@@ -3089,25 +3348,40 @@ impl Niri {
             Rectangle::new(corner, Size::new(1., 1.)).contains(pos)
         };
 
-        if hot_corners.top_right && contains(Point::new(size.w - 1., 0.)) {
-            return true;
-        }
-        if hot_corners.bottom_left && contains(Point::new(0., size.h - 1.)) {
-            return true;
-        }
-        if hot_corners.bottom_right && contains(Point::new(size.w - 1., size.h - 1.)) {
-            return true;
-        }
-
-        // If the user didn't explicitly set any corners, we default to top-left.
-        if (hot_corners.top_left
-            || !(hot_corners.top_right || hot_corners.bottom_right || hot_corners.bottom_left))
-            && contains(Point::new(0., 0.))
+        if let Some(action) = hot_corners
+            .top_right
+            .filter(|_| contains(Point::new(size.w - 1., 0.)))
         {
-            return true;
+            return Some(action);
+        }
+        if let Some(action) = hot_corners
+            .bottom_left
+            .filter(|_| contains(Point::new(0., size.h - 1.)))
+        {
+            return Some(action);
+        }
+        if let Some(action) = hot_corners
+            .bottom_right
+            .filter(|_| contains(Point::new(size.w - 1., size.h - 1.)))
+        {
+            return Some(action);
         }
 
-        false
+        if let Some(action) = hot_corners
+            .top_left
+            .filter(|_| contains(Point::new(0., 0.)))
+        {
+            return Some(action);
+        }
+
+        None
+    }
+
+    pub fn trigger_hot_corner(&mut self, action: HotCornerAction) {
+        match action {
+            HotCornerAction::Overview => self.layout.toggle_overview(),
+            HotCornerAction::GridOverview => self.layout.toggle_grid_overview(),
+        }
     }
 
     pub fn is_sticky_obscured_under(
@@ -3153,7 +3427,7 @@ impl Niri {
             return false;
         }
 
-        if self.is_inside_hot_corner(output, pos_within_output) {
+        if self.hot_corner_action(output, pos_within_output).is_some() {
             return true;
         }
 
@@ -3430,8 +3704,8 @@ impl Niri {
                 .or_else(|| layer_toplevel_under(Layer::Bottom))
                 .or_else(|| layer_toplevel_under(Layer::Background));
         } else {
-            if self.is_inside_hot_corner(output, pos_within_output) {
-                rv.hot_corner = true;
+            if let Some(action) = self.hot_corner_action(output, pos_within_output) {
+                rv.hot_corner = Some(action);
                 return rv;
             }
 
@@ -3668,6 +3942,298 @@ impl Niri {
         state.lock_surface.as_ref().map(|s| s.wl_surface()).cloned()
     }
 
+    pub fn pointer_motion_absolute_shake(
+        &mut self,
+        pos: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) {
+        let (hold_duration_ms, threshold, is_off, grow, grow_speed, zoom_factor) =
+            if let Some(shake_conf) = self.config.borrow().cursor.shake_to_enlarge.as_ref() {
+                (
+                    shake_conf.hold_duration_ms,
+                    shake_conf.threshold,
+                    shake_conf.off,
+                    shake_conf.grow,
+                    shake_conf.grow_speed,
+                    shake_conf.zoom_factor,
+                )
+            } else {
+                return;
+            };
+
+        if is_off {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let distance = if let Some(last_pos) = self.pointer_last_position {
+            let dx = pos.x - last_pos.x;
+            let dy = pos.y - last_pos.y;
+            (dx * dx + dy * dy).sqrt()
+        } else {
+            0.0
+        };
+
+        if let Some(last_time) = self.pointer_last_time {
+            let dt = now.duration_since(last_time).as_secs_f64();
+            // Decay energy: half-life of ~0.23 seconds
+            let decay = (-dt * 3.0).exp();
+            self.pointer_shake_energy *= decay;
+        }
+        self.pointer_shake_energy += distance;
+        self.pointer_last_time = Some(now);
+        self.pointer_last_position = Some(pos);
+
+        let effective_threshold = threshold.max(1.0);
+        let growing = self.pointer_shake_energy > effective_threshold;
+        if growing {
+            let already_enlarged = self
+                .pointer_enlarged_until
+                .map(|t| now < t)
+                .unwrap_or(false);
+
+            if grow && already_enlarged {
+                // Grow the cursor further while continuing to shake.
+                // Cap at 30x to stay within the PipeWire cursor bitmap (1024×1024).
+                self.pointer_grow_zoom = (self.pointer_grow_zoom + grow_speed).min(30.0);
+            } else {
+                // Reset to base zoom factor on initial trigger.
+                self.pointer_grow_zoom = zoom_factor;
+            }
+
+            self.pointer_enlarged_until =
+                Some(now + std::time::Duration::from_millis(hold_duration_ms as u64));
+        }
+
+        self.update_pointer_scale_animation(growing);
+    }
+
+    pub fn update_pointer_scale_animation(&mut self, growing: bool) {
+        let (zoom_factor, is_off) =
+            if let Some(shake_conf) = self.config.borrow().cursor.shake_to_enlarge.as_ref() {
+                (shake_conf.zoom_factor, shake_conf.off)
+            } else {
+                return;
+            };
+
+        if is_off {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let enlarged = self
+            .pointer_enlarged_until
+            .map(|t| now < t)
+            .unwrap_or(false);
+        let current_scale = self
+            .pointer_scale_animation
+            .as_ref()
+            .map(|a| a.value())
+            .unwrap_or(1.0);
+
+        let target_scale = if enlarged {
+            if growing {
+                self.pointer_grow_zoom.max(zoom_factor)
+            } else {
+                current_scale
+            }
+        } else {
+            1.0
+        };
+
+        if self.pointer_scale_animation.is_none()
+            || (self.pointer_scale_animation.as_ref().unwrap().to() - target_scale).abs() > 0.01
+        {
+            if target_scale != 1.0 || current_scale != 1.0 {
+                let anim_config = niri_config::Animation {
+                    off: false,
+                    kind: self.config.borrow().animations.cursor_enlarge.0.kind,
+                };
+                let anim = crate::animation::Animation::new(
+                    self.clock.clone(),
+                    current_scale,
+                    target_scale,
+                    0.0,
+                    anim_config,
+                );
+                self.pointer_scale_animation = Some(anim);
+                self.queue_redraw_all();
+            }
+        }
+    }
+
+    pub fn toggle_magnifier(&mut self) {
+        let (off, zoom_factor, anim_config) = {
+            let config = self.config.borrow();
+            (
+                config.magnifier.off,
+                config.magnifier.zoom_factor,
+                config.animations.magnifier.0,
+            )
+        };
+        if off {
+            return;
+        }
+        self.magnifier_active = !self.magnifier_active;
+
+        if self.magnifier_active {
+            *self.magnifier_center.borrow_mut() = None;
+        }
+
+        let from = self.magnifier_animation.as_ref().map_or(
+            if self.magnifier_active {
+                1.
+            } else {
+                self.magnifier_zoom
+            },
+            |a| a.value(),
+        );
+        let to = if self.magnifier_active {
+            self.magnifier_zoom = zoom_factor;
+            self.magnifier_zoom
+        } else {
+            1.
+        };
+
+        self.magnifier_animation = Some(crate::animation::Animation::new(
+            self.clock.clone(),
+            from,
+            to,
+            0.,
+            anim_config,
+        ));
+        self.queue_redraw_all();
+    }
+
+    pub fn update_magnifier_animation(&mut self) {
+        if let Some(anim) = &self.magnifier_animation {
+            if anim.is_done() {
+                self.magnifier_animation = None;
+            }
+        }
+    }
+
+    pub fn adjust_magnifier_zoom(&mut self, delta: f64) {
+        let off = {
+            let config = self.config.borrow();
+            config.magnifier.off
+        };
+        if off {
+            return;
+        }
+
+        if !self.magnifier_active {
+            self.magnifier_active = true;
+            self.magnifier_zoom = 1.0;
+            *self.magnifier_center.borrow_mut() = None;
+        }
+
+        self.magnifier_zoom = (self.magnifier_zoom + delta).clamp(1.0, 10.0);
+        if self.magnifier_zoom <= 1.0 {
+            self.magnifier_active = false;
+            self.magnifier_zoom = 1.0;
+        }
+
+        self.magnifier_animation = None;
+        self.queue_redraw_all();
+    }
+
+    pub fn can_drag_magnifier_center(&self) -> bool {
+        let config = self.config.borrow();
+        self.magnifier_active
+            && !self.magnifier_capture.get()
+            && !config.magnifier.off
+            && !config.magnifier.track_cursor
+            && self.magnifier_zoom > 1.0
+    }
+
+    pub fn begin_magnifier_center_drag(
+        &mut self,
+        location: Point<f64, Logical>,
+    ) -> Option<(Output, Point<i32, Physical>)> {
+        if !self.can_drag_magnifier_center() {
+            return None;
+        }
+
+        {
+            let borrowed = self.magnifier_center.borrow();
+            if let Some((weak, center)) = borrowed.as_ref() {
+                let output = weak.upgrade()?;
+                let output_geo = self.global_space.output_geometry(&output)?;
+                if output_geo.to_f64().contains(location) {
+                    let center = self.clamp_magnifier_center_to_output(&output, *center);
+                    return Some((output, center));
+                }
+
+                return None;
+            }
+        }
+
+        let Some((output, pos_within_output)) = self.output_under(location) else {
+            return None;
+        };
+        let output = output.clone();
+        let output_scale = Scale::from(output.current_scale().fractional_scale());
+        let center = pos_within_output.to_physical_precise_round(output_scale);
+
+        *self.magnifier_center.borrow_mut() = Some((output.downgrade(), center));
+        Some((output, center))
+    }
+
+    pub fn set_magnifier_center(&mut self, output: &Output, center: Point<i32, Physical>) -> bool {
+        if !self.can_drag_magnifier_center() {
+            return false;
+        }
+
+        let center = self.clamp_magnifier_center_to_output(output, center);
+        *self.magnifier_center.borrow_mut() = Some((output.downgrade(), center));
+        self.queue_redraw(&output);
+        true
+    }
+
+    fn clamp_magnifier_center_to_output(
+        &self,
+        output: &Output,
+        center: Point<i32, Physical>,
+    ) -> Point<i32, Physical> {
+        let size = output.current_mode().unwrap().size;
+        let size = output.current_transform().transform_size(size);
+        let max_x = (size.w - 1).max(0);
+        let max_y = (size.h - 1).max(0);
+
+        Point::from((center.x.clamp(0, max_x), center.y.clamp(0, max_y)))
+    }
+
+    fn reconcile_magnifier_config(
+        &mut self,
+        was_off: bool,
+        was_zoom: f64,
+        now_off: bool,
+        now_zoom: f64,
+    ) {
+        if !was_off && now_off && self.magnifier_active {
+            self.magnifier_active = false;
+            self.magnifier_animation = None;
+            *self.magnifier_center.borrow_mut() = None;
+            self.queue_redraw_all();
+        }
+
+        if self.magnifier_active && (now_zoom - was_zoom).abs() > f64::EPSILON {
+            self.magnifier_zoom = now_zoom;
+            self.magnifier_animation = None;
+            self.queue_redraw_all();
+        }
+    }
+
+    fn reconcile_shake_config(&mut self, was_off: bool, now_off: bool) {
+        if !was_off && now_off {
+            self.pointer_scale_animation = None;
+            self.pointer_enlarged_until = None;
+            self.pointer_grow_zoom = 1.0;
+            self.pointer_shake_energy = 0.0;
+            self.queue_redraw_all();
+        }
+    }
+
     /// Schedules an immediate redraw on all outputs if one is not already scheduled.
     pub fn queue_redraw_all(&mut self) {
         for state in self.output_state.values_mut() {
@@ -3707,16 +4273,102 @@ impl Niri {
         let output_pos = self.global_space.output_geometry(output).unwrap().loc;
 
         // Check whether we need to draw the tablet cursor or the regular cursor.
-        let pointer_pos = self
+        let mut pointer_pos = self
             .tablet_cursor_location
             .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
-        let pointer_pos = pointer_pos - output_pos.to_f64();
+        pointer_pos -= output_pos.to_f64();
+
+        // When magnifier's scale-cursor is disabled, pre-transform the cursor
+        // position so it moves correctly without RescaleElement wrapping.
+        // Skip when capturing screenshots (magnifier is disabled for the capture).
+        {
+            let config = self.config.borrow();
+            if !config.magnifier.scale_cursor
+                && !config.magnifier.off
+                && !self.magnifier_capture.get()
+            {
+                drop(config);
+                if let Some((zoom, center)) = self.compute_magnifier_params(output) {
+                    let output_scale_f = output_scale.fractional_scale();
+                    let center_logical = center.to_f64().to_logical(output_scale_f);
+                    let cx = center_logical.x;
+                    let cy = center_logical.y;
+                    pointer_pos.x = cx + (pointer_pos.x - cx) * zoom;
+                    pointer_pos.y = cy + (pointer_pos.y - cy) * zoom;
+                }
+            }
+        }
 
         // Get the render cursor to draw.
-        let cursor_scale = output_scale.integer_scale();
+        // When shake-to-enlarge is active, load a larger cursor image so the
+        // RescaleRenderElement downscales rather than upscales, avoiding blur.
+        let output_int_scale = output_scale.integer_scale();
+        let load_mult = self
+            .pointer_scale_animation
+            .as_ref()
+            .map(|a| a.value())
+            .filter(|z| (*z - 1.0).abs() > 0.001)
+            .map(|z| (z.ceil() as i32).max(1))
+            .unwrap_or(1);
+        let cursor_scale = (output_int_scale * load_mult).max(1);
         let render_cursor = self.cursor_manager.get_render_cursor(cursor_scale);
 
+        // Pre-extract frame widths for adjusted zoom calculation.
+        let enlarged_frame_width = if let RenderCursor::Named { cursor: ref c, .. } = &render_cursor
+        {
+            let (_, f) = c.frame(0);
+            Some(f.width)
+        } else {
+            None
+        };
+        let normal_frame_width = if load_mult > 1 {
+            match self.cursor_manager.get_render_cursor(output_int_scale) {
+                RenderCursor::Named { cursor, .. } => {
+                    let (_, f) = cursor.frame(0);
+                    Some(f.width)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let output_scale = Scale::from(output.current_scale().fractional_scale());
+
+        let mut push = |elem: PointerRenderElements<R>| {
+            if let Some(anim) = &self.pointer_scale_animation {
+                let zoom = anim.value();
+                if (zoom - 1.0).abs() > 0.001 {
+                    let pivot = pointer_pos.to_physical_precise_round(output_scale);
+                    match elem {
+                        PointerRenderElements::Wayland(e) => {
+                            push(PointerRenderElements::RescaledWayland(
+                                RescaleRenderElement::from_element(e, pivot, zoom),
+                            ));
+                            return;
+                        }
+                        PointerRenderElements::NamedPointer(e) => {
+                            // Compute adjusted zoom based on actual loaded image sizes.
+                            let adjusted_zoom = match (enlarged_frame_width, normal_frame_width) {
+                                (Some(ew), Some(nw)) if nw > 0 => zoom * nw as f64 / ew as f64,
+                                _ => zoom / load_mult as f64,
+                            }
+                            .max(0.0);
+                            if (adjusted_zoom - 1.0).abs() > 0.001 && adjusted_zoom > 0.01 {
+                                push(PointerRenderElements::RescaledNamedPointer(
+                                    RescaleRenderElement::from_element(e, pivot, adjusted_zoom),
+                                ));
+                            } else {
+                                push(PointerRenderElements::NamedPointer(e));
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            push(elem);
+        };
 
         match render_cursor {
             RenderCursor::Hidden => (),
@@ -3740,11 +4392,24 @@ impl Niri {
                 cursor,
             } => {
                 let (idx, frame) = cursor.frame(self.start_time.elapsed().as_millis() as u32);
-                let hotspot = XCursor::hotspot(frame).to_logical(scale);
+                let hotspot = XCursor::hotspot(frame).to_logical(output_int_scale);
                 let pointer_pos =
                     (pointer_pos - hotspot.to_f64()).to_physical_precise_round(output_scale);
 
-                let texture = self.cursor_texture_cache.get(icon, scale, &cursor, idx);
+                // When shake-to-enlarge loads a larger cursor, build the texture
+                // directly with output_int_scale to preserve the full pixel data.
+                let texture = if load_mult > 1 {
+                    MemoryRenderBuffer::from_slice(
+                        &frame.pixels_rgba,
+                        Fourcc::Argb8888,
+                        (frame.width as i32, frame.height as i32),
+                        output_int_scale,
+                        Transform::Normal,
+                        None,
+                    )
+                } else {
+                    self.cursor_texture_cache.get(icon, scale, &cursor, idx)
+                };
                 match MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
                     pointer_pos,
@@ -4169,7 +4834,71 @@ impl Niri {
         self.render(ctx, output, include_pointer, &mut |elem| {
             elements.push(elem)
         });
+
         elements
+    }
+
+    pub fn compute_magnifier_params(&self, output: &Output) -> Option<(f64, Point<i32, Physical>)> {
+        if self.magnifier_capture.get() {
+            return None;
+        }
+        let config = self.config.borrow();
+        if config.magnifier.off {
+            return None;
+        }
+        let magnifier_anim_ongoing = self
+            .magnifier_animation
+            .as_ref()
+            .map(|a| !a.is_done())
+            .unwrap_or(false);
+        if !self.magnifier_active && !magnifier_anim_ongoing {
+            return None;
+        }
+        let zoom = if magnifier_anim_ongoing {
+            self.magnifier_animation.as_ref().unwrap().value()
+        } else {
+            self.magnifier_zoom
+        };
+        if (zoom - 1.0).abs() <= 0.001 {
+            return None;
+        }
+        let pointer_pos = self
+            .tablet_cursor_location
+            .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+        let output_geo = self.global_space.output_geometry(output).unwrap();
+
+        if config.magnifier.track_cursor {
+            if !output_geo.to_f64().contains(pointer_pos) {
+                return None;
+            }
+            let pointer_on_output = pointer_pos - output_geo.loc.to_f64();
+            let output_scale = Scale::from(output.current_scale().fractional_scale());
+            let pivot = pointer_on_output.to_physical_precise_round(output_scale);
+            Some((zoom, pivot))
+        } else {
+            // Fixed center: capture on first activation, then lock per-output.
+            let center = {
+                let borrowed = self.magnifier_center.borrow();
+                borrowed.as_ref().and_then(|(weak, c)| {
+                    if weak.upgrade().as_ref() == Some(output) {
+                        Some(*c)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(c) = center {
+                return Some((zoom, c));
+            }
+            if !output_geo.to_f64().contains(pointer_pos) {
+                return None;
+            }
+            let pointer_on_output = pointer_pos - output_geo.loc.to_f64();
+            let output_scale = Scale::from(output.current_scale().fractional_scale());
+            let c = pointer_on_output.to_physical_precise_round(output_scale);
+            *self.magnifier_center.borrow_mut() = Some((output.downgrade(), c));
+            Some((zoom, c))
+        }
     }
 
     pub fn render<R: NiriRenderer>(
@@ -4197,7 +4926,25 @@ impl Niri {
         let state = self.output_state.get(output).unwrap();
         ctx.xray = Some(&state.xray);
 
-        self.render_inner(ctx, output, include_pointer, push);
+        if let Some((zoom, pivot)) = self.compute_magnifier_params(output) {
+            let scale_cursor = self.config.borrow().magnifier.scale_cursor;
+            let mut magnifier_push = |elem| {
+                if !scale_cursor {
+                    match &elem {
+                        OutputRenderElements::Pointer(_) => {
+                            push(elem);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                let rescaled = RescaleRenderElement::from_element(Box::new(elem), pivot, zoom);
+                push(OutputRenderElements::Magnified(rescaled))
+            };
+            self.render_inner(ctx, output, include_pointer, &mut magnifier_push);
+        } else {
+            self.render_inner(ctx, output, include_pointer, push);
+        }
 
         self.clear_xray_elements(output);
     }
@@ -4281,8 +5028,53 @@ impl Niri {
 
         // If the screenshot UI is open, draw it.
         if self.screenshot_ui.is_open() {
-            self.screenshot_ui
-                .render_output(output, ctx.target, &mut |elem| push(elem.into()));
+            if self.compute_magnifier_params(output).is_some() {
+                // When the magnifier is active, render all screenshot UI elements
+                // to a single texture first. This avoids per-element rounding gaps
+                // that RescaleRenderElement::geometry() creates with to_i32_round().
+                let size = output.current_mode().unwrap().size;
+                let transform = output.current_transform();
+                let size = transform.transform_size(size);
+                let scale = Scale::from(output.current_scale().fractional_scale());
+
+                let mut ui_elements: Vec<ScreenshotUiRenderElement> = Vec::new();
+                self.screenshot_ui
+                    .render_output(output, ctx.target, &mut |elem| ui_elements.push(elem));
+
+                let renderer = ctx.renderer.as_gles_renderer();
+
+                let res = render_to_texture(
+                    renderer,
+                    size,
+                    scale,
+                    transform,
+                    Fourcc::Abgr8888,
+                    ui_elements.iter().rev(),
+                );
+
+                if let Ok((texture, _sync)) = res {
+                    let tex_buffer = TextureBuffer::from_texture(
+                        renderer,
+                        texture,
+                        scale,
+                        transform,
+                        Vec::new(),
+                    );
+                    let tex_elem =
+                        PrimaryGpuTextureRenderElement(TextureRenderElement::from_texture_buffer(
+                            tex_buffer,
+                            (0., 0.),
+                            1.,
+                            None,
+                            None,
+                            Kind::Unspecified,
+                        ));
+                    push(OutputRenderElements::Texture(tex_elem));
+                }
+            } else {
+                self.screenshot_ui
+                    .render_output(output, ctx.target, &mut |elem| push(elem.into()));
+            }
 
             // Add the backdrop for outputs that were connected while the screenshot UI was open.
             push(backdrop);
@@ -4607,6 +5399,24 @@ impl Niri {
 
         let mut res = RenderResult::Skipped;
         if self.monitors_active {
+            // Check if shake-to-enlarge hold duration expired and update animation.
+            self.update_pointer_scale_animation(false);
+            self.update_magnifier_animation();
+            let pointer_anim_ongoing = self
+                .pointer_scale_animation
+                .as_ref()
+                .map(|a| !a.is_done())
+                .unwrap_or(false)
+                || self
+                    .pointer_enlarged_until
+                    .map(|t| std::time::Instant::now() < t)
+                    .unwrap_or(false);
+            let magnifier_anim_ongoing = self
+                .magnifier_animation
+                .as_ref()
+                .map(|a| !a.is_done())
+                .unwrap_or(false);
+
             let state = self.output_state.get_mut(output).unwrap();
             state.unfinished_animations_remain = self.layout.are_animations_ongoing(Some(output));
             state.unfinished_animations_remain |=
@@ -4620,6 +5430,9 @@ impl Niri {
             state.unfinished_animations_remain |= self
                 .cursor_manager
                 .is_current_cursor_animated(output.current_scale().integer_scale());
+
+            state.unfinished_animations_remain |= pointer_anim_ongoing;
+            state.unfinished_animations_remain |= magnifier_anim_ongoing;
 
             // Also check layer surfaces.
             if !state.unfinished_animations_remain {
@@ -5488,6 +6301,7 @@ impl Niri {
                     target,
                     xray: None,
                 };
+                let was_magnifier_capture = self.magnifier_capture.replace(true);
                 let elements = self.render_to_vec(ctx, &output, false);
                 let elements = elements.iter().rev();
 
@@ -5512,6 +6326,8 @@ impl Niri {
                 if self.pointer_visibility != PointerVisibility::Disabled {
                     self.render_pointer(renderer, &output, &mut |elem| pointer.push(elem));
                 }
+
+                self.magnifier_capture.set(was_magnifier_capture);
 
                 let res_pointer = if pointer.is_empty() {
                     None
@@ -5556,6 +6372,18 @@ impl Niri {
         include_pointer: bool,
         path: Option<String>,
     ) -> anyhow::Result<()> {
+        self.screenshot_with_reply(renderer, output, write_to_disk, include_pointer, path, None)
+    }
+
+    pub fn screenshot_with_reply(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        write_to_disk: bool,
+        include_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+    ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
 
         self.update_render_elements(Some(output));
@@ -5581,7 +6409,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(size, pixels, write_to_disk, path)
+        self.save_screenshot_with_reply(size, pixels, write_to_disk, path, ipc_reply)
             .context("error saving screenshot")
     }
 
@@ -5594,7 +6422,30 @@ impl Niri {
         show_pointer: bool,
         path: Option<String>,
     ) -> anyhow::Result<()> {
+        self.screenshot_window_with_reply(
+            renderer,
+            output,
+            mapped,
+            write_to_disk,
+            show_pointer,
+            path,
+            None,
+        )
+    }
+
+    pub fn screenshot_window_with_reply(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        write_to_disk: bool,
+        show_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+    ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
+
+        let was_magnifier_capture = self.magnifier_capture.replace(true);
 
         let scale = Scale::from(output.current_scale().fractional_scale());
         let alpha =
@@ -5649,7 +6500,9 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot(geo.size, pixels, write_to_disk, path)
+        self.magnifier_capture.set(was_magnifier_capture);
+
+        self.save_screenshot_with_reply(geo.size, pixels, write_to_disk, path, ipc_reply)
             .context("error saving screenshot")
     }
 
@@ -5659,6 +6512,17 @@ impl Niri {
         pixels: Vec<u8>,
         write_to_disk: bool,
         path_arg: Option<String>,
+    ) -> anyhow::Result<()> {
+        self.save_screenshot_with_reply(size, pixels, write_to_disk, path_arg, None)
+    }
+
+    pub fn save_screenshot_with_reply(
+        &self,
+        size: Size<i32, Physical>,
+        pixels: Vec<u8>,
+        write_to_disk: bool,
+        path_arg: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
     ) -> anyhow::Result<()> {
         let path = write_to_disk
             .then(|| {
@@ -5710,6 +6574,10 @@ impl Niri {
             let w = std::io::Cursor::new(&mut buf);
             if let Err(err) = write_png_rgba8(w, size.w as u32, size.h as u32, &pixels) {
                 warn!("error encoding screenshot image: {err:?}");
+                if let Some(ipc_reply) = ipc_reply {
+                    let _ = ipc_reply
+                        .send_blocking(Err(format!("error encoding screenshot image: {err}")));
+                }
                 return;
             }
 
@@ -5734,7 +6602,7 @@ impl Niri {
                     }
                 }
 
-                match std::fs::write(&path, buf) {
+                match std::fs::write(&path, &*buf) {
                     Ok(()) => image_path = Some(path),
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
@@ -5755,6 +6623,10 @@ impl Niri {
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_owned());
             let _ = event_tx.send(path_string);
+
+            if let Some(ipc_reply) = ipc_reply {
+                let _ = ipc_reply.send_blocking(Ok(buf));
+            }
         });
 
         Ok(())
@@ -6509,6 +7381,8 @@ niri_render_elements! {
     PointerRenderElements<R> => {
         Wayland = WaylandSurfaceRenderElement<R>,
         NamedPointer = MemoryRenderBufferRenderElement<R>,
+        RescaledWayland = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
+        RescaledNamedPointer = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     }
 }
 
@@ -6539,5 +7413,137 @@ niri_render_elements! {
         Texture = PrimaryGpuTextureRenderElement,
         // Used for the CPU-rendered panels.
         RelocatedMemoryBuffer = RelocateRenderElement<MemoryRenderBufferRenderElement<R>>,
+        Magnified = RescaleRenderElement<Box<OutputRenderElements<R>>>,
+    }
+}
+
+impl<R: NiriRenderer> smithay::backend::renderer::element::Element
+    for Box<OutputRenderElements<R>>
+{
+    fn id(&self) -> &smithay::backend::renderer::element::Id {
+        (**self).id()
+    }
+
+    fn current_commit(&self) -> smithay::backend::renderer::utils::CommitCounter {
+        (**self).current_commit()
+    }
+
+    fn geometry(
+        &self,
+        scale: smithay::utils::Scale<f64>,
+    ) -> smithay::utils::Rectangle<i32, smithay::utils::Physical> {
+        (**self).geometry(scale)
+    }
+
+    fn transform(&self) -> smithay::utils::Transform {
+        (**self).transform()
+    }
+
+    fn src(&self) -> smithay::utils::Rectangle<f64, smithay::utils::Buffer> {
+        (**self).src()
+    }
+
+    fn damage_since(
+        &self,
+        scale: smithay::utils::Scale<f64>,
+        commit: Option<smithay::backend::renderer::utils::CommitCounter>,
+    ) -> smithay::backend::renderer::utils::DamageSet<i32, smithay::utils::Physical> {
+        (**self).damage_since(scale, commit)
+    }
+
+    fn opaque_regions(
+        &self,
+        scale: smithay::utils::Scale<f64>,
+    ) -> smithay::backend::renderer::utils::OpaqueRegions<i32, smithay::utils::Physical> {
+        (**self).opaque_regions(scale)
+    }
+
+    fn alpha(&self) -> f32 {
+        (**self).alpha()
+    }
+
+    fn kind(&self) -> smithay::backend::renderer::element::Kind {
+        (**self).kind()
+    }
+
+    fn is_framebuffer_effect(&self) -> bool {
+        (**self).is_framebuffer_effect()
+    }
+}
+
+impl
+    smithay::backend::renderer::element::RenderElement<
+        smithay::backend::renderer::gles::GlesRenderer,
+    > for Box<OutputRenderElements<smithay::backend::renderer::gles::GlesRenderer>>
+{
+    fn capture_framebuffer(
+        &self,
+        frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+        src: smithay::utils::Rectangle<f64, smithay::utils::Buffer>,
+        dst: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
+        cache: &smithay::utils::user_data::UserDataMap,
+    ) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+        smithay::backend::renderer::element::RenderElement::<
+            smithay::backend::renderer::gles::GlesRenderer,
+        >::capture_framebuffer(&**self, frame, src, dst, cache)
+    }
+
+    fn draw(
+        &self,
+        frame: &mut smithay::backend::renderer::gles::GlesFrame<'_, '_>,
+        src: smithay::utils::Rectangle<f64, smithay::utils::Buffer>,
+        dst: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
+        damage: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>],
+        opaque_regions: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), smithay::backend::renderer::gles::GlesError> {
+        smithay::backend::renderer::element::RenderElement::<
+            smithay::backend::renderer::gles::GlesRenderer,
+        >::draw(&**self, frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn underlying_storage(
+        &self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+    ) -> Option<smithay::backend::renderer::element::UnderlyingStorage<'_>> {
+        (**self).underlying_storage(renderer)
+    }
+}
+
+impl<'render>
+    smithay::backend::renderer::element::RenderElement<crate::backend::tty::TtyRenderer<'render>>
+    for Box<OutputRenderElements<crate::backend::tty::TtyRenderer<'render>>>
+{
+    fn capture_framebuffer(
+        &self,
+        frame: &mut crate::backend::tty::TtyFrame<'render, '_, '_>,
+        src: smithay::utils::Rectangle<f64, smithay::utils::Buffer>,
+        dst: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
+        cache: &smithay::utils::user_data::UserDataMap,
+    ) -> Result<(), crate::backend::tty::TtyRendererError<'render>> {
+        smithay::backend::renderer::element::RenderElement::<
+            crate::backend::tty::TtyRenderer<'render>,
+        >::capture_framebuffer(&**self, frame, src, dst, cache)
+    }
+
+    fn draw(
+        &self,
+        frame: &mut crate::backend::tty::TtyFrame<'render, '_, '_>,
+        src: smithay::utils::Rectangle<f64, smithay::utils::Buffer>,
+        dst: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
+        damage: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>],
+        opaque_regions: &[smithay::utils::Rectangle<i32, smithay::utils::Physical>],
+        cache: Option<&smithay::utils::user_data::UserDataMap>,
+    ) -> Result<(), crate::backend::tty::TtyRendererError<'render>> {
+        smithay::backend::renderer::element::RenderElement::<
+            crate::backend::tty::TtyRenderer<'render>,
+        >::draw(&**self, frame, src, dst, damage, opaque_regions, cache)
+    }
+
+    fn underlying_storage(
+        &self,
+        renderer: &mut crate::backend::tty::TtyRenderer<'render>,
+    ) -> Option<smithay::backend::renderer::element::UnderlyingStorage<'_>> {
+        (**self).underlying_storage(renderer)
     }
 }

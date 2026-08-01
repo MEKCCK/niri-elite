@@ -445,6 +445,10 @@ impl<W: LayoutElement> Tile<W> {
         self.are_transitions_ongoing() || self.window.rules().baba_is_float == Some(true)
     }
 
+    pub fn has_open_animation(&self) -> bool {
+        self.open_animation.is_some()
+    }
+
     pub fn are_transitions_ongoing(&self) -> bool {
         self.open_animation.is_some()
             || self.resize_animation.is_some()
@@ -1316,20 +1320,46 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn render<R: NiriRenderer>(
         &self,
+        ctx: RenderCtx<R>,
+        location: Point<f64, Logical>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(TileRenderElement<R>),
+    ) {
+        self.render_with_alpha_animations(ctx, location, xray_pos, focus_ring, true, push);
+    }
+
+    pub fn render_ignoring_alpha_animation<R: NiriRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        location: Point<f64, Logical>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(TileRenderElement<R>),
+    ) {
+        self.render_with_alpha_animations(ctx, location, xray_pos, focus_ring, false, push);
+    }
+
+    fn render_with_alpha_animations<R: NiriRenderer>(
+        &self,
         mut ctx: RenderCtx<R>,
         location: Point<f64, Logical>,
         xray_pos: XrayPos,
         focus_ring: bool,
+        alpha_animations: bool,
         push: &mut dyn FnMut(TileRenderElement<R>),
     ) {
         let _span = tracy_client::span!("Tile::render");
 
         let scale = Scale::from(self.scale);
 
-        let tile_alpha = self
-            .alpha_animation
-            .as_ref()
-            .map_or(1., |alpha| alpha.anim.clamped_value()) as f32;
+        let tile_alpha = if alpha_animations {
+            self.alpha_animation
+                .as_ref()
+                .map_or(1., |alpha| alpha.anim.clamped_value()) as f32
+        } else {
+            1.
+        };
 
         let mut pushed = false;
         self.window().set_offscreen_data(None);
@@ -1361,27 +1391,29 @@ impl<W: LayoutElement> Tile<W> {
                     warn!("error rendering window opening animation: {err:?}");
                 }
             }
-        } else if let Some(alpha) = &self.alpha_animation {
-            let mut ctx = ctx.as_gles();
-            let mut elements = Vec::new();
-            self.render_inner(
-                ctx.r(),
-                Point::new(0., 0.),
-                xray_pos,
-                focus_ring,
-                &mut |elem| elements.push(elem),
-            );
-            match alpha.offscreen.render(ctx.renderer, scale, &elements) {
-                Ok((elem, _sync, data)) => {
-                    let offset = elem.offset();
-                    let elem = elem.with_alpha(tile_alpha).with_offset(location + offset);
+        } else if alpha_animations {
+            if let Some(alpha) = &self.alpha_animation {
+                let mut ctx = ctx.as_gles();
+                let mut elements = Vec::new();
+                self.render_inner(
+                    ctx.r(),
+                    Point::new(0., 0.),
+                    xray_pos,
+                    focus_ring,
+                    &mut |elem| elements.push(elem),
+                );
+                match alpha.offscreen.render(ctx.renderer, scale, &elements) {
+                    Ok((elem, _sync, data)) => {
+                        let offset = elem.offset();
+                        let elem = elem.with_alpha(tile_alpha).with_offset(location + offset);
 
-                    self.window().set_offscreen_data(Some(data));
-                    push(elem.into());
-                    pushed = true;
-                }
-                Err(err) => {
-                    warn!("error rendering tile to offscreen for alpha animation: {err:?}");
+                        self.window().set_offscreen_data(Some(data));
+                        push(elem.into());
+                        pushed = true;
+                    }
+                    Err(err) => {
+                        warn!("error rendering tile to offscreen for alpha animation: {err:?}");
+                    }
                 }
             }
         }
@@ -1532,6 +1564,10 @@ impl<W: LayoutElement> Tile<W> {
 
     pub fn focus_ring(&self) -> &FocusRing {
         &self.focus_ring
+    }
+
+    pub fn focus_ring_mut(&mut self) -> &mut FocusRing {
+        &mut self.focus_ring
     }
 
     pub fn options(&self) -> &Rc<Options> {

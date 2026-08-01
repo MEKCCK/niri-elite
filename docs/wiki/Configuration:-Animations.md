@@ -46,6 +46,10 @@ animations {
         spring damping-ratio=0.6 stiffness=1000 epsilon=0.001
     }
 
+    cursor-enlarge {
+        spring damping-ratio=0.82 stiffness=400 epsilon=0.0001
+    }
+
     exit-confirmation-open-close {
         spring damping-ratio=0.6 stiffness=500 epsilon=0.01
     }
@@ -56,6 +60,10 @@ animations {
     }
 
     overview-open-close {
+        spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+    }
+
+    magnifier {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
     }
 
@@ -381,6 +389,20 @@ animations {
 }
 ```
 
+#### `cursor-enlarge`
+
+<sup>Since: 26.04</sup>
+
+The grow/shrink animation when the [shake-to-enlarge](./Configuration:-Miscellaneous.md#cursor) cursor feature triggers.
+
+```kdl
+animations {
+    cursor-enlarge {
+        spring damping-ratio=0.82 stiffness=400 epsilon=0.0001
+    }
+}
+```
+
 #### `exit-confirmation-open-close`
 
 <sup>Since: 25.08</sup>
@@ -421,6 +443,20 @@ The open/close zoom animation of the [Overview](./Overview.md).
 ```kdl
 animations {
     overview-open-close {
+        spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+    }
+}
+```
+
+#### `magnifier`
+
+<sup>Since: 26.04</sup>
+
+The toggle zoom animation of the [screen magnifier](./Configuration:-Miscellaneous.md#magnifier).
+
+```kdl
+animations {
+    magnifier {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
     }
 }

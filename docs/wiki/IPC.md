@@ -4,6 +4,30 @@ Check `niri msg --help` for available commands.
 The `--json` flag prints the response in JSON, rather than formatted.
 For example, `niri msg --json outputs`.
 
+### Screenshots To Stdout
+
+The screenshot actions can write the captured PNG to stdout with `--stdout`.
+This is intended for piping screenshots into other tools:
+
+```sh
+niri msg action screenshot --stdout | satty -f -
+niri msg action screenshot-screen --stdout --write-to-disk=false | satty -f -
+niri msg action screenshot-window --stdout --write-to-disk=false | satty -f -
+```
+
+Without `--stdout`, screenshot actions keep their usual behavior and don't print image data.
+With `--stdout`, screenshots are still copied to the clipboard, and `screenshot-screen` and `screenshot-window` still respect `--write-to-disk`.
+
+For the interactive `screenshot` action, `niri msg` waits until you confirm or cancel the selection.
+If you cancel the selection, the IPC request returns an error.
+
+When talking to the IPC socket directly, set `stdout` to `true` on the screenshot action.
+Niri returns a `Screenshot` response with base64-encoded PNG data:
+
+```json
+{"Ok":{"Screenshot":{"png_base64":"..."}}}
+```
+
 > [!TIP]
 > If you're getting parsing errors from `niri msg` after upgrading niri, make sure that you've restarted niri itself.
 > You might be trying to run a newer `niri msg` against an older `niri` compositor.

@@ -1,9 +1,10 @@
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::iter::Peekable;
 use std::path::Path;
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
+use base64::Engine as _;
 use niri_config::OutputName;
 use niri_ipc::socket::Socket;
 use niri_ipc::{
@@ -317,11 +318,29 @@ pub fn handle_msg(mut msg: Msg, json: bool) -> anyhow::Result<()> {
                 println!("No color was picked.");
             }
         }
-        Msg::Action { .. } => {
-            let Response::Handled = response else {
+        Msg::Action { .. } => match response {
+            Response::Handled => (),
+            Response::Screenshot { png_base64 } => {
+                if json {
+                    let response = Response::Screenshot { png_base64 };
+                    let output =
+                        serde_json::to_string(&response).context("error formatting response")?;
+                    println!("{output}");
+                    return Ok(());
+                }
+
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(png_base64)
+                    .context("error decoding screenshot response")?;
+                std::io::stdout()
+                    .lock()
+                    .write_all(&png)
+                    .context("error writing screenshot to stdout")?;
+            }
+            response => {
                 bail!("unexpected response: expected Handled, got {response:?}");
-            };
-        }
+            }
+        },
         Msg::Output { output, .. } => {
             let Response::OutputConfigChanged(response) = response else {
                 bail!("unexpected response: expected OutputConfigChanged, got {response:?}");

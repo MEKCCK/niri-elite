@@ -8,7 +8,9 @@ use calloop::LoopHandle;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::gbm::GbmDevice;
 use smithay::backend::drm::DrmDeviceFd;
-use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
+use smithay::backend::renderer::element::utils::{
+    Relocate, RelocateRenderElement, RescaleRenderElement,
+};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::desktop::Window;
 use smithay::output::Output;
@@ -586,9 +588,32 @@ impl Niri {
                     // happily appear anywhere outside the output video source in OBS.
                     if output_geo.contains(pointer_loc) {
                         pointer_pos = pointer_loc - output_geo.loc;
+                        let mut visual_pointer_pos = pointer_pos;
+                        if let Some((zoom, center)) = self.compute_magnifier_params(output) {
+                            let output_scale_f = output.current_scale().fractional_scale();
+                            let center_logical = center.to_f64().to_logical(output_scale_f);
+                            let cx = center_logical.x;
+                            let cy = center_logical.y;
+                            visual_pointer_pos.x = cx + (pointer_pos.x - cx) * zoom;
+                            visual_pointer_pos.y = cy + (pointer_pos.y - cy) * zoom;
+                        }
+
                         self.render_pointer(renderer, output, &mut |elem| {
-                            elements.push(elem.into())
+                            let magnifier_params = self.compute_magnifier_params(output);
+                            let scale_cursor = self.config.borrow().magnifier.scale_cursor;
+
+                            if let Some((zoom, center)) = magnifier_params {
+                                if scale_cursor {
+                                    elements.push(CastRenderElement::MagnifiedPointer(
+                                        RescaleRenderElement::from_element(elem, center, zoom),
+                                    ));
+                                    return;
+                                }
+                            }
+                            elements.push(elem.into());
                         });
+
+                        pointer_pos = visual_pointer_pos;
                     }
                 }
 
@@ -627,6 +652,8 @@ impl Niri {
         target_presentation_time: Duration,
     ) {
         let _span = tracy_client::span!("Niri::render_windows_for_screen_cast");
+
+        let was_magnifier_capture = self.magnifier_capture.replace(true);
 
         let scale = Scale::from(output.current_scale().fractional_scale());
 
@@ -703,6 +730,8 @@ impl Niri {
         for id in casts_to_stop {
             self.stop_cast(id);
         }
+
+        self.magnifier_capture.set(was_magnifier_capture);
     }
 
     pub fn stop_cast(&mut self, session_id: CastSessionId) {
@@ -800,5 +829,6 @@ niri_render_elements! {
         Window = WindowCastRenderElements<R>,
         Pointer = PointerRenderElements<R>,
         RelocatedPointer = RelocateRenderElement<PointerRenderElements<R>>,
+        MagnifiedPointer = RescaleRenderElement<PointerRenderElements<R>>,
     }
 }

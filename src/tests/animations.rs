@@ -188,3 +188,201 @@ fn egl_clientside_height_change_doesnt_animate() {
     200 × 200 at x:  0 y: 50
     ");
 }
+
+#[test]
+fn closing_window_stays_in_place_during_left_refill() {
+    const MOVEMENT: Kind = Kind::Easing(EasingParams {
+        duration_ms: 1000,
+        curve: Curve::Linear,
+    });
+    const CLOSE: Kind = Kind::Easing(EasingParams {
+        duration_ms: 2000,
+        curve: Curve::Linear,
+    });
+
+    let mut config = Config::default();
+    config.layout.gaps = 0.;
+    config.animations.window_movement.0.kind = MOVEMENT;
+    config.animations.window_close.anim.kind = CLOSE;
+    config.debug.disable_transactions = true;
+
+    let mut f = Fixture::with_config(config);
+    f.niri_state().backend.headless().add_renderer().unwrap();
+    f.add_output(1, (1280, 720));
+
+    let id = f.add_client();
+    let _surface1 = create_window(&mut f, id, 640, 720);
+    let surface2 = create_window(&mut f, id, 640, 720);
+    let _surface3 = create_window(&mut f, id, 640, 720);
+    f.double_roundtrip(id);
+
+    f.niri().layout.focus_left();
+    set_time(f.niri(), Duration::ZERO);
+    f.niri_complete_animations();
+    set_time(f.niri(), Duration::ZERO);
+
+    let window = f.client(id).window(&surface2);
+    window.attach_null();
+    window.commit();
+    f.roundtrip(id);
+
+    let closing_position = |niri: &Niri| {
+        niri.layout
+            .active_workspace()
+            .unwrap()
+            .scrolling()
+            .closing_window_render_positions()
+            .next()
+            .unwrap()
+    };
+
+    assert_eq!(closing_position(f.niri()), Point::from((0., 0.)));
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-640 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(500));
+    f.niri().advance_animations();
+
+    assert_eq!(closing_position(f.niri()), Point::from((0., 0.)));
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-320 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(1000));
+    f.niri().advance_animations();
+
+    assert_eq!(closing_position(f.niri()), Point::from((0., 0.)));
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:  0 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(2000));
+    f.niri().advance_animations();
+
+    assert_eq!(
+        f.niri()
+            .layout
+            .active_workspace()
+            .unwrap()
+            .scrolling()
+            .closing_window_render_positions()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn closing_windows_stay_in_place_during_rightmost_refill() {
+    const MOVEMENT: Kind = Kind::Easing(EasingParams {
+        duration_ms: 1000,
+        curve: Curve::Linear,
+    });
+    const CLOSE: Kind = Kind::Easing(EasingParams {
+        duration_ms: 2000,
+        curve: Curve::Linear,
+    });
+
+    let mut config = Config::default();
+    config.layout.gaps = 0.;
+    config.animations.horizontal_view_movement.0.kind = MOVEMENT;
+    config.animations.window_close.anim.kind = CLOSE;
+    config.debug.disable_transactions = true;
+
+    let mut f = Fixture::with_config(config);
+    f.niri_state().backend.headless().add_renderer().unwrap();
+    f.add_output(1, (1280, 720));
+
+    let id = f.add_client();
+    let _surface1 = create_window(&mut f, id, 640, 720);
+    let _surface2 = create_window(&mut f, id, 640, 720);
+    let surface3 = create_window(&mut f, id, 640, 720);
+    let surface4 = create_window(&mut f, id, 640, 720);
+    f.double_roundtrip(id);
+
+    f.niri().layout.focus_left();
+    f.niri_complete_animations();
+    f.niri().layout.focus_right();
+    f.niri_complete_animations();
+    set_time(f.niri(), Duration::ZERO);
+
+    let window = f.client(id).window(&surface4);
+    window.attach_null();
+    window.commit();
+    f.roundtrip(id);
+
+    let closing_positions = |niri: &Niri| {
+        niri.layout
+            .active_workspace()
+            .unwrap()
+            .scrolling()
+            .closing_window_render_positions()
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(closing_positions(f.niri()), [Point::from((640., 0.))]);
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-1280 y:  0
+    640 × 720 at x:-640 y:  0
+    640 × 720 at x:  0 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(500));
+    f.niri().advance_animations();
+
+    assert_eq!(closing_positions(f.niri()), [Point::from((640., 0.))]);
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-960 y:  0
+    640 × 720 at x:-320 y:  0
+    640 × 720 at x:320 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(1000));
+    f.niri().advance_animations();
+
+    assert_eq!(closing_positions(f.niri()), [Point::from((640., 0.))]);
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-640 y:  0
+    640 × 720 at x:  0 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    let window = f.client(id).window(&surface3);
+    window.attach_null();
+    window.commit();
+    f.roundtrip(id);
+
+    assert_eq!(
+        closing_positions(f.niri()),
+        [Point::from((640., 0.)), Point::from((640., 0.))]
+    );
+
+    set_time(f.niri(), Duration::from_millis(1500));
+    f.niri().advance_animations();
+
+    assert_eq!(
+        closing_positions(f.niri()),
+        [Point::from((640., 0.)), Point::from((640., 0.))]
+    );
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:-320 y:  0
+    640 × 720 at x:320 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(2000));
+    f.niri().advance_animations();
+
+    assert_eq!(closing_positions(f.niri()), [Point::from((640., 0.))]);
+    assert_snapshot!(format_tiles(f.niri()), @r"
+    640 × 720 at x:  0 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    set_time(f.niri(), Duration::from_millis(3000));
+    f.niri().advance_animations();
+
+    assert!(closing_positions(f.niri()).is_empty());
+}

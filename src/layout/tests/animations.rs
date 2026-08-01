@@ -1009,6 +1009,64 @@ fn width_resize_and_cancel() {
 }
 
 #[test]
+fn unmaximizing_column_restores_screen_position() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::SetColumnWidth(SizeChange::SetProportion(50.)),
+        Op::Communicate(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::SetColumnWidth(SizeChange::SetProportion(50.)),
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops_with_options(make_options(), ops);
+
+    assert_snapshot!(format_tiles(&layout), @r"
+    640 × 720 at x:  0 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+
+    let ops = [
+        Op::MaximizeColumn,
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+
+    assert_snapshot!(format_tiles(&layout), @r"
+    640 × 720 at x:-640 y:  0
+    1280 × 720 at x:  0 y:  0
+    ");
+
+    let ops = [Op::MaximizeColumn, Op::Communicate(2)];
+    check_ops_on_layout(&mut layout, ops);
+
+    assert_snapshot!(format_tiles(&layout), @r"
+    640 × 720 at x:-640 y:  0
+    1280 × 720 at x:  0 y:  0
+    ");
+
+    Op::AdvanceAnimations { msec_delta: 500 }.apply(&mut layout);
+
+    assert_snapshot!(format_tiles(&layout), @r"
+    640 × 720 at x:-320 y:  0
+    960 × 720 at x:320 y:  0
+    ");
+
+    Op::CompleteAnimations.apply(&mut layout);
+
+    assert_snapshot!(format_tiles(&layout), @r"
+    640 × 720 at x:  0 y:  0
+    640 × 720 at x:640 y:  0
+    ");
+}
+
+#[test]
 fn width_resize_and_cancel_of_column_to_the_left() {
     let ops = [
         Op::AddOutput(1),

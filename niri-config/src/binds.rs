@@ -39,6 +39,7 @@ pub struct Key {
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum Trigger {
     Keysym(Keysym),
+    Modifier(Modifiers),
     MouseLeft,
     MouseRight,
     MouseMiddle,
@@ -363,6 +364,11 @@ pub enum Action {
     #[knuffel(skip)]
     StopCast(u64),
     ToggleOverview,
+    ToggleGridOverview,
+    OpenGridOverview,
+    CloseGridOverview,
+    ToggleMagnifier,
+    AdjustMagnifierZoom(#[knuffel(argument)] f64),
     OpenOverview,
     CloseOverview,
     #[knuffel(skip)]
@@ -404,25 +410,28 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::Spawn { command } => Self::Spawn(command),
             niri_ipc::Action::SpawnSh { command } => Self::SpawnSh(command),
             niri_ipc::Action::DoScreenTransition { delay_ms } => Self::DoScreenTransition(delay_ms),
-            niri_ipc::Action::Screenshot { show_pointer, path } => {
-                Self::Screenshot(show_pointer, path)
-            }
+            niri_ipc::Action::Screenshot {
+                show_pointer, path, ..
+            } => Self::Screenshot(show_pointer, path),
             niri_ipc::Action::ScreenshotScreen {
                 write_to_disk,
                 show_pointer,
                 path,
+                ..
             } => Self::ScreenshotScreen(write_to_disk, show_pointer, path),
             niri_ipc::Action::ScreenshotWindow {
                 id: None,
                 write_to_disk,
                 show_pointer,
                 path,
+                ..
             } => Self::ScreenshotWindow(write_to_disk, show_pointer, path),
             niri_ipc::Action::ScreenshotWindow {
                 id: Some(id),
                 write_to_disk,
                 show_pointer,
                 path,
+                ..
             } => Self::ScreenshotWindowById {
                 id,
                 write_to_disk,
@@ -698,6 +707,11 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::ClearDynamicCastTarget {} => Self::ClearDynamicCastTarget,
             niri_ipc::Action::StopCast { session_id } => Self::StopCast(session_id),
             niri_ipc::Action::ToggleOverview {} => Self::ToggleOverview,
+            niri_ipc::Action::ToggleGridOverview {} => Self::ToggleGridOverview,
+            niri_ipc::Action::OpenGridOverview {} => Self::OpenGridOverview,
+            niri_ipc::Action::CloseGridOverview {} => Self::CloseGridOverview,
+            niri_ipc::Action::ToggleMagnifier {} => Self::ToggleMagnifier,
+            niri_ipc::Action::AdjustMagnifierZoom { delta } => Self::AdjustMagnifierZoom(delta),
             niri_ipc::Action::OpenOverview {} => Self::OpenOverview,
             niri_ipc::Action::CloseOverview {} => Self::CloseOverview,
             niri_ipc::Action::ToggleWindowUrgent { id } => Self::ToggleWindowUrgent(id),
@@ -954,30 +968,15 @@ impl FromStr for Key {
 
         for part in split {
             let part = part.trim();
-            if part.eq_ignore_ascii_case("mod") {
-                modifiers |= Modifiers::COMPOSITOR
-            } else if part.eq_ignore_ascii_case("ctrl") || part.eq_ignore_ascii_case("control") {
-                modifiers |= Modifiers::CTRL;
-            } else if part.eq_ignore_ascii_case("shift") {
-                modifiers |= Modifiers::SHIFT;
-            } else if part.eq_ignore_ascii_case("alt") {
-                modifiers |= Modifiers::ALT;
-            } else if part.eq_ignore_ascii_case("super") || part.eq_ignore_ascii_case("win") {
-                modifiers |= Modifiers::SUPER;
-            } else if part.eq_ignore_ascii_case("iso_level3_shift")
-                || part.eq_ignore_ascii_case("mod5")
-            {
-                modifiers |= Modifiers::ISO_LEVEL3_SHIFT;
-            } else if part.eq_ignore_ascii_case("iso_level5_shift")
-                || part.eq_ignore_ascii_case("mod3")
-            {
-                modifiers |= Modifiers::ISO_LEVEL5_SHIFT;
-            } else {
+            let Some(modifier) = modifier_from_name(part) else {
                 return Err(miette!("invalid modifier: {part}"));
-            }
+            };
+            modifiers |= modifier;
         }
 
-        let trigger = if key.eq_ignore_ascii_case("MouseLeft") {
+        let trigger = if let Some(modifier) = modifier_from_name(key) {
+            Trigger::Modifier(modifier)
+        } else if key.eq_ignore_ascii_case("MouseLeft") {
             Trigger::MouseLeft
         } else if key.eq_ignore_ascii_case("MouseRight") {
             Trigger::MouseRight
@@ -1048,6 +1047,26 @@ impl FromStr for Key {
     }
 }
 
+fn modifier_from_name(name: &str) -> Option<Modifiers> {
+    if name.eq_ignore_ascii_case("mod") {
+        Some(Modifiers::COMPOSITOR)
+    } else if name.eq_ignore_ascii_case("ctrl") || name.eq_ignore_ascii_case("control") {
+        Some(Modifiers::CTRL)
+    } else if name.eq_ignore_ascii_case("shift") {
+        Some(Modifiers::SHIFT)
+    } else if name.eq_ignore_ascii_case("alt") {
+        Some(Modifiers::ALT)
+    } else if name.eq_ignore_ascii_case("super") || name.eq_ignore_ascii_case("win") {
+        Some(Modifiers::SUPER)
+    } else if name.eq_ignore_ascii_case("iso_level3_shift") || name.eq_ignore_ascii_case("mod5") {
+        Some(Modifiers::ISO_LEVEL3_SHIFT)
+    } else if name.eq_ignore_ascii_case("iso_level5_shift") || name.eq_ignore_ascii_case("mod3") {
+        Some(Modifiers::ISO_LEVEL5_SHIFT)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,6 +1125,38 @@ mod tests {
             Key {
                 trigger: Trigger::Keysym(Keysym::a),
                 modifiers: Modifiers::ISO_LEVEL5_SHIFT
+            },
+        );
+    }
+
+    #[test]
+    fn parse_modifier_triggers() {
+        assert_eq!(
+            "Super".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Modifier(Modifiers::SUPER),
+                modifiers: Modifiers::empty(),
+            },
+        );
+        assert_eq!(
+            "Win".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Modifier(Modifiers::SUPER),
+                modifiers: Modifiers::empty(),
+            },
+        );
+        assert_eq!(
+            "Mod".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Modifier(Modifiers::COMPOSITOR),
+                modifiers: Modifiers::empty(),
+            },
+        );
+        assert_eq!(
+            "Ctrl+Super".parse::<Key>().unwrap(),
+            Key {
+                trigger: Trigger::Modifier(Modifiers::SUPER),
+                modifiers: Modifiers::CTRL,
             },
         );
     }

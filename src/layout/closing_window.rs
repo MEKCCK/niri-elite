@@ -14,7 +14,7 @@ use smithay::backend::renderer::Texture;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::{Blocker, BlockerState};
 
-use crate::animation::Animation;
+use crate::animation::{Animation, Clock};
 use crate::niri_render_elements;
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::shader_element::ShaderRenderElement;
@@ -46,6 +46,12 @@ pub struct ClosingWindow {
 
     /// Position in the workspace.
     pos: Point<f64, Logical>,
+
+    /// Horizontal movement synchronized with a layout change.
+    move_x: Option<Animation>,
+
+    /// Whether this window should compensate for scrolling view movements.
+    compensate_view_movements: bool,
 
     /// How much the texture should be offset.
     buffer_offset: Point<f64, Logical>,
@@ -94,6 +100,10 @@ impl AnimationState {
 }
 
 impl ClosingWindow {
+    pub fn position(&self) -> Point<f64, Logical> {
+        self.pos
+    }
+
     pub fn new<E: RenderElement<GlesRenderer>>(
         renderer: &mut GlesRenderer,
         snapshot: RenderSnapshot<E, E>,
@@ -104,8 +114,18 @@ impl ClosingWindow {
         anim: Animation,
     ) -> anyhow::Result<Self> {
         let _span = tracy_client::span!("ClosingWindow::new");
+        let snapshot_size: Size<f64, Logical> =
+            Size::from((snapshot.size.w.max(1.), snapshot.size.h.max(1.)));
+        let snapshot_scale = (geo_size.w / snapshot_size.w).max(0.);
 
         let mut render_to_texture = |elements: Vec<E>| -> anyhow::Result<_> {
+            let elements: Vec<_> = elements
+                .into_iter()
+                .map(|elem| {
+                    RescaleRenderElement::from_element(elem, Point::from((0, 0)), snapshot_scale)
+                })
+                .collect();
+
             let (texture, _sync_point, geo) = render_to_encompassing_texture(
                 renderer,
                 scale,
@@ -149,6 +169,8 @@ impl ClosingWindow {
             block_out_from: snapshot.block_out_from,
             geo_size,
             pos,
+            move_x: None,
+            compensate_view_movements: false,
             buffer_offset,
             buffer_with_blocked_out_bg_offset,
             blocked_out_buffer_offset,
@@ -174,6 +196,37 @@ impl ClosingWindow {
             AnimationState::Waiting { .. } => true,
             AnimationState::Animating(anim) => !anim.is_done(),
         }
+    }
+
+    pub(super) fn enable_view_movement_compensation(&mut self) {
+        self.compensate_view_movements = true;
+    }
+
+    pub(super) fn compensate_view_movement(
+        &mut self,
+        delta: f64,
+        clock: &Clock,
+        config: niri_config::Animation,
+    ) {
+        if !self.compensate_view_movements || delta == 0. {
+            return;
+        }
+
+        let current = self.move_x.as_ref().map_or(0., Animation::value);
+        self.move_x = Some(Animation::new(
+            clock.clone(),
+            current,
+            current + delta,
+            0.,
+            config,
+        ));
+    }
+
+    pub(super) fn position_in_view(&self, view_x: f64) -> Point<f64, Logical> {
+        let mut pos = self.pos;
+        pos.x += self.move_x.as_ref().map_or(0., Animation::value);
+        pos.x -= view_x;
+        pos
     }
 
     pub fn render(
@@ -207,8 +260,7 @@ impl ClosingWindow {
                 let elem = PrimaryGpuTextureRenderElement(elem);
                 let elem = RescaleRenderElement::from_element(elem, Point::from((0, 0)), 1.);
 
-                let mut location = self.pos + offset;
-                location.x -= view_rect.loc.x;
+                let location = self.position_in_view(view_rect.loc.x) + offset;
                 let elem = RelocateRenderElement::from_element(
                     elem,
                     location.to_physical_precise_round(scale),
@@ -232,7 +284,7 @@ impl ClosingWindow {
 
             // Round to physical pixels relative to the view position. This is similar to what
             // happens when rendering normal windows.
-            let relative = self.pos - view_rect.loc;
+            let relative = self.position_in_view(view_rect.loc.x);
             let pos = view_rect.loc + relative.to_physical_precise_round(scale).to_logical(scale);
 
             let geo_loc = Vec2::new(pos.x as f32, pos.y as f32);
@@ -289,8 +341,7 @@ impl ClosingWindow {
             ((1. - clamped_progress) / 5. + 0.8).max(0.),
         );
 
-        let mut location = self.pos + offset;
-        location.x -= view_rect.loc.x;
+        let location = self.position_in_view(view_rect.loc.x) + offset;
         let elem = RelocateRenderElement::from_element(
             elem,
             location.to_physical_precise_round(scale),

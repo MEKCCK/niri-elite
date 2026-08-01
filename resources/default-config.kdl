@@ -69,6 +69,19 @@ input {
     // focus-follows-mouse max-scroll-amount="0%"
 }
 
+// Gesture configuration.
+// The top-left hot corner toggles the overview by default, and the bottom-left
+// hot corner toggles the grid overview by default.
+// gestures {
+//     hot-corners {
+//         // off
+//         top-left
+//         // top-right
+//         bottom-left { grid-overview; }
+//         // bottom-right
+//     }
+// }
+
 // You can configure outputs by their name, which you can find
 // by running `niri msg outputs` while inside a niri instance.
 // The built-in laptop monitor is usually called "eDP-1".
@@ -293,6 +306,80 @@ screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
 // You can also set this to null to disable saving screenshots to disk.
 // screenshot-path null
 
+// Cursor settings.
+cursor {
+    // Set the XCursor theme. The cursor theme is loaded from
+    // ~/.local/share/icons or /usr/share/icons.
+    // xcursor-theme "default"
+
+    // Set the cursor size in pixels.
+    xcursor-size 24
+
+    // Hide the cursor after this many milliseconds of inactivity.
+    // hide-after-inactive-ms 5000
+
+    // Shake-to-enlarge: rapidly move the mouse back and forth to enlarge the cursor.
+    shake-to-enlarge {
+        // Uncomment to disable shake-to-enlarge.
+        // off
+
+        // How much the cursor enlarges (multiplier).
+        zoom-factor 5
+
+        // Shake speed threshold. Higher = less sensitive.
+        threshold 2000
+
+        // How long the enlarged cursor stays big after shaking stops, in milliseconds.
+        hold-duration-ms 1500
+
+        // Uncomment to make the cursor gradually grow larger while continuously shaking.
+        // grow
+
+        // Growth speed when grow is enabled.
+        grow-speed 0.01
+    }
+}
+
+// Grid overview settings.
+grid-overview {
+    // Make grid overview apply to all monitors. Set this to false to only toggle it on
+    // the focused monitor.
+    grid-all-monitors true
+
+    // Gap between grid cells.
+    gap 16
+
+    // Padding around the grid. Set one value for all sides, or configure each side
+    // separately with: padding { left 80; right 80; top 80; bottom 80; }
+    padding 80
+
+    // Minimum scale for grid cells.
+    min-scale 0.08
+
+    // Scale the focused column relative to its cell. Ranges from 1 to 2.
+    focused-column-scale 1.04
+
+    // When true (the default), tapping the Mod key alone (press and release without
+    // pressing any other key) toggles the grid overview, even without an explicit binding.
+    // Set to false to disable this built-in behavior.
+    // default-mod-action false
+}
+
+// Fullscreen magnifier settings.
+magnifier {
+    // Uncomment to disable the magnifier.
+    // off
+
+    // Magnification level.
+    zoom-factor 2
+
+    // Whether the magnified view follows the cursor.
+    track-cursor true
+
+    // Whether the cursor itself is scaled along with the magnified content.
+    scale-cursor true
+}
+
 // Animation settings.
 // The wiki explains how to configure individual animations:
 // https://niri-wm.github.io/niri/Configuration:-Animations
@@ -398,6 +485,17 @@ binds {
     // You can also move the mouse into the top-left hot corner,
     // or do a four-finger swipe up on a touchpad.
     Mod+O repeat=false { toggle-overview; }
+
+    // Tap Mod (press and release without pressing any other key in between)
+    // to toggle the grid overview: a view of all windows on the current workspaces.
+    Mod repeat=false { toggle-grid-overview; }
+
+    // Toggle the fullscreen magnifier on or off.
+    Mod+Shift+Z repeat=false { toggle-magnifier; }
+
+    // Adjust the magnifier zoom level with the scroll wheel.
+    Mod+Alt+WheelScrollUp   { adjust-magnifier-zoom 0.2; }
+    Mod+Alt+WheelScrollDown { adjust-magnifier-zoom -0.2; }
 
     Mod+Q repeat=false { close-window; }
 

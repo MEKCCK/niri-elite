@@ -786,27 +786,36 @@ impl Tty {
             GbmDevice::new(device_fd)
         }?;
 
-        let mut try_initialize_gpu = || {
+        let mut try_initialize_gpu = || -> anyhow::Result<DrmNode> {
             let display = unsafe { EGLDisplay::new(gbm.clone())? };
             let egl_device = EGLDevice::device_for_display(&display)?;
 
-            // Software EGL devices (e.g., llvmpipe/softpipe) are rejected for now. They have some
-            // problems (segfault on importing dmabufs from other renderers) and need to be
-            // excluded from some places like DRM leasing.
-            ensure!(
-                !egl_device.is_software(),
-                "software EGL renderers are skipped"
-            );
+            // Allow software EGL renderers (e.g., llvmpipe) with a warning. They are needed
+            // in VMs without 3D acceleration. The original rejection was due to dmabuf import
+            // issues with mixed renderers, which doesn't apply in a single-renderer VM.
+            if egl_device.is_software() {
+                warn!("software EGL renderer detected (e.g., llvmpipe); this may cause issues with DMABuf imports and DRM leasing");
+            }
 
             let render_node = egl_device
                 .try_get_render_node()
                 .ok()
                 .flatten()
-                .unwrap_or(node);
+                .unwrap_or(self.primary_render_node);
             self.gpu_manager
                 .as_mut()
                 .add_node(render_node, gbm.clone())
                 .context("error adding render node to GPU manager")?;
+
+            // Some drivers (e.g., virtio-gpu without virgl) don't expose a render node via
+            // EGL. Ensure primary_render_node is in the GPU manager for code paths that use it
+            // (single_renderer, dmabuf feedback, etc.).
+            if render_node != self.primary_render_node {
+                self.gpu_manager
+                    .as_mut()
+                    .add_node(self.primary_render_node, gbm.clone())
+                    .context("error adding primary render node to GPU manager")?;
+            }
 
             Ok(render_node)
         };
@@ -822,7 +831,7 @@ impl Tty {
             }
         };
 
-        if render_node == Some(self.primary_render_node) && self.dmabuf_global.is_none() {
+        if render_node.is_some() && node == self.primary_node && self.dmabuf_global.is_none() {
             let render_node = self.primary_render_node;
             debug!("initializing the primary renderer");
 

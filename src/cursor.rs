@@ -1,11 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
+use std::fs;
 use std::io::Read;
+use std::path::{Component, Path};
 use std::rc::Rc;
 
 use anyhow::{anyhow, Context};
+use serde::Deserialize;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData};
@@ -19,6 +21,16 @@ use xcursor::CursorTheme;
 static FALLBACK_CURSOR_DATA: &[u8] = include_bytes!("../resources/cursor.rgba");
 
 type XCursorCache = HashMap<(CursorIcon, i32), Option<Rc<XCursor>>>;
+
+#[derive(Debug, Deserialize)]
+struct SvgCursorFrameMetadata {
+    filename: String,
+    #[serde(default)]
+    delay: u32,
+    hotspot_x: f64,
+    hotspot_y: f64,
+    nominal_size: f64,
+}
 
 pub struct CursorManager {
     theme: CursorTheme,
@@ -154,8 +166,10 @@ impl CursorManager {
         self.current_cursor = cursor;
     }
 
-    /// Load the cursor with the given `name` from the file system picking the closest
-    /// one to the given `size`.
+    /// Load the cursor with the given `name` from the file system.
+    ///
+    /// Scalable SVG cursors are preferred when available; otherwise, this picks the closest
+    /// XCursor bitmap size to the requested nominal size.
     fn load_xcursor(theme: &CursorTheme, name: &str, size: i32) -> anyhow::Result<XCursor> {
         let _span = tracy_client::span!("load_xcursor");
 
@@ -163,12 +177,16 @@ impl CursorManager {
             .load_icon(name)
             .ok_or_else(|| anyhow!("no default icon"))?;
 
-        let mut file = File::open(path).context("error opening cursor icon file")?;
+        let mut file = fs::File::open(&path).context("error opening cursor icon file")?;
         let mut buf = vec![];
         file.read_to_end(&mut buf)
             .context("error reading cursor icon file")?;
 
-        let mut images = parse_xcursor(&buf).context("error parsing cursor icon file")?;
+        let mut images = if let Some(svg_images) = Self::load_svg(&path, name, size) {
+            svg_images
+        } else {
+            parse_xcursor(&buf).context("error parsing cursor icon file")?
+        };
 
         let (width, height) = images
             .iter()
@@ -183,6 +201,95 @@ impl CursorManager {
         Ok(XCursor {
             images,
             animation_duration,
+        })
+    }
+
+    /// Try to render an SVG cursor at the given nominal size.
+    ///
+    /// First looks for KDE-style scalable cursors in
+    /// `cursors_scalable/<name>/metadata.json`, then falls back to simple SVG files.
+    fn load_svg(xcursor_path: &Path, name: &str, size: i32) -> Option<Vec<Image>> {
+        Self::load_scalable_svg(xcursor_path, name, size)
+            .or_else(|| Self::load_simple_svg(xcursor_path, name, size).map(|image| vec![image]))
+    }
+
+    fn load_scalable_svg(xcursor_path: &Path, name: &str, size: i32) -> Option<Vec<Image>> {
+        let theme_dir = xcursor_path.parent()?.parent()?;
+        let scalable_dir = theme_dir.join("cursors_scalable").join(name);
+
+        let metadata = fs::read_to_string(scalable_dir.join("metadata.json")).ok()?;
+        let metadata: Vec<SvgCursorFrameMetadata> = serde_json::from_str(&metadata).ok()?;
+        if metadata.is_empty() {
+            return None;
+        }
+
+        let mut images = Vec::with_capacity(metadata.len());
+        for frame in metadata {
+            let filename = Path::new(&frame.filename);
+            if !filename
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+                || frame.nominal_size <= 0.
+                || !frame.nominal_size.is_finite()
+            {
+                return None;
+            }
+
+            let svg_data = fs::read_to_string(scalable_dir.join(filename)).ok()?;
+            let scale = size as f64 / frame.nominal_size;
+            let (width, height, pixels_rgba, xhot, yhot) =
+                crate::render_helpers::svg::render_cursor(
+                    &svg_data,
+                    scale,
+                    Some((frame.hotspot_x, frame.hotspot_y)),
+                )?;
+            images.push(Image {
+                size: size as u32,
+                width,
+                height,
+                xhot,
+                yhot,
+                delay: frame.delay,
+                pixels_rgba,
+                pixels_argb: vec![],
+            });
+        }
+
+        Some(images)
+    }
+
+    /// Try to render a simple SVG cursor next to the XCursor bitmap.
+    ///
+    /// Looks for `<name>.svg` in the same directory as the XCursor file,
+    /// and falls back to `<icon_path>.svg`.
+    fn load_simple_svg(xcursor_path: &Path, name: &str, size: i32) -> Option<Image> {
+        let dir = xcursor_path.parent()?;
+
+        // Try <cursors_dir>/<name>.svg first, then <xcursor_path>.svg
+        let svg_path = dir.join(format!("{name}.svg"));
+        let svg_path = if svg_path.exists() {
+            svg_path
+        } else {
+            let alt = xcursor_path.with_extension("svg");
+            if alt.exists() {
+                alt
+            } else {
+                return None;
+            }
+        };
+
+        let svg_data = fs::read_to_string(&svg_path).ok()?;
+        let (width, height, pixels_rgba, xhot, yhot) =
+            crate::render_helpers::svg::render_cursor_to_size(&svg_data, size as u32)?;
+        Some(Image {
+            size: size as u32,
+            width,
+            height,
+            xhot,
+            yhot,
+            delay: 0,
+            pixels_rgba,
+            pixels_argb: vec![],
         })
     }
 

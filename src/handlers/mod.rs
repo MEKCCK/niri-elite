@@ -828,7 +828,7 @@ impl XdgActivationHandler for State {
                     mapped.set_urgent(true);
                     self.niri.queue_redraw_all();
                 } else {
-                    self.niri.layout.activate_window(&window);
+                    self.niri.layout.activate_window_from_activation(&window);
                     self.niri.layer_shell_on_demand_focus = None;
                     self.niri.queue_redraw_all();
                 }

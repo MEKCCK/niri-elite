@@ -22,6 +22,14 @@ cursor {
 
     hide-when-typing
     hide-after-inactive-ms 1000
+
+    shake-to-enlarge {
+        zoom-factor 2.5
+        hold-duration-ms 1500
+        threshold 2000
+        grow
+        grow-speed 0.01
+    }
 }
 
 overview {
@@ -61,6 +69,13 @@ blur {
     offset 3.0
     noise 0.02
     saturation 1.5
+}
+
+magnifier {
+    // off
+    zoom-factor 2.0
+    // track-cursor false
+    // scale-cursor false
 }
 ```
 
@@ -196,6 +211,56 @@ cursor {
 }
 ```
 
+#### `shake-to-enlarge`
+
+Shaking the cursor rapidly will temporarily enlarge it, helping to locate the cursor on screen.
+
+This feature is enabled by default. To disable it, use `off`:
+
+```kdl
+cursor {
+    shake-to-enlarge {
+        off
+    }
+}
+```
+
+The following options are available inside `shake-to-enlarge`:
+
+- `off` — disable the feature.
+- `on` — explicitly enable the feature (useful to re-enable after overriding from an included configuration).
+- `zoom-factor` — how much to enlarge the cursor. Defaults to `5.0`.
+- `hold-duration-ms` — how long the cursor stays enlarged after you stop shaking, in milliseconds. Defaults to `1500`.
+- `threshold` — the shake energy threshold. Higher values make it harder to trigger. Defaults to `2000.0`.
+- `grow` — when enabled, continuing to shake while already enlarged will make the cursor grow increasingly larger with no upper limit. Defaults to `false`.
+- `grow-speed` — how much the zoom increases per shake trigger while already enlarged. Defaults to `0.01`. Only effective when `grow` is enabled.
+
+```kdl
+cursor {
+    shake-to-enlarge {
+        //off
+        zoom-factor 5
+        hold-duration-ms 1500
+        threshold 2000
+        grow
+        grow-speed 0.01
+    }
+}
+```
+
+The enlarge animation can be customized in the [`animations`](./Configuration:-Animations.md) section under `cursor-enlarge`:
+
+```kdl
+animations {
+    cursor-enlarge {
+        spring damping-ratio=0.82 stiffness=400 epsilon=0.0001
+    }
+}
+```
+
+> [!NOTE]
+> The shake gesture needs the cursor to move across a certain distance. Slow, precise movements will not trigger it. Adjust `threshold` if you find it too hard or too easy to trigger (lower values make it easier).
+
 ### `overview`
 
 <sup>Since: 25.05</sup>
@@ -245,6 +310,67 @@ overview {
     workspace-shadow {
         off
     }
+}
+```
+
+### `grid-overview`
+
+Settings for the [Grid Overview](./Grid-Overview.md).
+
+#### `gap`
+
+Set the gap between grid cells.
+
+```kdl
+grid-overview {
+    gap 16
+}
+```
+
+#### `padding`
+
+Set the padding around the grid.
+You can set one value for all sides, or configure each side separately.
+
+```kdl
+grid-overview {
+    padding 100
+}
+```
+
+```kdl
+grid-overview {
+    padding {
+        left 64
+        right 64
+        top 48
+        bottom 48
+    }
+}
+```
+
+#### `focused-column-scale`
+
+Scale the focused column relative to its cell.
+Ranges from 1 to 2, where higher values make the focused column larger.
+
+```kdl
+grid-overview {
+    focused-column-scale 1.08
+}
+```
+
+#### `default-mod-action`
+
+<sup>Since: 26.04 (fork)</sup>
+
+When `true` (the default), tapping the `Mod` key (pressing and releasing without pressing any other key in between) will toggle the Grid Overview, even if no `Mod` binding is configured in `binds`.
+
+Set this to `false` to disable this built-in behavior. This does not affect explicit `Mod` bindings in `binds` — those always take precedence.
+
+```kdl
+grid-overview {
+    default-mod-action false
 }
 ```
 
@@ -407,3 +533,60 @@ blur {
     saturation 1.5
 }
 ```
+
+### `magnifier`
+
+Settings for the screen magnifier. Pressing a keyboard shortcut or scrolling a keybind can zoom in on the screen, with the cursor position as the zoom pivot.
+
+Set the `off` flag to completely disable the magnifier.
+
+```kdl
+magnifier {
+    off
+}
+```
+
+#### `zoom-factor`
+
+The zoom factor to use when toggling the magnifier on with a keyboard shortcut. Defaults to `2.0`.
+
+```kdl
+magnifier {
+    zoom-factor 2.5
+}
+```
+
+#### `track-cursor`
+
+When enabled (default), the magnifier follows the cursor position. Set to `false` to lock the magnification center to the cursor position at first activation, keeping the screen fixed regardless of cursor movement.
+When the magnifier is active with `track-cursor false`, hold the middle mouse button and drag to move the locked center.
+
+```kdl
+magnifier {
+    zoom-factor 2.0
+    track-cursor false
+}
+```
+
+#### `scale-cursor`
+
+When enabled (default), the cursor scales along with the magnified screen. Set to `false` to keep the cursor at its native size, preventing it from becoming large and blurry when zoomed in.
+
+```kdl
+magnifier {
+    zoom-factor 2.0
+    scale-cursor false
+}
+```
+
+The toggle animation can be customized in the [`animations`](./Configuration:-Animations.md) section under `magnifier`:
+
+```kdl
+animations {
+    magnifier {
+        spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+    }
+}
+```
+
+For key bindings, see [`toggle-magnifier`](./Configuration:-Key-Bindings.md#toggle-magnifier) and [`adjust-magnifier-zoom`](./Configuration:-Key-Bindings.md#adjust-magnifier-zoom).

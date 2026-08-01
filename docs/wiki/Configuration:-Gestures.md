@@ -25,7 +25,7 @@ gestures {
         // off
         top-left
         // top-right
-        // bottom-left
+        bottom-left { grid-overview; }
         // bottom-right
     }
 }
@@ -85,7 +85,7 @@ gestures {
 
 <sup>Since: 25.05</sup>
 
-Put your mouse at the very top-left corner of a monitor to toggle the overview.
+Put your mouse at the very top-left corner of a monitor to toggle the overview, or at the bottom-left corner to toggle the grid overview.
 Also works during drag-and-dropping something.
 
 `off` disables the hot corners.
@@ -100,14 +100,16 @@ gestures {
 ```
 
 <sup>Since: 25.11</sup> You can choose specific hot corners by name: `top-left`, `top-right`, `bottom-left`, `bottom-right`.
-If no corners are explicitly set, the top-left corner will be active by default.
+If no corners are explicitly set, the top-left corner will toggle the overview, and the bottom-left corner will toggle the grid overview.
+Writing a corner without an action will make it toggle the overview.
+To bind a corner to the grid overview, put `grid-overview` inside it.
 
 ```kdl
-// Enable the top-right and bottom-right hot corners.
+// Enable the top-right hot corner for the overview, and the bottom-right hot corner for the grid overview.
 gestures {
     hot-corners {
         top-right
-        bottom-right
+        bottom-right { grid-overview; }
     }
 }
 ```

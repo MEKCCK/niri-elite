@@ -21,7 +21,7 @@ output "eDP-1" {
         // off
         top-left
         // top-right
-        // bottom-left
+        bottom-left { grid-overview; }
         // bottom-right
     }
 
@@ -308,15 +308,16 @@ output "HDMI-A-1" {
 Customize the hot corners for this output.
 By default, hot corners [in the gestures settings](./Configuration:-Gestures.md#hot-corners) are used for all outputs.
 
-Hot corners toggle the overview when you put your mouse at the very corner of a monitor.
+Hot corners toggle the overview or grid overview when you put your mouse at the very corner of a monitor.
 
 `off` will disable the hot corners on this output, and writing specific corners will enable only those hot corners on this output.
+Writing a corner without an action will make it toggle the overview.
 
 ```kdl
-// Enable the bottom-left and bottom-right hot corners on HDMI-A-1.
+// Enable the bottom-left grid overview hot corner and the bottom-right overview hot corner on HDMI-A-1.
 output "HDMI-A-1" {
     hot-corners {
-        bottom-left
+        bottom-left { grid-overview; }
         bottom-right
     }
 }

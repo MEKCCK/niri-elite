@@ -165,6 +165,11 @@ pub enum Response {
     OverviewState(Overview),
     /// Information about screencasts.
     Casts(Vec<Cast>),
+    /// PNG screenshot data.
+    Screenshot {
+        /// Base64-encoded PNG image data.
+        png_base64: String,
+    },
 }
 
 /// Overview information.
@@ -226,6 +231,11 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
 
+        /// Write the screenshot PNG to stdout.
+        #[serde(default)]
+        #[cfg_attr(feature = "clap", arg(long))]
+        stdout: bool,
+
         /// Path to save the screenshot to.
         ///
         /// The path must be absolute, otherwise an error is returned.
@@ -245,6 +255,11 @@ pub enum Action {
         /// Whether to include the mouse pointer in the screenshot.
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = true))]
         show_pointer: bool,
+
+        /// Write the screenshot PNG to stdout.
+        #[serde(default)]
+        #[cfg_attr(feature = "clap", arg(long))]
+        stdout: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -274,6 +289,11 @@ pub enum Action {
         /// (usually this means the pointer is on top of the window).
         #[cfg_attr(feature = "clap", arg(short = 'p', long, action = clap::ArgAction::Set, default_value_t = false))]
         show_pointer: bool,
+
+        /// Write the screenshot PNG to stdout.
+        #[serde(default)]
+        #[cfg_attr(feature = "clap", arg(long))]
+        stdout: bool,
 
         /// Path to save the screenshot to.
         ///
@@ -910,6 +930,20 @@ pub enum Action {
     },
     /// Toggle (open/close) the Overview.
     ToggleOverview {},
+    /// Toggle (open/close) the Grid Overview.
+    ToggleGridOverview {},
+    /// Open the Grid Overview.
+    OpenGridOverview {},
+    /// Close the Grid Overview.
+    CloseGridOverview {},
+    /// Toggle the screen magnifier.
+    ToggleMagnifier {},
+    /// Adjust screen magnifier zoom factor.
+    AdjustMagnifierZoom {
+        /// Amount to adjust the zoom factor by (positive = zoom in, negative = zoom out).
+        #[cfg_attr(feature = "clap", arg(allow_hyphen_values = true))]
+        delta: f64,
+    },
     /// Open the Overview.
     OpenOverview {},
     /// Close the Overview.
@@ -2163,5 +2197,18 @@ mod tests {
         );
         assert!("-".parse::<PositionChange>().is_err());
         assert!("10% ".parse::<PositionChange>().is_err());
+    }
+
+    #[test]
+    fn screenshot_stdout_defaults_to_false() {
+        let action: Action = serde_json::from_str(
+            r#"{"ScreenshotScreen":{"write_to_disk":false,"show_pointer":true,"path":null}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            action,
+            Action::ScreenshotScreen { stdout: false, .. }
+        ));
     }
 }

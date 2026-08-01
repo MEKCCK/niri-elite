@@ -5,11 +5,13 @@ use std::sync::Arc;
 use arrayvec::ArrayVec;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::{
-    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1}, ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
+    ext_foreign_toplevel_handle_v1::{self, ExtForeignToplevelHandleV1},
+    ext_foreign_toplevel_list_v1::{self, ExtForeignToplevelListV1},
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::{
-    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1}, zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
 };
 use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -18,12 +20,12 @@ use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
 };
 use smithay::wayland::shell::xdg::{
-    ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes
+    ToplevelState, ToplevelStateSet, XdgToplevelSurfaceRoleAttributes,
 };
 
 use crate::niri::State;
-use crate::window::mapped::MappedId;
 use crate::utils::with_toplevel_role_and_current;
+use crate::window::mapped::MappedId;
 
 const EXT_LIST_VERSION: u32 = 1;
 const WLR_MANAGEMENT_VERSION: u32 = 3;
@@ -112,6 +114,13 @@ pub fn refresh(state: &mut State) {
         false
     });
 
+    // While the grid overview is open, report the grid-focused window as activated so that
+    // taskbars and title widgets follow the selection as it changes.
+    let grid_focused_window = (state.niri.keyboard_focus.is_layout()
+        && state.niri.layout.is_grid_overview_open())
+    .then(|| state.niri.layout.grid_focused_window_id())
+    .flatten();
+
     // Handle new and existing windows.
     //
     // Save the focused window for last, this way when the focus changes, we will first deactivate
@@ -126,7 +135,11 @@ pub fn refresh(state: &mut State) {
                 return;
             };
 
-            if state.niri.keyboard_focus.surface() == Some(wl_surface) {
+            let has_focus = match &grid_focused_window {
+                Some(win) => mapped.window == *win,
+                None => state.niri.keyboard_focus.surface() == Some(wl_surface),
+            };
+            if has_focus {
                 focused = Some((mapped.id(), mapped.window.clone(), output.cloned()));
             } else {
                 refresh_toplevel(
