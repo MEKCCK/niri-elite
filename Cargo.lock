@@ -2399,6 +2399,7 @@ dependencies = [
  "usvg",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols-plasma",
  "wayland-scanner",
  "wayland-server",
  "xcursor",
@@ -4557,6 +4558,7 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-scanner",
+ "wayland-server",
 ]
 
 [[package]]
