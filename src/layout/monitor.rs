@@ -1853,35 +1853,6 @@ impl<W: LayoutElement> Monitor<W> {
 
                 let xray_pos = XrayPos::new(geo.loc, zoom);
 
-                match pass {
-                    0 => {
-                        ws.render_floating(
-                            ctx.r(),
-                            xray_pos,
-                            focus_ring,
-                            RenderLayer::MovingBetweenWorkspaces,
-                            push!(),
-                        );
-                    }
-                    1 => {
-                        ws.render_floating(
-                            ctx.r(),
-                            xray_pos,
-                            focus_ring,
-                            RenderLayer::Normal,
-                            push!(),
-                        );
-
-                        if let Some(loc) = insert_hint_render_loc {
-                            if loc.workspace == InsertWorkspace::Existing(ws.id()) {
-                                self.insert_hint_element.render(
-                                    ctx.renderer,
-                                    loc.location,
-                                    push!(),
-                                );
-                            }
-                        }
-                    }
                 let grid_overview_active = ws.is_grid_overview_open() || ws.is_grid_overview_animation();
 
                 match pass {
@@ -1991,75 +1962,6 @@ impl<W: LayoutElement> Monitor<W> {
                             );
                         }
                     }
-                }
-                            let scale = ws.scale().fractional_scale();
-                            let view_size = ws.view_size();
-
-                            // Make sure the hint is at least partially visible.
-                            if matches!(hint.position, InsertPosition::NewColumn(_)) {
-                                let zoom = self.overview_zoom();
-                                let geo = insert_hint_ws_geo.unwrap();
-                                let geo = geo.downscale(zoom);
-
-                                area.loc.x = area.loc.x.max(-geo.loc.x - area.size.w / 2.);
-                                area.loc.x =
-                                    area.loc.x.min(geo.loc.x + geo.size.w - area.size.w / 2.);
-                            }
-
-                            // Round to physical pixels.
-                            area = area.to_physical_precise_round(scale).to_logical(scale);
-
-                            let view_rect = Rectangle::new(area.loc.upscale(-1.), view_size);
-                            self.insert_hint_element.update_render_elements(
-                                area.size,
-                                view_rect,
-                                hint.corner_radius,
-                                scale,
-                            );
-                            self.insert_hint_render_loc = Some(InsertHintRenderLoc {
-                                workspace: hint.workspace,
-                                location: area.loc,
-                            });
-                        }
-                    } else {
-                        error!("insert hint workspace missing from monitor");
-                    }
-                }
-                InsertWorkspace::NewAt(ws_idx) => {
-                    let scale = self.scale.fractional_scale();
-                    let zoom = self.overview_zoom();
-                    let gap = self.workspace_gap(zoom);
-
-                    let hint_gap = round_logical_in_physical(scale, gap * 0.1);
-                    let hint_height = gap - hint_gap * 2.;
-
-                    let next_ws_geo = self.workspaces_render_geo().nth(ws_idx).unwrap();
-                    let hint_width = round_logical_in_physical(scale, next_ws_geo.size.w * 0.75);
-                    let hint_x =
-                        round_logical_in_physical(scale, (next_ws_geo.size.w - hint_width) / 2.);
-
-                    let hint_loc_diff = Point::from((-hint_x, hint_height + hint_gap));
-                    let hint_loc = next_ws_geo.loc - hint_loc_diff;
-                    let hint_size = Size::from((hint_width, hint_height));
-
-                    // Sometimes the hint ends up 1 px wider than necessary and/or 1 px
-                    // narrower than necessary. The values here seem correct. Might have to do with
-                    // how zooming out currently doesn't round to output scale properly.
-
-                    // Compute view rect as if we're above the next workspace (rather than below
-                    // the previous one).
-                    let view_rect = Rectangle::new(hint_loc_diff, next_ws_geo.size);
-
-                    self.insert_hint_element.update_render_elements(
-                        hint_size,
-                        view_rect,
-                        CornerRadius::default(),
-                        scale,
-                    );
-                    self.insert_hint_render_loc = Some(InsertHintRenderLoc {
-                        workspace: hint.workspace,
-                        location: hint_loc,
-                    });
                 }
             }
         }

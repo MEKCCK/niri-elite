@@ -4785,7 +4785,8 @@ impl<W: LayoutElement> Column<W> {
     }
 
     fn stop_move_animations(&mut self) {
-        self.move_animation = None;
+        self.move_x_animation = None;
+        self.move_y_animation = None;
         for tile in &mut self.tiles {
             tile.stop_move_animations();
         }

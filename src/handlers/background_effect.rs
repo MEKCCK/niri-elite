@@ -145,7 +145,6 @@ impl ExtBackgroundEffectHandler for State {
         mark_blur_region_pending_dirty(&wl_surface);
     }
 }
-delegate_background_effect!(State);
 
 impl KdeBlurHandler for State {
     fn set_blur_region(&mut self, wl_surface: WlSurface) {

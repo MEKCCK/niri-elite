@@ -2390,7 +2390,12 @@ impl<W: LayoutElement> Layout<W> {
         if self
             .run_active_grid_overview_action(|this| {
                 if let Some(monitor) = this.active_monitor() {
-                    monitor.move_to_workspace_up(focus);
+                    let activate = if focus {
+                        ActivateWindow::Smart
+                    } else {
+                        ActivateWindow::No
+                    };
+                    monitor.move_to_workspace_up(activate);
                 }
             })
             .is_some()
@@ -2415,7 +2420,12 @@ impl<W: LayoutElement> Layout<W> {
         if self
             .run_active_grid_overview_action(|this| {
                 if let Some(monitor) = this.active_monitor() {
-                    monitor.move_to_workspace_down(focus);
+                    let activate = if focus {
+                        ActivateWindow::Smart
+                    } else {
+                        ActivateWindow::No
+                    };
+                    monitor.move_to_workspace_down(activate);
                 }
             })
             .is_some()
