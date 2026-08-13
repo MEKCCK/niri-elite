@@ -14,17 +14,23 @@
 
 ## About
 
-Windows are arranged in columns on an infinite strip going to the right.
-Opening a new window never causes existing windows to resize.
+**niri-elite** is a fork of [niri](https://github.com/niri-wm/niri) that tracks upstream closely while adding extra features. Everything in mainline niri works here; on top of that, this branch adds:
 
-Every monitor has its own separate window strip.
-Windows can never "overflow" onto an adjacent monitor.
+| Feature | Description | Toggle / Config |
+|---|---|---|
+| **Grid overview** | An overview of all windows on the workspace in a grid, with keyboard navigation, tabs/columns/floating items, and per-monitor support. | `Mod+G` (`toggle-grid-overview`) — see [`grid-overview`](docs/wiki/Grid-Overview.md) |
+| **Fullscreen magnifier** | Magnify any part of the screen, zoom with the scroll wheel. | `Mod+Shift+Z` (`toggle-magnifier`) |
+| **Shake-to-enlarge** | Shake a window to enlarge it. | [`shake-to-enlarge`](resources/default-config.kdl) |
+| **KDE blur protocol** | Implements the KDE blur protocol (`kde-blur`) for background blur on supported surfaces. | Automatic |
+| **SVG cursor support** | Render SVG cursor themes (e.g. Bibata) natively. | Automatic |
+| **Built-in xdg-desktop-portal backend** | ScreenCast/Screenshot portal interfaces are served by niri itself (`org.freedesktop.impl.portal.desktop.niri`) — no `xdg-desktop-portal-gnome` needed. | Automatic; ships `niri.portal` + `niri-portals.conf` |
+| **Native screen cast picker** | A built-in picker UI for choosing what to screen-cast, with persisted permission tokens and configurable colors. | See [Screencasting](docs/wiki/Screencasting.md) |
+| **SHM fallback for screencasts** | PipeWire screencasts fall back to SHM (memfd) when GPU is unavailable — works in VMs. | Automatic |
+| **Software EGL renderer** | Software rendering support for VMs and GPUs without hardware acceleration. | Automatic |
+| **Screenshot to file** | Save screenshots directly to a path via IPC, with async reply. | `niri msg action screenshot` |
+| **Multi-GPU fixes** | Improved handling of multi-GPU setups (primary render node selection, display-only devices). | Automatic |
 
-Workspaces are dynamic and arranged vertically.
-Every monitor has an independent set of workspaces, and there's always one empty workspace present all the way down.
-
-The workspace arrangement is preserved across disconnecting and connecting monitors where it makes sense.
-When a monitor disconnects, its workspaces will move to another monitor, but upon reconnection they will move back to the original monitor.
+Mainline niri keeps a conservative stance on some of these (e.g. no grid overview, no built-in portal backend), so they are maintained here instead. Upstream changes are merged in regularly.
 
 ## Features
 
