@@ -134,3 +134,37 @@ We also have a community Discord server: https://discord.gg/vT8Sfjy7sx
 [OpenTabletDriver]: https://opentabletdriver.net/
 [DankMaterialShell]: https://danklinux.com/
 [Noctalia]: https://noctalia.dev/
+
+## Contributors
+
+### niri-elite (this fork)
+
+- [SHORiN-KiWATA](https://github.com/SHORiN-KiWATA) — original author of the niri-elite fork
+- [MEKCCK](https://github.com/MEKCCK) — fork maintainer
+
+### Upstream niri
+
+Special thanks to [Ivan Molodetskikh](https://github.com/YaLTeR) and all [niri contributors](https://github.com/niri-wm/niri/graphs/contributors) for creating and maintaining niri:
+
+| Contributor | Commits |
+|---|---|
+| [YaLTeR](https://github.com/YaLTeR) | 2427 |
+| [shorinkiwata](https://github.com/SHORiN-KiWATA) | 75 |
+| [cmeissl](https://github.com/cmeissl) | 24 |
+| [kchibisov](https://github.com/kchibisov) | 19 |
+| [sodiboo](https://github.com/sodiboo) | 19 |
+| [HigherOrderLogic](https://github.com/HigherOrderLogic) | 11 |
+| [bbb651](https://github.com/bbb651) | 9 |
+| [Duncaen](https://github.com/Duncaen) | 8 |
+| [my4ng](https://github.com/my4ng) | 8 |
+| [chinatsu](https://github.com/chinatsu) | 8 |
+| [notpeelz](https://github.com/notpeelz) | 7 |
+| [getchoo](https://github.com/getchoo) | 7 |
+| [titaniumtraveler](https://github.com/titaniumtraveler) | 6 |
+| [Suya1671](https://github.com/Suya1671) | 5 |
+| [valpackett](https://github.com/valpackett) | 5 |
+| [rustn00b](https://github.com/rustn00b) | 5 |
+| [salman-farooq-sh](https://github.com/salman-farooq-sh) | 4 |
+| [Sempyos](https://github.com/Sempyos) | 4 |
+
+…and [many more](https://github.com/niri-wm/niri/graphs/contributors). Thank you!
