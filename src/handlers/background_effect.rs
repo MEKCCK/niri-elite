@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use smithay::delegate_background_effect;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use smithay::wayland::background_effect::{
