@@ -29,7 +29,7 @@ use crate::render_helpers::shadow::ShadowRenderElement;
 use crate::render_helpers::snapshot::RenderSnapshot;
 use crate::render_helpers::solid_color::{SolidColorBuffer, SolidColorRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
-use crate::render_helpers::{RenderCtx, RenderTarget};
+use crate::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
 use crate::utils::transaction::Transaction;
 use crate::utils::{
     baba_is_float_offset, round_logical_in_physical, round_logical_in_physical_max1,
@@ -1490,6 +1490,7 @@ impl<W: LayoutElement> Tile<W> {
             RenderCtx {
                 target: RenderTarget::Output,
                 renderer,
+                intent: RenderIntent::Normal,
                 xray: xray.as_deref(),
             },
             Point::from((0., 0.)),
@@ -1541,6 +1542,7 @@ impl<W: LayoutElement> Tile<W> {
                     RenderCtx {
                         target: RenderTarget::Output,
                         renderer,
+                        intent: RenderIntent::Normal,
                         xray: Some(xray),
                     },
                     Point::from((0., 0.)),
@@ -1561,6 +1563,7 @@ impl<W: LayoutElement> Tile<W> {
             RenderCtx {
                 target: RenderTarget::Screencast,
                 renderer,
+                intent: RenderIntent::Normal,
                 xray: xray.as_deref(),
             },
             Point::from((0., 0.)),

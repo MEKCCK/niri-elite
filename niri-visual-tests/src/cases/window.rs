@@ -1,5 +1,5 @@
 use niri::layout::{LayoutElement, SizingMode};
-use niri::render_helpers::{RenderCtx, RenderTarget};
+use niri::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Scale, Size};
@@ -56,6 +56,7 @@ impl TestCase for Window {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         self.window

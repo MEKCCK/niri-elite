@@ -59,6 +59,11 @@ animations {
         curve "ease-out-quad"
     }
 
+    screen-cast-picker-open-close {
+        duration-ms 200
+        curve "ease-out-quad"
+    }
+
     overview-open-close {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
     }
@@ -428,6 +433,21 @@ The open (fade-in) animation of the screenshot UI.
 ```kdl
 animations {
     screenshot-ui-open {
+        duration-ms 200
+        curve "ease-out-quad"
+    }
+}
+```
+
+#### `screen-cast-picker-open-close`
+
+<sup>Since: 26.04</sup>
+
+The open and close fade animation of the native screen cast source picker.
+
+```kdl
+animations {
+    screen-cast-picker-open-close {
         duration-ms 200
         curve "ease-out-quad"
     }

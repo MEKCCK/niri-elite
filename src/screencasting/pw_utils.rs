@@ -49,9 +49,7 @@ use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
 use smithay::reexports::gbm::Modifier;
 use smithay::reexports::rustix;
 use smithay::utils::{Logical, Physical, Point, Scale, Size, Transform};
-use zbus::object_server::SignalEmitter;
-
-use crate::dbus::mutter_screen_cast::{self, CursorMode};
+use crate::dbus::mutter_screen_cast::{CursorMode, NodeIdSink};
 use crate::niri::{CastTarget, State};
 use crate::render_helpers::{
     clear_dmabuf, encompassing_geo, render_and_download, render_to_dmabuf,
@@ -227,10 +225,7 @@ fn make_initial_params(
     alpha: bool,
 ) -> Vec<(pod::Object, Vec<u8>)> {
     let variant = |alpha| {
-        let mut out = vec![(
-            make_video_params(formats, size, refresh, alpha),
-            Vec::new(),
-        )];
+        let mut out = vec![(make_video_params(formats, size, refresh, alpha), Vec::new())];
         // SHM (no-modifier) fallback. PipeWire treats absence of VideoModifier as a signal
         // to fall back to non-DMA buffers.
         out.push((
@@ -320,7 +315,7 @@ impl PipeWire {
         refresh: u32,
         alpha: bool,
         mut cursor_mode: CursorMode,
-        signal_ctx: SignalEmitter<'static>,
+        node_sink: NodeIdSink,
     ) -> anyhow::Result<Cast> {
         let _span = tracy_client::span!("PipeWire::start_cast");
 
@@ -382,21 +377,13 @@ impl PipeWire {
                             if inner.node_id.is_none() {
                                 let id = stream.node_id();
                                 inner.node_id = Some(id);
-                                debug!("sending signal with {id}");
+                                debug!("delivering node id {id}");
 
-                                let _span = tracy_client::span!("sending PipeWireStreamAdded");
-                                async_io::block_on(async {
-                                    let res = mutter_screen_cast::Stream::pipe_wire_stream_added(
-                                        &signal_ctx,
-                                        id,
-                                    )
-                                    .await;
-
-                                    if let Err(err) = res {
-                                        warn!("error sending PipeWireStreamAdded: {err:?}");
-                                        stop_cast();
-                                    }
-                                });
+                                let _span = tracy_client::span!("delivering PipeWire node id");
+                                if let Err(err) = node_sink.deliver(id) {
+                                    warn!("error delivering PipeWire node id: {err:?}");
+                                    stop_cast();
+                                }
                             }
 
                             inner.is_active = false;
@@ -1462,7 +1449,10 @@ impl Cast {
                             &mut self.sequence_counter,
                             SharingBuf::Shm(&shmbuf),
                         );
-                        trace!("queueing clear shm buffer with seq={}", self.sequence_counter);
+                        trace!(
+                            "queueing clear shm buffer with seq={}",
+                            self.sequence_counter
+                        );
                         self.queue_after_sync(pw_buffer, SyncPoint::signaled());
                         true
                     }
@@ -1731,9 +1721,7 @@ fn allocate_shmbuf(size: Size<u32, Physical>) -> anyhow::Result<Shmbuf> {
     rustix::fs::ftruncate(&fd, total_size as u64).context("error sizing the memfd")?;
     rustix::fs::fcntl_add_seals(
         &fd,
-        rustix::fs::SealFlags::SEAL
-            | rustix::fs::SealFlags::SHRINK
-            | rustix::fs::SealFlags::GROW,
+        rustix::fs::SealFlags::SEAL | rustix::fs::SealFlags::SHRINK | rustix::fs::SealFlags::GROW,
     )
     .context("error sealing the memfd")?;
 

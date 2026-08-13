@@ -16,12 +16,11 @@ use smithay::desktop::Window;
 use smithay::output::Output;
 use smithay::reexports::gbm::Modifier;
 use smithay::utils::{Physical, Point, Scale, Size};
-use zbus::object_server::SignalEmitter;
 
-use crate::dbus::mutter_screen_cast::{self, CursorMode, ScreenCastToNiri, StreamTargetId};
+use crate::dbus::mutter_screen_cast::{self, CursorMode, NodeIdSink, ScreenCastToNiri, StreamTargetId};
 use crate::niri::{CastTarget, Niri, OutputRenderElements, PointerRenderElements, State};
 use crate::niri_render_elements;
-use crate::render_helpers::{RenderCtx, RenderTarget};
+use crate::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
 use crate::utils::{get_monotonic_time, CastSessionId, CastStreamId};
 use crate::window::mapped::{MappedId, WindowCastRenderElements};
 
@@ -51,7 +50,7 @@ pub struct PendingCast {
     pub session_id: CastSessionId,
     pub stream_id: CastStreamId,
     pub cursor_mode: CursorMode,
-    pub signal_ctx: SignalEmitter<'static>,
+    pub node_sink: NodeIdSink,
 }
 
 impl Screencasting {
@@ -366,7 +365,7 @@ impl State {
                 refresh,
                 alpha,
                 pending.cursor_mode,
-                pending.signal_ctx,
+                pending.node_sink,
             );
             match res {
                 Ok(mut cast) => {
@@ -387,12 +386,21 @@ impl State {
 
     pub fn on_screen_cast_msg(&mut self, msg: ScreenCastToNiri) {
         match msg {
+            ScreenCastToNiri::PickSources(request) => {
+                self.open_screen_cast_picker(request);
+            }
+            ScreenCastToNiri::CancelPickSources(request) => {
+                if self.niri.screen_cast_picker.cancel_request(&request) {
+                    self.niri.queue_redraw_all();
+                    self.update_keyboard_focus();
+                }
+            }
             ScreenCastToNiri::StartCast {
                 session_id,
                 stream_id,
                 target,
                 cursor_mode,
-                signal_ctx,
+                node_sink,
             } => {
                 let _span = tracy_client::span!("StartCast");
                 let _span = debug_span!("StartCast", %session_id, %stream_id).entered();
@@ -418,7 +426,7 @@ impl State {
                             session_id,
                             stream_id,
                             cursor_mode,
-                            signal_ctx,
+                            node_sink,
                         });
                         return;
                     }
@@ -452,7 +460,7 @@ impl State {
                     refresh,
                     alpha,
                     cursor_mode,
-                    signal_ctx,
+                    node_sink,
                 );
                 match res {
                     Ok(cast) => {
@@ -621,6 +629,7 @@ impl Niri {
                 let ctx = RenderCtx {
                     renderer,
                     target: RenderTarget::Screencast,
+                    intent: RenderIntent::Normal,
                     xray: None,
                 };
                 self.render(ctx, output, false, &mut |elem| elements.push(elem.into()));
@@ -763,9 +772,30 @@ impl Niri {
             async_io::block_on(async move {
                 iface
                     .get()
-                    .stop(server.inner(), iface.signal_emitter().clone())
+                    .stop_from_compositor(server.inner(), iface.signal_emitter().clone())
                     .await
             });
+        }
+
+        // Close the built-in portal backend session, if this cast belongs to one.
+        let portal_path = dbus
+            .portal_casts
+            .as_ref()
+            .and_then(|casts| casts.lock().unwrap().get(&session_id).cloned());
+        if let (Some(path), Some(conn)) = (portal_path, dbus.conn_portal.as_ref()) {
+            let _span = tracy_client::span!("closing portal session");
+
+            let server = conn.object_server();
+            if let Ok(iface) = server.interface::<_, crate::dbus::freedesktop_portal::Session>(&path)
+            {
+                async_io::block_on(async move {
+                    let ctxt = iface.signal_emitter().clone();
+                    iface
+                        .get()
+                        .close_from_compositor(server.inner(), &ctxt)
+                        .await;
+                });
+            }
         }
     }
 

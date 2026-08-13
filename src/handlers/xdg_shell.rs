@@ -918,6 +918,11 @@ impl XdgShellHandler for State {
         let was_active = active_window == Some(&window);
 
         self.niri.window_mru_ui.remove_window(id);
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.niri.screen_cast_picker.remove_window(id.get()) {
+            self.niri.queue_redraw_all();
+            self.update_keyboard_focus();
+        }
         self.niri.layout.remove_window(&window, transaction.clone());
 
         let surface = surface.wl_surface();

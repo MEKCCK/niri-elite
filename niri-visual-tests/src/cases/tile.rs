@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use niri::layout::Options;
 use niri::render_helpers::xray::XrayPos;
-use niri::render_helpers::{RenderCtx, RenderTarget};
+use niri::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
 use niri_config::Color;
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -125,6 +125,7 @@ impl TestCase for Tile {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         let xray_pos = XrayPos::new(location, 1.);

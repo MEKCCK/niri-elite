@@ -147,7 +147,9 @@ impl State {
         let _span = tracy_client::span!("process_input_event");
 
         // Make sure some logic like workspace clean-up has a chance to run before doing actions.
-        self.niri.advance_animations();
+        if self.niri.advance_animations() {
+            self.update_keyboard_focus();
+        }
 
         if self.niri.monitors_active {
             // Notify the idle-notifier of activity.
@@ -582,15 +584,13 @@ impl State {
                             key_code,
                             is_inhibiting_shortcuts,
                         );
-                    } else if !pressed
-                        && this
-                            .niri
-                            .pending_default_mod_tap
-                            .is_some_and(|pending_key| pending_key == key_code)
-                    {
-                        this.niri.pending_default_mod_tap = None;
+                    } else if let Some(filter) = finish_pending_default_mod_tap(
+                        &mut this.niri.pending_default_mod_tap,
+                        key_code,
+                        pressed,
+                    ) {
                         this.do_action(Action::ToggleGridOverview, false);
-                        return FilterResult::Intercept(None);
+                        return filter;
                     }
                 }
 
@@ -602,6 +602,40 @@ impl State {
 
                     // Don't send this press to any clients.
                     this.niri.suppressed_keys.insert(key_code);
+                    return FilterResult::Intercept(None);
+                }
+
+                #[cfg(feature = "xdp-gnome-screencast")]
+                if this.niri.screen_cast_picker.is_open() {
+                    if pressed {
+                        this.niri.suppressed_keys.insert(key_code);
+                        let changed = match raw {
+                            Some(Keysym::Escape) => {
+                                this.cancel_screen_cast_picker();
+                                false
+                            }
+                            Some(Keysym::Return) | Some(Keysym::KP_Enter) => {
+                                this.confirm_screen_cast_picker();
+                                false
+                            }
+                            Some(Keysym::Left) | Some(Keysym::Up) => {
+                                this.niri.screen_cast_picker.move_selection(-1)
+                            }
+                            Some(Keysym::Right) | Some(Keysym::Down) => {
+                                this.niri.screen_cast_picker.move_selection(1)
+                            }
+                            Some(Keysym::Tab) | Some(Keysym::ISO_Left_Tab) => {
+                                this.niri.screen_cast_picker.toggle_view()
+                            }
+                            Some(Keysym::space) => this.niri.screen_cast_picker.toggle_remember(),
+                            _ => false,
+                        };
+                        if changed {
+                            this.niri.queue_redraw_all();
+                        }
+                    } else {
+                        this.niri.suppressed_keys.remove(&key_code);
+                    }
                     return FilterResult::Intercept(None);
                 }
 
@@ -2766,6 +2800,20 @@ impl State {
             self.niri.screenshot_ui.pointer_motion(point, None);
         }
 
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.niri.screen_cast_picker.is_open() {
+            if let Some((output, pos_within_output)) = self.niri.output_under(new_pos) {
+                let output = output.clone();
+                if self
+                    .niri
+                    .screen_cast_picker
+                    .pointer_motion(&output, pos_within_output)
+                {
+                    self.niri.queue_redraw_all();
+                }
+            }
+        }
+
         if let Some(mru_output) = self.niri.window_mru_ui.output() {
             if let Some((output, pos_within_output)) = self.niri.output_under(new_pos) {
                 if mru_output == output {
@@ -2906,6 +2954,20 @@ impl State {
             self.niri.screenshot_ui.pointer_motion(point, None);
         }
 
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.niri.screen_cast_picker.is_open() {
+            if let Some((output, pos_within_output)) = self.niri.output_under(pos) {
+                let output = output.clone();
+                if self
+                    .niri
+                    .screen_cast_picker
+                    .pointer_motion(&output, pos_within_output)
+                {
+                    self.niri.queue_redraw_all();
+                }
+            }
+        }
+
         if let Some(mru_output) = self.niri.window_mru_ui.output() {
             if let Some((output, pos_within_output)) = self.niri.output_under(pos) {
                 if mru_output == output {
@@ -2999,6 +3061,31 @@ impl State {
         let mod_down = modifiers.contains(mod_key.to_modifiers());
 
         if ButtonState::Pressed == button_state {
+            #[cfg(feature = "xdp-gnome-screencast")]
+            if self.niri.screen_cast_picker.is_open() {
+                if button == Some(MouseButton::Left) {
+                    let location = pointer.current_location();
+                    if let Some((output, pos_within_output)) = self.niri.output_under(location) {
+                        let output = output.clone();
+                        let was_open = self.niri.screen_cast_picker.is_open();
+                        let changed = self
+                            .niri
+                            .screen_cast_picker
+                            .pointer_activate(&output, pos_within_output);
+                        if changed {
+                            self.niri.queue_redraw_all();
+                        }
+                        if was_open && !self.niri.screen_cast_picker.is_open() {
+                            self.update_keyboard_focus();
+                        }
+                    }
+                } else if button == Some(MouseButton::Right) {
+                    self.cancel_screen_cast_picker();
+                }
+                self.niri.suppressed_buttons.insert(button_code);
+                return;
+            }
+
             let mut is_mru_open = false;
             if let Some(mru_output) = self.niri.window_mru_ui.output() {
                 is_mru_open = true;
@@ -3409,6 +3496,24 @@ impl State {
 
         let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
         let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
+        let horizontal_amount = event.amount(Axis::Horizontal);
+        let vertical_amount = event.amount(Axis::Vertical);
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.niri.screen_cast_picker.is_open() {
+            let delta = if source == AxisSource::Wheel {
+                vertical_amount_v120
+                    .map(|amount| amount / 120.)
+                    .or_else(|| vertical_amount.map(|amount| amount / 80.))
+                    .unwrap_or(0.)
+            } else {
+                vertical_amount.map(|amount| amount / 80.).unwrap_or(0.)
+            };
+            if self.niri.screen_cast_picker.scroll_window(delta) {
+                self.niri.queue_redraw_all();
+            }
+            return;
+        }
 
         let is_overview_open = self.niri.layout.is_overview_open();
 
@@ -3646,9 +3751,6 @@ impl State {
                 self.niri.vertical_wheel_tracker.reset();
             }
         }
-
-        let horizontal_amount = event.amount(Axis::Horizontal);
-        let vertical_amount = event.amount(Axis::Vertical);
 
         // Handle touchpad and continuous scroll bindings.
         if source == AxisSource::Finger || source == AxisSource::Continuous {
@@ -5079,6 +5181,21 @@ fn finish_pending_modifier_bind(
     *completed_modifier_bind = Some(pending.bind);
 }
 
+fn finish_pending_default_mod_tap(
+    pending_default_mod_tap: &mut Option<Keycode>,
+    key_code: Keycode,
+    pressed: bool,
+) -> Option<FilterResult<Option<Bind>>> {
+    if pressed || pending_default_mod_tap.as_ref() != Some(&key_code) {
+        return None;
+    }
+
+    *pending_default_mod_tap = None;
+
+    // The modifier press was forwarded, so its matching release must be forwarded too.
+    Some(FilterResult::Forward)
+}
+
 fn cancel_pending_modifier_bind_for_key(
     pending_modifier_bind: &mut Option<PendingModifierBind>,
     key_code: Keycode,
@@ -6370,6 +6487,40 @@ mod tests {
         assert!(suppressed_keys.is_empty());
         assert!(pending_modifier_bind.is_none());
         assert_eq!(completed_modifier_bind, Some(bind));
+    }
+
+    #[test]
+    fn default_mod_tap_press_and_release_are_forwarded() {
+        let screenshot_ui = ScreenshotUi::new(Clock::default(), Default::default());
+        let key_code = Keycode::from(Keysym::Super_L.raw() + 8);
+        let mods = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let mut suppressed_keys = HashSet::new();
+
+        let press = should_intercept_key(
+            &mut suppressed_keys,
+            std::iter::empty::<&Bind>(),
+            ModKey::Super,
+            key_code,
+            Keysym::Super_L,
+            Some(Keysym::Super_L),
+            true,
+            mods,
+            &screenshot_ui,
+            false,
+            false,
+        );
+        assert!(matches!(press, FilterResult::Forward));
+        assert!(suppressed_keys.is_empty());
+
+        let mut pending_default_mod_tap = Some(key_code);
+        let release = finish_pending_default_mod_tap(&mut pending_default_mod_tap, key_code, false)
+            .expect("matching default Mod tap release should complete");
+        assert!(matches!(release, FilterResult::Forward));
+        assert!(pending_default_mod_tap.is_none());
+        assert!(suppressed_keys.is_empty());
     }
 
     #[test]

@@ -39,7 +39,7 @@ Then, the following dependencies are optional, but strongly recommended.
 Set them as automatically-installed optional dependencies, if possible.
 
 - `xwayland-satellite`: required to run X11 applications (Steam, Discord, etc.).
-- `xdg-desktop-portal-gnome`: required for screencasting.
+- `xdg-desktop-portal`: the portal broker; screencasting itself is served by niri's built-in backend (install `niri.portal` alongside `niri-portals.conf`).
 - `xdg-desktop-portal-gtk`: configured as the fallback portal in `niri-portals.conf`.
 (This is in general the standard fallback portal that you want installed.)
 - `gnome-keyring`: configured as the Secret portal provider in `niri-portals.conf`.

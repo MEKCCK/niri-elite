@@ -32,7 +32,7 @@ When a monitor disconnects, its workspaces will move to another monitor, but upo
 - [Dynamic workspaces](https://niri-wm.github.io/niri/Workspaces.html) like in GNOME
 - An [Overview](https://github.com/user-attachments/assets/379a5d1f-acdb-4c11-b36c-e85fd91f0995) that zooms out workspaces and windows
 - Built-in screenshot UI
-- Monitor and window screencasting through xdg-desktop-portal-gnome
+- Monitor and window screencasting through a built-in xdg-desktop-portal backend with a native picker
     - You can [block out](https://niri-wm.github.io/niri/Configuration%3A-Window-Rules.html#block-out-from) sensitive windows from screencasts
     - [Dynamic cast target](https://niri-wm.github.io/niri/Screencasting.html#dynamic-screencast-target) that can change what it shows on the go
 - [Touchpad](https://github.com/niri-wm/niri/assets/1794388/946a910e-9bec-4cd1-a923-4a9421707515) and [mouse](https://github.com/niri-wm/niri/assets/1794388/8464e65d-4bf2-44fa-8c8e-5883355bd000) gestures

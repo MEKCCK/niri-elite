@@ -40,6 +40,7 @@ pub mod layout;
 pub mod misc;
 pub mod output;
 pub mod recent_windows;
+pub mod screen_cast_picker;
 pub mod utils;
 pub mod window_rule;
 pub mod workspace;
@@ -57,6 +58,7 @@ pub use crate::misc::*;
 pub use crate::output::{Output, OutputName, Outputs, Position, Vrr};
 use crate::recent_windows::RecentWindowsPart;
 pub use crate::recent_windows::{MruDirection, MruFilter, MruPreviews, MruScope, RecentWindows};
+pub use crate::screen_cast_picker::ScreenCastPicker;
 pub use crate::utils::FloatOrInt;
 use crate::utils::{Flag, MergeWith as _};
 pub use crate::window_rule::{
@@ -94,6 +96,7 @@ pub struct Config {
     pub debug: Debug,
     pub workspaces: Vec<Workspace>,
     pub recent_windows: RecentWindows,
+    pub screen_cast_picker: ScreenCastPicker,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +207,7 @@ where
                 "overview" => m_merge!(overview),
                 "grid-overview" => m_merge!(grid_overview),
                 "magnifier" => m_merge!(magnifier),
+                "screen-cast-picker" => m_merge!(screen_cast_picker),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
@@ -705,6 +709,67 @@ mod tests {
         assert!(!config.grid_overview.grid_all_monitors);
     }
 
+    #[test]
+    fn screen_cast_picker_animation_parses() {
+        let config = Config::parse_mem(
+            r#"
+            animations {
+                screen-cast-picker-open-close {
+                    duration-ms 175
+                    curve "linear"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.animations.screen_cast_picker_open_close.0,
+            Animation {
+                off: false,
+                kind: animations::Kind::Easing(animations::EasingParams {
+                    duration_ms: 175,
+                    curve: animations::Curve::Linear,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn screen_cast_picker_colors_parse() {
+        let config = Config::parse_mem(
+            r##"
+            screen-cast-picker {
+                background-color "#01020380"
+                accent-color "red"
+                text-color "#102030"
+                accent-text-color "white"
+                corner-radius 8
+            }
+            "##,
+        )
+        .unwrap();
+        let picker = config.screen_cast_picker;
+
+        assert_eq!(
+            picker.background_color,
+            Color::from_rgba8_unpremul(1, 2, 3, 128)
+        );
+        assert_eq!(
+            picker.accent_color,
+            Color::from_rgba8_unpremul(255, 0, 0, 255)
+        );
+        assert_eq!(
+            picker.text_color,
+            Color::from_rgba8_unpremul(16, 32, 48, 255)
+        );
+        assert_eq!(
+            picker.accent_text_color,
+            Color::from_rgba8_unpremul(255, 255, 255, 255)
+        );
+        assert_eq!(picker.corner_radius, 8.);
+    }
+
     #[track_caller]
     fn do_parse(text: &str) -> Config {
         Config::parse_mem(text)
@@ -916,6 +981,11 @@ mod tests {
 
                 window-close {
                     curve "cubic-bezier" 0.05 0.7 0.1 1
+                }
+
+                screen-cast-picker-open-close {
+                    duration-ms 175
+                    curve "linear"
                 }
 
                 recent-windows-close {
@@ -1697,6 +1767,17 @@ mod tests {
                         ),
                     },
                 ),
+                screen_cast_picker_open_close: ScreenCastPickerOpenCloseAnim(
+                    Animation {
+                        off: false,
+                        kind: Easing(
+                            EasingParams {
+                                duration_ms: 175,
+                                curve: Linear,
+                            },
+                        ),
+                    },
+                ),
                 overview_open_close: OverviewOpenCloseAnim(
                     Animation {
                         off: false,
@@ -1823,6 +1904,7 @@ mod tests {
                 min_scale: 0.08,
                 focused_column_scale: 1.04,
                 grid_all_monitors: true,
+                default_mod_action: true,
             },
             magnifier: Magnifier {
                 off: false,
@@ -2525,6 +2607,33 @@ mod tests {
                         hotkey_overlay_title: None,
                     },
                 ],
+            },
+            screen_cast_picker: ScreenCastPicker {
+                background_color: Color {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                accent_color: Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                text_color: Color {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 1.0,
+                },
+                accent_text_color: Color {
+                    r: 0.1,
+                    g: 0.1,
+                    b: 0.1,
+                    a: 1.0,
+                },
+                corner_radius: 16.0,
             },
         }
         "#);

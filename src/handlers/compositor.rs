@@ -294,6 +294,11 @@ impl CompositorHandler for State {
                         .stop_casts_for_target(CastTarget::Window { id: id.get() });
 
                     self.niri.window_mru_ui.remove_window(id);
+                    #[cfg(feature = "xdp-gnome-screencast")]
+                    if self.niri.screen_cast_picker.remove_window(id.get()) {
+                        self.niri.queue_redraw_all();
+                        self.update_keyboard_focus();
+                    }
                     self.niri.layout.remove_window(&window, transaction.clone());
                     self.add_default_dmabuf_pre_commit_hook(surface);
 

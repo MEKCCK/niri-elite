@@ -17,6 +17,7 @@ pub struct Animations {
     pub config_notification_open_close: ConfigNotificationOpenCloseAnim,
     pub exit_confirmation_open_close: ExitConfirmationOpenCloseAnim,
     pub screenshot_ui_open: ScreenshotUiOpenAnim,
+    pub screen_cast_picker_open_close: ScreenCastPickerOpenCloseAnim,
     pub overview_open_close: OverviewOpenCloseAnim,
     pub grid_overview_open_close: GridOverviewOpenCloseAnim,
     pub magnifier: MagnifierAnim,
@@ -38,6 +39,7 @@ impl Default for Animations {
             config_notification_open_close: Default::default(),
             exit_confirmation_open_close: Default::default(),
             screenshot_ui_open: Default::default(),
+            screen_cast_picker_open_close: Default::default(),
             overview_open_close: Default::default(),
             grid_overview_open_close: Default::default(),
             magnifier: Default::default(),
@@ -74,6 +76,8 @@ pub struct AnimationsPart {
     #[knuffel(child)]
     pub screenshot_ui_open: Option<ScreenshotUiOpenAnim>,
     #[knuffel(child)]
+    pub screen_cast_picker_open_close: Option<ScreenCastPickerOpenCloseAnim>,
+    #[knuffel(child)]
     pub overview_open_close: Option<OverviewOpenCloseAnim>,
     #[knuffel(child)]
     pub grid_overview_open_close: Option<GridOverviewOpenCloseAnim>,
@@ -107,6 +111,7 @@ impl MergeWith<AnimationsPart> for Animations {
             config_notification_open_close,
             exit_confirmation_open_close,
             screenshot_ui_open,
+            screen_cast_picker_open_close,
             overview_open_close,
             grid_overview_open_close,
             magnifier,
@@ -298,6 +303,21 @@ impl Default for ExitConfirmationOpenCloseAnim {
 pub struct ScreenshotUiOpenAnim(pub Animation);
 
 impl Default for ScreenshotUiOpenAnim {
+    fn default() -> Self {
+        Self(Animation {
+            off: false,
+            kind: Kind::Easing(EasingParams {
+                duration_ms: 200,
+                curve: Curve::EaseOutQuad,
+            }),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenCastPickerOpenCloseAnim(pub Animation);
+
+impl Default for ScreenCastPickerOpenCloseAnim {
     fn default() -> Self {
         Self(Animation {
             off: false,
@@ -543,6 +563,21 @@ where
 }
 
 impl<S> knuffel::Decode<S> for ScreenshotUiOpenAnim
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let default = Self::default().0;
+        Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
+            Ok(false)
+        })?))
+    }
+}
+
+impl<S> knuffel::Decode<S> for ScreenCastPickerOpenCloseAnim
 where
     S: knuffel::traits::ErrorSpan,
 {

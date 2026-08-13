@@ -11,7 +11,7 @@ systemctl --user add-wants niri.service dms
 
 Arch Linux:
 ```
-sudo pacman -Syu niri xwayland-satellite xdg-desktop-portal-gnome xdg-desktop-portal-gtk alacritty dms-shell-niri matugen cava qt6-multimedia-ffmpeg
+sudo pacman -Syu niri xwayland-satellite xdg-desktop-portal xdg-desktop-portal-gtk alacritty dms-shell-niri matugen cava qt6-multimedia-ffmpeg
 systemctl --user add-wants niri.service dms
 ```
 

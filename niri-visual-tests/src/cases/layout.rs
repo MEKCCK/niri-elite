@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use niri::animation::Clock;
 use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options, SizingMode};
-use niri::render_helpers::{RenderCtx, RenderTarget};
+use niri::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
 use niri_config::{Color, OutputName, PresetSize};
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -273,6 +273,7 @@ impl TestCase for Layout {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         self.layout

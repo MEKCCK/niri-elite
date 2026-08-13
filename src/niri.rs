@@ -36,6 +36,8 @@ use smithay::backend::renderer::element::{
     RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
+#[cfg(feature = "xdp-gnome-screencast")]
+use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::Color32F;
 use smithay::desktop::utils::{
@@ -130,7 +132,7 @@ use crate::dbus::freedesktop_login1::Login1ToNiri;
 #[cfg(feature = "dbus")]
 use crate::dbus::gnome_shell_introspect::{self, IntrospectToNiri, NiriToIntrospect};
 #[cfg(feature = "dbus")]
-use crate::dbus::gnome_shell_screenshot::{NiriToScreenshot, ScreenshotToNiri};
+use crate::dbus::gnome_shell_screenshot::ScreenshotToNiri;
 use crate::frame_clock::FrameClock;
 use crate::handlers::{configure_lock_surface, XDG_ACTIVATION_TOKEN_TIMEOUT};
 use crate::input::pick_color_grab::PickColorGrab;
@@ -167,7 +169,7 @@ use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
     encompassing_geo, render_to_dmabuf, render_to_encompassing_texture, render_to_shm,
-    render_to_texture, render_to_vec, shaders, RenderCtx, RenderTarget,
+    render_to_texture, render_to_vec, shaders, RenderCtx, RenderIntent, RenderTarget,
 };
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::Screencasting;
@@ -176,8 +178,12 @@ use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderE
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
 use crate::ui::screen_transition::{self, ScreenTransition};
+use crate::ui::screencast_picker::ScreenCastPickerRenderElement;
+#[cfg(feature = "xdp-gnome-screencast")]
+use crate::ui::screencast_picker::{PickerCandidate, ScreenCastPickerUi, PREVIEW_FRAME_INTERVAL};
 use crate::ui::screenshot_ui::{
-    OutputScreenshot, ScreenshotReplySender, ScreenshotUi, ScreenshotUiRenderElement,
+    OutputScreenshot, ScreenshotPathReplySender, ScreenshotPortalError, ScreenshotReplySender,
+    ScreenshotSelectionReplySender, ScreenshotUi, ScreenshotUiRenderElement,
 };
 use crate::utils::scale::{closest_representable_scale, guess_monitor_scale};
 use crate::utils::spawning::{CHILD_DISPLAY, CHILD_ENV};
@@ -421,6 +427,9 @@ pub struct Niri {
     pub window_mru_ui: WindowMruUi,
     pub pending_mru_commit: Option<PendingMruCommit>,
 
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub screen_cast_picker: ScreenCastPickerUi,
+
     pub pick_window: Option<async_channel::Sender<Option<MappedId>>>,
     pub pick_color: Option<async_channel::Sender<Option<niri_ipc::PickedColor>>>,
 
@@ -544,10 +553,18 @@ pub struct PopupGrabState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyboardFocus {
     // Layout is focused by default if there's nothing else to focus.
-    Layout { surface: Option<WlSurface> },
-    LayerShell { surface: WlSurface },
-    LockScreen { surface: Option<WlSurface> },
+    Layout {
+        surface: Option<WlSurface>,
+    },
+    LayerShell {
+        surface: WlSurface,
+    },
+    LockScreen {
+        surface: Option<WlSurface>,
+    },
     ScreenshotUi,
+    #[cfg(feature = "xdp-gnome-screencast")]
+    ScreenCastPicker,
     ExitConfirmDialog,
     Overview,
     Mru,
@@ -697,6 +714,8 @@ impl KeyboardFocus {
             KeyboardFocus::LayerShell { surface } => Some(surface),
             KeyboardFocus::LockScreen { surface } => surface.as_ref(),
             KeyboardFocus::ScreenshotUi => None,
+            #[cfg(feature = "xdp-gnome-screencast")]
+            KeyboardFocus::ScreenCastPicker => None,
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
@@ -709,6 +728,8 @@ impl KeyboardFocus {
             KeyboardFocus::LayerShell { surface } => Some(surface),
             KeyboardFocus::LockScreen { surface } => surface,
             KeyboardFocus::ScreenshotUi => None,
+            #[cfg(feature = "xdp-gnome-screencast")]
+            KeyboardFocus::ScreenCastPicker => None,
             KeyboardFocus::ExitConfirmDialog => None,
             KeyboardFocus::Overview => None,
             KeyboardFocus::Mru => None,
@@ -791,7 +812,9 @@ impl State {
         // in order to clear completed animations and render elements. Even if we're not rendering,
         // it's good to advance every now and then so the workspace clean-up and animations don't
         // build up (the 1 second frame callback timer will call this line).
-        self.niri.advance_animations();
+        if self.niri.advance_animations() {
+            self.update_keyboard_focus();
+        }
 
         self.niri.redraw_queued_outputs(&mut self.backend);
 
@@ -1206,6 +1229,13 @@ impl State {
             }
         } else if self.niri.screenshot_ui.is_open() {
             KeyboardFocus::ScreenshotUi
+        } else if cfg!(feature = "xdp-gnome-screencast") && self.niri.screen_cast_picker_is_open() {
+            #[cfg(feature = "xdp-gnome-screencast")]
+            {
+                KeyboardFocus::ScreenCastPicker
+            }
+            #[cfg(not(feature = "xdp-gnome-screencast"))]
+            unreachable!()
         } else if self.niri.window_mru_ui.is_open() {
             KeyboardFocus::Mru
         } else if let Some(output) = self.niri.layout.active_output() {
@@ -2054,20 +2084,134 @@ impl State {
         self.open_screenshot_ui_with_reply(show_pointer, path, None);
     }
 
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn open_screen_cast_picker(
+        &mut self,
+        request: crate::dbus::niri_portal_screen_cast::PickSourcesRequest,
+    ) {
+        use crate::utils::with_toplevel_role;
+
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.screen_cast_picker.is_visible()
+            || self.niri.window_mru_ui.is_open()
+            || self.niri.exit_confirm_dialog.is_open()
+        {
+            request.fail("cannot open screen cast picker right now");
+            return;
+        }
+
+        let output = self
+            .niri
+            .output_under_cursor()
+            .or_else(|| self.niri.layout.active_output().cloned());
+        let Some(output) = output else {
+            request.fail("no output is available for the screen cast picker");
+            return;
+        };
+
+        let displays = self
+            .niri
+            .global_space
+            .outputs()
+            .map(|output| {
+                let name = output.name();
+                let subtitle = output.current_mode().map(|mode| {
+                    let size = output.current_transform().transform_size(mode.size);
+                    format!("{} × {}", size.w, size.h)
+                });
+                PickerCandidate::monitor(name.clone(), name, subtitle)
+            })
+            .collect();
+        let windows = self
+            .niri
+            .layout
+            .windows()
+            .map(|(_, mapped)| {
+                let (title, app_id) = with_toplevel_role(mapped.toplevel(), |role| {
+                    (role.title.clone(), role.app_id.clone())
+                });
+                PickerCandidate::window(mapped.id().get(), title, app_id)
+            })
+            .collect();
+
+        self.niri.update_render_elements(Some(&output));
+        let frozen_backdrop = self
+            .backend
+            .with_primary_renderer(|renderer| {
+                self.niri
+                    .capture_screen_cast_picker_backdrop(renderer, &output)
+            })
+            .flatten();
+
+        if self
+            .niri
+            .screen_cast_picker
+            .open(request, output, displays, windows, frozen_backdrop)
+        {
+            self.niri.seat.get_pointer().unwrap().unset_grab(
+                self,
+                SERIAL_COUNTER.next_serial(),
+                get_monotonic_time().as_millis() as u32,
+            );
+            if let Some(touch) = self.niri.seat.get_touch() {
+                touch.unset_grab(self);
+            }
+            self.niri.queue_redraw_all();
+            self.update_keyboard_focus();
+        }
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn cancel_screen_cast_picker(&mut self) {
+        if self.niri.screen_cast_picker.cancel() {
+            self.niri.queue_redraw_all();
+            self.update_keyboard_focus();
+        }
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn confirm_screen_cast_picker(&mut self) {
+        if self.niri.screen_cast_picker.confirm() {
+            self.niri.queue_redraw_all();
+            self.update_keyboard_focus();
+        }
+    }
+
     pub fn open_screenshot_ui_with_reply(
         &mut self,
         show_pointer: bool,
         path: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
     ) {
-        let send_error = |ipc_reply: Option<ScreenshotReplySender>, message: &str| {
-            if let Some(ipc_reply) = ipc_reply {
-                let _ = ipc_reply.try_send(Err(String::from(message)));
+        self.open_screenshot_ui_with_replies(show_pointer, path, ipc_reply, None, None);
+    }
+
+    fn open_screenshot_ui_with_replies(
+        &mut self,
+        show_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+        selection_reply: Option<ScreenshotSelectionReplySender>,
+    ) {
+        let send_error = |message: &str| {
+            if let Some(reply) = &ipc_reply {
+                let _ = reply.try_send(Err(String::from(message)));
+            }
+            if let Some(reply) = &path_reply {
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(message))));
+            }
+            if let Some(reply) = &selection_reply {
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(message))));
             }
         };
 
-        if self.niri.is_locked() || self.niri.screenshot_ui.is_open() {
-            send_error(ipc_reply, "cannot open screenshot UI right now");
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.screen_cast_picker_is_visible()
+        {
+            send_error("cannot open screenshot UI right now");
             return;
         }
 
@@ -2076,7 +2220,7 @@ impl State {
             .output_under_cursor()
             .or_else(|| self.niri.layout.active_output().cloned());
         let Some(default_output) = default_output else {
-            send_error(ipc_reply, "no output available for screenshot");
+            send_error("no output available for screenshot");
             return;
         };
 
@@ -2086,7 +2230,7 @@ impl State {
             .backend
             .with_primary_renderer(|renderer| self.niri.capture_screenshots(renderer).collect())
         else {
-            send_error(ipc_reply, "primary renderer is not available");
+            send_error("primary renderer is not available");
             return;
         };
 
@@ -2111,6 +2255,8 @@ impl State {
         }
 
         let ipc_reply_on_failure = ipc_reply.clone();
+        let path_reply_on_failure = path_reply.clone();
+        let selection_reply_on_failure = selection_reply.clone();
         let opened = self
             .backend
             .with_primary_renderer(|renderer| {
@@ -2121,11 +2267,25 @@ impl State {
                     show_pointer,
                     path,
                     ipc_reply,
+                    path_reply,
+                    selection_reply,
                 )
             })
             .unwrap_or(false);
         if !opened {
-            send_error(ipc_reply_on_failure, "error opening screenshot UI");
+            if let Some(reply) = ipc_reply_on_failure {
+                let _ = reply.try_send(Err(String::from("error opening screenshot UI")));
+            }
+            if let Some(reply) = path_reply_on_failure {
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                    "error opening screenshot UI",
+                ))));
+            }
+            if let Some(reply) = selection_reply_on_failure {
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                    "error opening screenshot UI",
+                ))));
+            }
             return;
         }
 
@@ -2151,43 +2311,111 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
-    pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
-        let ScreenshotUi::Open {
-            path, ipc_reply, ..
-        } = &mut self.niri.screenshot_ui
-        else {
-            return;
-        };
-        let path = path.take();
-        let ipc_reply = ipc_reply.take();
+    pub fn cancel_screenshot(&mut self) {
+        if self.niri.screenshot_ui.close() {
+            self.niri
+                .cursor_manager
+                .set_cursor_image(CursorImageStatus::default_named());
+            self.niri.queue_redraw_all();
+        }
 
-        self.backend.with_primary_renderer(|renderer| {
-            match self.niri.screenshot_ui.capture(renderer) {
-                Ok((size, pixels)) => {
-                    let ipc_reply_on_error = ipc_reply.clone();
-                    if let Err(err) = self.niri.save_screenshot_with_reply(
-                        size,
-                        pixels,
-                        write_to_disk,
-                        path,
-                        ipc_reply,
-                    ) {
-                        warn!("error saving screenshot: {err:?}");
-                        if let Some(ipc_reply) = ipc_reply_on_error {
-                            let _ =
-                                ipc_reply.try_send(Err(format!("error saving screenshot: {err}")));
+        if self.niri.pick_color.is_some() {
+            self.niri.seat.get_pointer().unwrap().unset_grab(
+                self,
+                SERIAL_COUNTER.next_serial(),
+                get_monotonic_time().as_millis() as u32,
+            );
+        }
+    }
+
+    pub fn confirm_screenshot(&mut self, write_to_disk: bool) {
+        let selection = self.niri.screenshot_ui.selection();
+        let (path, ipc_reply, path_reply, selection_reply) = {
+            let ScreenshotUi::Open {
+                path,
+                ipc_reply,
+                path_reply,
+                selection_reply,
+                ..
+            } = &mut self.niri.screenshot_ui
+            else {
+                return;
+            };
+
+            (
+                path.take(),
+                ipc_reply.take(),
+                path_reply.take(),
+                selection_reply.take(),
+            )
+        };
+
+        if let Some(selection_reply) = selection_reply {
+            let result = selection
+                .and_then(|(output, rect, scale)| {
+                    let output_geo = self.niri.global_space.output_geometry(&output)?;
+                    let rect = rect.to_f64().to_logical(scale);
+                    let x1 = rect.loc.x.floor() as i32;
+                    let y1 = rect.loc.y.floor() as i32;
+                    let x2 = (rect.loc.x + rect.size.w).ceil() as i32;
+                    let y2 = (rect.loc.y + rect.size.h).ceil() as i32;
+
+                    Some((
+                        output_geo.loc.x + x1,
+                        output_geo.loc.y + y1,
+                        x2 - x1,
+                        y2 - y1,
+                    ))
+                })
+                .ok_or_else(|| {
+                    ScreenshotPortalError::Failed(String::from(
+                        "cannot resolve screenshot selection geometry",
+                    ))
+                });
+            let _ = selection_reply.try_send(result);
+        } else {
+            let write_to_disk = write_to_disk || path_reply.is_some();
+
+            self.backend.with_primary_renderer(|renderer| {
+                match self.niri.screenshot_ui.capture(renderer) {
+                    Ok((size, pixels)) => {
+                        let ipc_reply_on_error = ipc_reply.clone();
+                        let path_reply_on_error = path_reply.clone();
+                        if let Err(err) = self.niri.save_screenshot_with_replies(
+                            size,
+                            pixels,
+                            write_to_disk,
+                            path,
+                            ipc_reply,
+                            path_reply,
+                        ) {
+                            warn!("error saving screenshot: {err:?}");
+                            if let Some(ipc_reply) = ipc_reply_on_error {
+                                let _ = ipc_reply
+                                    .try_send(Err(format!("error saving screenshot: {err}")));
+                            }
+                            if let Some(path_reply) = path_reply_on_error {
+                                let _ = path_reply.try_send(Err(ScreenshotPortalError::Failed(
+                                    format!("error saving screenshot: {err}"),
+                                )));
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!("error capturing screenshot: {err:?}");
+                        if let Some(ipc_reply) = ipc_reply {
+                            let _ = ipc_reply
+                                .try_send(Err(format!("error capturing screenshot: {err}")));
+                        }
+                        if let Some(path_reply) = path_reply {
+                            let _ = path_reply.try_send(Err(ScreenshotPortalError::Failed(
+                                format!("error capturing screenshot: {err}"),
+                            )));
                         }
                     }
                 }
-                Err(err) => {
-                    warn!("error capturing screenshot: {err:?}");
-                    if let Some(ipc_reply) = ipc_reply {
-                        let _ =
-                            ipc_reply.try_send(Err(format!("error capturing screenshot: {err}")));
-                    }
-                }
-            }
-        });
+            });
+        }
 
         self.niri.screenshot_ui.close();
         self.niri
@@ -2321,6 +2549,7 @@ impl State {
                 let mut ctx = RenderCtx {
                     target: RenderTarget::Output,
                     renderer,
+                    intent: RenderIntent::Normal,
                     xray: None,
                 };
 
@@ -2360,14 +2589,37 @@ impl State {
     pub fn set_dynamic_cast_target(&mut self, _target: CastTarget) {}
 
     #[cfg(feature = "dbus")]
-    pub fn on_screen_shot_msg(
-        &mut self,
-        to_screenshot: &async_channel::Sender<NiriToScreenshot>,
-        msg: ScreenshotToNiri,
-    ) {
+    pub fn on_screen_shot_msg(&mut self, msg: ScreenshotToNiri) {
         match msg {
-            ScreenshotToNiri::TakeScreenshot { include_cursor } => {
-                self.handle_take_screenshot(to_screenshot, include_cursor);
+            ScreenshotToNiri::TakeScreenshot {
+                include_cursor,
+                reply,
+            } => {
+                self.handle_take_screenshot(reply, include_cursor);
+            }
+            ScreenshotToNiri::InteractiveScreenshot(reply) => {
+                self.open_screenshot_ui_with_replies(true, None, None, Some(reply), None);
+            }
+            ScreenshotToNiri::TakeWindow {
+                include_cursor,
+                reply,
+            } => {
+                self.handle_take_window(reply, include_cursor);
+            }
+            ScreenshotToNiri::SelectArea(reply) => {
+                self.open_screenshot_ui_with_replies(false, None, None, None, Some(reply));
+            }
+            ScreenshotToNiri::TakeArea {
+                x,
+                y,
+                width,
+                height,
+                reply,
+            } => {
+                self.handle_take_area(reply, x, y, width, height);
+            }
+            ScreenshotToNiri::CancelScreenshot => {
+                self.cancel_screenshot();
             }
             ScreenshotToNiri::PickColor(tx) => {
                 self.handle_pick_color(tx);
@@ -2376,43 +2628,118 @@ impl State {
     }
 
     #[cfg(feature = "dbus")]
-    fn handle_take_screenshot(
-        &mut self,
-        to_screenshot: &async_channel::Sender<NiriToScreenshot>,
-        include_cursor: bool,
-    ) {
+    fn handle_take_screenshot(&mut self, reply: ScreenshotPathReplySender, include_cursor: bool) {
         let _span = tracy_client::span!("TakeScreenshot");
 
         let rv = self.backend.with_primary_renderer(|renderer| {
-            let on_done = {
-                let to_screenshot = to_screenshot.clone();
-                move |path| {
-                    let msg = NiriToScreenshot::ScreenshotResult(Some(path));
-                    if let Err(err) = to_screenshot.send_blocking(msg) {
-                        warn!("error sending path to screenshot: {err:?}");
-                    }
-                }
-            };
-
-            let res = self
-                .niri
-                .screenshot_all_outputs(renderer, include_cursor, on_done);
-
-            if let Err(err) = res {
-                warn!("error taking a screenshot: {err:?}");
-
-                let msg = NiriToScreenshot::ScreenshotResult(None);
-                if let Err(err) = to_screenshot.send_blocking(msg) {
-                    warn!("error sending None to screenshot: {err:?}");
-                }
-            }
+            self.niri
+                .screenshot_all_outputs(renderer, include_cursor, reply.clone())
         });
 
-        if rv.is_none() {
-            let msg = NiriToScreenshot::ScreenshotResult(None);
-            if let Err(err) = to_screenshot.send_blocking(msg) {
-                warn!("error sending None to screenshot: {err:?}");
+        match rv {
+            None => {
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                    "primary renderer is not available",
+                ))));
             }
+            Some(Err(err)) => {
+                warn!("error taking a screenshot: {err:?}");
+                let _ = reply.try_send(Err(ScreenshotPortalError::Failed(err.to_string())));
+            }
+            Some(Ok(())) => (),
+        }
+    }
+
+    #[cfg(feature = "dbus")]
+    fn handle_take_window(&mut self, reply: ScreenshotPathReplySender, include_cursor: bool) {
+        let Some((mapped, output)) = self.niri.layout.focus_with_output() else {
+            let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                "no focused window to screenshot",
+            ))));
+            return;
+        };
+
+        let reply_on_error = reply.clone();
+        let result = self.backend.with_primary_renderer(|renderer| {
+            self.niri.screenshot_window_with_replies(
+                renderer,
+                output,
+                mapped,
+                true,
+                include_cursor,
+                None,
+                None,
+                Some(reply),
+            )
+        });
+
+        match result {
+            None => {
+                let _ = reply_on_error.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                    "primary renderer is not available",
+                ))));
+            }
+            Some(Err(err)) => {
+                warn!("error taking a window screenshot: {err:?}");
+                let _ =
+                    reply_on_error.try_send(Err(ScreenshotPortalError::Failed(err.to_string())));
+            }
+            Some(Ok(())) => (),
+        }
+    }
+
+    #[cfg(feature = "dbus")]
+    fn handle_take_area(
+        &mut self,
+        reply: ScreenshotPathReplySender,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) {
+        if width <= 0 || height <= 0 {
+            let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                "screenshot area is empty",
+            ))));
+            return;
+        }
+
+        let area = Rectangle::new(Point::from((x, y)), Size::from((width, height)));
+        let Some((output, output_geo)) = self.niri.global_space.outputs().find_map(|output| {
+            let geo = self.niri.global_space.output_geometry(output)?;
+            let right = area.loc.x.checked_add(area.size.w)?;
+            let bottom = area.loc.y.checked_add(area.size.h)?;
+            (area.loc.x >= geo.loc.x
+                && area.loc.y >= geo.loc.y
+                && right <= geo.loc.x + geo.size.w
+                && bottom <= geo.loc.y + geo.size.h)
+                .then(|| (output.clone(), geo))
+        }) else {
+            let _ = reply.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                "screenshot area must be contained by one output",
+            ))));
+            return;
+        };
+
+        let local_area = Rectangle::new(area.loc - output_geo.loc, area.size);
+        let reply_on_error = reply.clone();
+        let result = self.backend.with_primary_renderer(|renderer| {
+            self.niri
+                .screenshot_area_with_reply(renderer, &output, local_area, reply)
+        });
+
+        match result {
+            None => {
+                let _ = reply_on_error.try_send(Err(ScreenshotPortalError::Failed(String::from(
+                    "primary renderer is not available",
+                ))));
+            }
+            Some(Err(err)) => {
+                warn!("error taking an area screenshot: {err:?}");
+                let _ =
+                    reply_on_error.try_send(Err(ScreenshotPortalError::Failed(err.to_string())));
+            }
+            Some(Ok(())) => (),
         }
     }
 
@@ -2493,6 +2820,28 @@ impl State {
 }
 
 impl Niri {
+    fn screen_cast_picker_is_open(&self) -> bool {
+        #[cfg(feature = "xdp-gnome-screencast")]
+        {
+            self.screen_cast_picker.is_open()
+        }
+        #[cfg(not(feature = "xdp-gnome-screencast"))]
+        {
+            false
+        }
+    }
+
+    fn screen_cast_picker_is_visible(&self) -> bool {
+        #[cfg(feature = "xdp-gnome-screencast")]
+        {
+            self.screen_cast_picker.is_visible()
+        }
+        #[cfg(not(feature = "xdp-gnome-screencast"))]
+        {
+            false
+        }
+    }
+
     pub fn new(
         config: Rc<RefCell<Config>>,
         event_loop: LoopHandle<'static, State>,
@@ -2680,6 +3029,8 @@ impl Niri {
 
         let screenshot_ui = ScreenshotUi::new(animation_clock.clone(), config.clone());
         let window_mru_ui = WindowMruUi::new(config.clone());
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let screen_cast_picker = ScreenCastPickerUi::new(animation_clock.clone(), config.clone());
         let config_error_notification =
             ConfigErrorNotification::new(animation_clock.clone(), config.clone());
 
@@ -2894,6 +3245,9 @@ impl Niri {
 
             window_mru_ui,
             pending_mru_commit: None,
+
+            #[cfg(feature = "xdp-gnome-screencast")]
+            screen_cast_picker,
 
             pick_window: None,
             pick_color: None,
@@ -3258,6 +3612,11 @@ impl Niri {
             self.queue_redraw_all();
         }
 
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.screen_cast_picker.cancel_immediately() {
+            self.queue_redraw_all();
+        }
+
         if self.window_mru_ui.output() == Some(output) {
             self.cancel_mru();
         }
@@ -3515,7 +3874,11 @@ impl Niri {
         extended_bounds: bool,
         pos: Point<f64, Logical>,
     ) -> Option<(Output, &Workspace<Mapped>)> {
-        if self.exit_confirm_dialog.is_open() || self.is_locked() || self.screenshot_ui.is_open() {
+        if self.exit_confirm_dialog.is_open()
+            || self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.screen_cast_picker_is_visible()
+        {
             return None;
         }
 
@@ -3551,6 +3914,7 @@ impl Niri {
         if self.exit_confirm_dialog.is_open()
             || self.is_locked()
             || self.screenshot_ui.is_open()
+            || self.screen_cast_picker_is_visible()
             || self.window_mru_ui.is_open()
         {
             return None;
@@ -3631,7 +3995,10 @@ impl Niri {
             return rv;
         }
 
-        if self.screenshot_ui.is_open() || self.window_mru_ui.is_open() {
+        if self.screenshot_ui.is_open()
+            || self.screen_cast_picker_is_visible()
+            || self.window_mru_ui.is_open()
+        {
             return rv;
         }
 
@@ -4268,8 +4635,18 @@ impl Niri {
 
     /// Schedules an immediate redraw if one is not already scheduled.
     pub fn queue_redraw(&mut self, output: &Output) {
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let picker_host = self.screen_cast_picker.preview_host_for_source(output);
+
         let state = self.output_state.get_mut(output).unwrap();
         state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if let Some(host) = picker_host {
+            if let Some(state) = self.output_state.get_mut(&host) {
+                state.redraw_state = mem::take(&mut state.redraw_state).queue_redraw();
+            }
+        }
     }
 
     pub fn redraw_queued_outputs(&mut self, backend: &mut Backend) {
@@ -4685,6 +5062,8 @@ impl Niri {
             // layer-shell, the layout will briefly draw as active, despite never having focus.
             KeyboardFocus::LockScreen { .. } => true,
             KeyboardFocus::ScreenshotUi => true,
+            #[cfg(feature = "xdp-gnome-screencast")]
+            KeyboardFocus::ScreenCastPicker => true,
             KeyboardFocus::ExitConfirmDialog => true,
             KeyboardFocus::Overview => true,
             KeyboardFocus::Mru => true,
@@ -4752,13 +5131,17 @@ impl Niri {
         }
     }
 
-    pub fn advance_animations(&mut self) {
+    pub fn advance_animations(&mut self) -> bool {
         let _span = tracy_client::span!("Niri::advance_animations");
 
         self.layout.advance_animations();
         self.config_error_notification.advance_animations();
         self.exit_confirm_dialog.advance_animations();
         self.screenshot_ui.advance_animations();
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let screen_cast_picker_closed = self.screen_cast_picker.advance_animations();
+        #[cfg(not(feature = "xdp-gnome-screencast"))]
+        let screen_cast_picker_closed = false;
         self.window_mru_ui.advance_animations();
 
         for state in self.output_state.values_mut() {
@@ -4768,6 +5151,7 @@ impl Niri {
                 }
             }
         }
+        screen_cast_picker_closed
     }
 
     pub fn update_render_elements(&mut self, output: Option<&Output>) {
@@ -4863,6 +5247,116 @@ impl Niri {
         elements
     }
 
+    #[cfg(feature = "xdp-gnome-screencast")]
+    fn capture_screen_cast_picker_backdrop(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+    ) -> Option<[TextureBuffer<GlesTexture>; 2]> {
+        let mode = output.current_mode()?;
+        let size = output.current_transform().transform_size(mode.size);
+        let scale = Scale::from(output.current_scale().fractional_scale());
+        let targets = [RenderTarget::Output, RenderTarget::Screencast];
+        let buffers = targets.map(|target| {
+            let ctx = RenderCtx {
+                renderer: &mut *renderer,
+                target,
+                intent: RenderIntent::Normal,
+                xray: None,
+            };
+            let elements = self.render_to_vec(ctx, output, false);
+            let result = render_to_texture(
+                renderer,
+                size,
+                scale,
+                Transform::Normal,
+                Fourcc::Abgr8888,
+                elements.iter().rev(),
+            );
+            if let Err(err) = &result {
+                warn!(
+                    "error capturing screen cast picker backdrop for {}: {err:?}",
+                    output.name()
+                );
+            }
+            result.ok().map(|(texture, _)| {
+                TextureBuffer::from_texture(renderer, texture, scale, Transform::Normal, Vec::new())
+            })
+        });
+
+        if buffers.iter().any(Option::is_none) {
+            return None;
+        }
+        Some(buffers.map(Option::unwrap))
+    }
+
+    #[cfg(feature = "xdp-gnome-screencast")]
+    fn refresh_screen_cast_picker_display_previews(
+        &self,
+        renderer: &mut GlesRenderer,
+        host_output: &Output,
+    ) {
+        if !self.screen_cast_picker.is_host_output(host_output) {
+            return;
+        }
+        if !self.screen_cast_picker.display_previews_due(host_output) {
+            return;
+        }
+        let requests = self
+            .screen_cast_picker
+            .display_preview_requests(host_output);
+        self.screen_cast_picker
+            .begin_display_preview_frame(&requests);
+        if requests.is_empty() {
+            return;
+        }
+
+        for request in requests {
+            let Some(source) = self
+                .global_space
+                .outputs()
+                .find(|output| output.name() == request.name)
+                .cloned()
+            else {
+                continue;
+            };
+            let source_size = output_size(&source);
+            // Layout elements carry physical locations from their source output.
+            let source_scale = Scale::from(source.current_scale().fractional_scale());
+            if source_size.w <= 0. || source_size.h <= 0. {
+                continue;
+            }
+            let factor = f64::min(
+                request.size.w / source_size.w,
+                request.size.h / source_size.h,
+            )
+            .clamp(0.001, 1.);
+            let preview_bounds =
+                screen_cast_picker_preview_bounds(source_size, factor, source_scale);
+            let ctx = RenderCtx {
+                renderer: &mut *renderer,
+                target: RenderTarget::Screencast,
+                intent: RenderIntent::PickerPreview,
+                xray: None,
+            };
+            let elements = self.render_to_vec(ctx, &source, false);
+            let elements: Vec<_> = elements
+                .into_iter()
+                .map(|element| {
+                    RescaleRenderElement::from_element(element, Point::new(0, 0), factor)
+                })
+                .collect();
+            self.screen_cast_picker.update_display_preview(
+                &request.name,
+                renderer,
+                source_scale,
+                preview_bounds,
+                &elements,
+            );
+        }
+        self.screen_cast_picker.mark_display_previews_refreshed();
+    }
+
     pub fn compute_magnifier_params(&self, output: &Output) -> Option<(f64, Point<i32, Physical>)> {
         if self.magnifier_capture.get() {
             return None;
@@ -4935,13 +5429,22 @@ impl Niri {
     ) {
         let _span = tracy_client::span!("Niri::render");
 
-        if ctx.target == RenderTarget::Output {
+        let rendering_output = ctx.target == RenderTarget::Output;
+        if rendering_output {
             if let Some(preview) = self.config.borrow().debug.preview_render {
                 ctx.target = match preview {
                     PreviewRender::Screencast => RenderTarget::Screencast,
                     PreviewRender::ScreenCapture => RenderTarget::ScreenCapture,
                 };
             }
+        }
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if rendering_output && self.screen_cast_picker.is_visible() {
+            self.refresh_screen_cast_picker_display_previews(
+                ctx.renderer.as_gles_renderer(),
+                output,
+            );
         }
 
         self.fill_xray_elements(ctx.as_gles(), output);
@@ -4966,9 +5469,15 @@ impl Niri {
                 let rescaled = RescaleRenderElement::from_element(Box::new(elem), pivot, zoom);
                 push(OutputRenderElements::Magnified(rescaled))
             };
-            self.render_inner(ctx, output, include_pointer, &mut magnifier_push);
+            self.render_inner(
+                ctx,
+                output,
+                include_pointer,
+                rendering_output,
+                &mut magnifier_push,
+            );
         } else {
-            self.render_inner(ctx, output, include_pointer, push);
+            self.render_inner(ctx, output, include_pointer, rendering_output, push);
         }
 
         self.clear_xray_elements(output);
@@ -4979,6 +5488,7 @@ impl Niri {
         mut ctx: RenderCtx<R>,
         output: &Output,
         include_pointer: bool,
+        _rendering_output: bool,
         push: &mut dyn FnMut(OutputRenderElements<R>),
     ) {
         let state = self.output_state.get(output).unwrap();
@@ -5105,6 +5615,19 @@ impl Niri {
             push(backdrop);
 
             return;
+        }
+
+        #[cfg(feature = "xdp-gnome-screencast")]
+        if self.screen_cast_picker.is_visible()
+            && should_render_screen_cast_picker(_rendering_output, ctx.target, ctx.intent)
+        {
+            let frozen = self
+                .screen_cast_picker
+                .render(self, output, ctx.r(), &mut |elem| push(elem.into()));
+            if frozen {
+                push(backdrop);
+                return;
+            }
         }
 
         // Draw the hotkey overlay on top.
@@ -5420,7 +5943,20 @@ impl Niri {
         // Freeze the clock at the target time.
         self.clock.set_unadjusted(target_presentation_time);
 
-        self.update_render_elements(Some(output));
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let update_all_outputs = self.screen_cast_picker.is_host_output(output)
+            && !self
+                .screen_cast_picker
+                .display_preview_requests(output)
+                .is_empty();
+        #[cfg(not(feature = "xdp-gnome-screencast"))]
+        let update_all_outputs = false;
+
+        if update_all_outputs {
+            self.update_render_elements(None);
+        } else {
+            self.update_render_elements(Some(output));
+        }
 
         let mut res = RenderResult::Skipped;
         if self.monitors_active {
@@ -5448,6 +5984,11 @@ impl Niri {
                 self.config_error_notification.are_animations_ongoing();
             state.unfinished_animations_remain |= self.exit_confirm_dialog.are_animations_ongoing();
             state.unfinished_animations_remain |= self.screenshot_ui.are_animations_ongoing();
+            #[cfg(feature = "xdp-gnome-screencast")]
+            {
+                state.unfinished_animations_remain |=
+                    self.screen_cast_picker.are_animations_ongoing(output);
+            }
             state.unfinished_animations_remain |= self.window_mru_ui.are_animations_ongoing();
             state.unfinished_animations_remain |= state.screen_transition.is_some();
 
@@ -5869,6 +6410,15 @@ impl Niri {
         let state = self.output_state.get(output).unwrap();
         let sequence = state.frame_callback_sequence;
 
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let picker_display_preview = self.screen_cast_picker.is_display_previewing_host(output);
+        #[cfg(feature = "xdp-gnome-screencast")]
+        let picker_window_previews: HashSet<_> = self
+            .screen_cast_picker
+            .host_window_preview_ids(output)
+            .into_iter()
+            .collect();
+
         let should_send = |surface: &WlSurface, states: &SurfaceData| {
             // Do the standard primary scanout output check. For pointer surfaces it deduplicates
             // the frame callbacks across potentially multiple outputs, and for regular windows and
@@ -5905,6 +6455,16 @@ impl Niri {
         let frame_callback_time = get_monotonic_time();
 
         for mapped in self.layout.windows_for_output_mut(output) {
+            #[cfg(feature = "xdp-gnome-screencast")]
+            if picker_display_preview || picker_window_previews.contains(&mapped.id().get()) {
+                mapped.send_frame(
+                    output,
+                    frame_callback_time,
+                    Some(PREVIEW_FRAME_INTERVAL),
+                    |_, _| None,
+                );
+                continue;
+            }
             mapped.send_frame(
                 output,
                 frame_callback_time,
@@ -5914,6 +6474,16 @@ impl Niri {
         }
 
         for surface in layer_map_for_output(output).layers() {
+            #[cfg(feature = "xdp-gnome-screencast")]
+            if picker_display_preview {
+                surface.send_frame(
+                    output,
+                    frame_callback_time,
+                    Some(PREVIEW_FRAME_INTERVAL),
+                    |_, _| None,
+                );
+                continue;
+            }
             surface.send_frame(
                 output,
                 frame_callback_time,
@@ -6121,6 +6691,7 @@ impl Niri {
                     let ctx = RenderCtx {
                         renderer,
                         target: RenderTarget::ScreenCapture,
+                        intent: RenderIntent::Normal,
                         xray: None,
                     };
                     let offset = screencopy.region_loc().upscale(-1);
@@ -6199,6 +6770,7 @@ impl Niri {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::ScreenCapture,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         let offset = screencopy.region_loc().upscale(-1);
@@ -6324,6 +6896,7 @@ impl Niri {
                 let ctx = RenderCtx {
                     renderer,
                     target,
+                    intent: RenderIntent::Normal,
                     xray: None,
                 };
                 let was_magnifier_capture = self.magnifier_capture.replace(true);
@@ -6409,6 +6982,27 @@ impl Niri {
         path: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
     ) -> anyhow::Result<()> {
+        self.screenshot_with_replies(
+            renderer,
+            output,
+            write_to_disk,
+            include_pointer,
+            path,
+            ipc_reply,
+            None,
+        )
+    }
+
+    pub fn screenshot_with_replies(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        write_to_disk: bool,
+        include_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+    ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot");
 
         self.update_render_elements(Some(output));
@@ -6421,6 +7015,7 @@ impl Niri {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::ScreenCapture,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         let elements = self.render_to_vec(ctx, output, include_pointer);
@@ -6434,7 +7029,7 @@ impl Niri {
             elements,
         )?;
 
-        self.save_screenshot_with_reply(size, pixels, write_to_disk, path, ipc_reply)
+        self.save_screenshot_with_replies(size, pixels, write_to_disk, path, ipc_reply, path_reply)
             .context("error saving screenshot")
     }
 
@@ -6468,6 +7063,29 @@ impl Niri {
         path: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
     ) -> anyhow::Result<()> {
+        self.screenshot_window_with_replies(
+            renderer,
+            output,
+            mapped,
+            write_to_disk,
+            show_pointer,
+            path,
+            ipc_reply,
+            None,
+        )
+    }
+
+    pub fn screenshot_window_with_replies(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        mapped: &Mapped,
+        write_to_disk: bool,
+        show_pointer: bool,
+        path: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+    ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_window");
 
         let was_magnifier_capture = self.magnifier_capture.replace(true);
@@ -6499,6 +7117,7 @@ impl Niri {
         let ctx = RenderCtx {
             renderer,
             target: RenderTarget::ScreenCapture,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         mapped.render(
@@ -6527,8 +7146,83 @@ impl Niri {
 
         self.magnifier_capture.set(was_magnifier_capture);
 
-        self.save_screenshot_with_reply(geo.size, pixels, write_to_disk, path, ipc_reply)
-            .context("error saving screenshot")
+        self.save_screenshot_with_replies(
+            geo.size,
+            pixels,
+            write_to_disk,
+            path,
+            ipc_reply,
+            path_reply,
+        )
+        .context("error saving screenshot")
+    }
+
+    #[cfg(feature = "dbus")]
+    pub fn screenshot_area_with_reply(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        area: Rectangle<i32, Logical>,
+        path_reply: ScreenshotPathReplySender,
+    ) -> anyhow::Result<()> {
+        let _span = tracy_client::span!("Niri::screenshot_area");
+
+        ensure!(
+            area.size.w > 0 && area.size.h > 0,
+            "screenshot area is empty"
+        );
+        self.update_render_elements(Some(output));
+
+        let output_size = output
+            .current_mode()
+            .context("output has no current mode")?
+            .size;
+        let output_size = output.current_transform().transform_size(output_size);
+        let scale_value = output.current_scale().fractional_scale();
+        let scale = Scale::from(scale_value);
+        let physical_area = area.to_f64().to_physical_precise_round(scale_value);
+
+        ensure!(
+            physical_area.loc.x >= 0
+                && physical_area.loc.y >= 0
+                && physical_area.loc.x + physical_area.size.w <= output_size.w
+                && physical_area.loc.y + physical_area.size.h <= output_size.h,
+            "screenshot area is outside the output"
+        );
+
+        let ctx = RenderCtx {
+            renderer,
+            target: RenderTarget::ScreenCapture,
+            intent: RenderIntent::Normal,
+            xray: None,
+        };
+        let elements = self.render_to_vec(ctx, output, false);
+        let pixels = render_to_vec(
+            renderer,
+            output_size,
+            scale,
+            Transform::Normal,
+            Fourcc::Abgr8888,
+            elements.iter().rev(),
+        )?;
+
+        let source_stride = output_size.w as usize * 4;
+        let target_stride = physical_area.size.w as usize * 4;
+        let mut cropped = Vec::with_capacity(target_stride * physical_area.size.h as usize);
+        for row in physical_area.loc.y..physical_area.loc.y + physical_area.size.h {
+            let start = row as usize * source_stride + physical_area.loc.x as usize * 4;
+            cropped.extend_from_slice(&pixels[start..start + target_stride]);
+        }
+
+        self.save_screenshot_with_replies(
+            physical_area.size,
+            cropped,
+            true,
+            None,
+            None,
+            Some(path_reply),
+        )
+        .context("error saving screenshot area")
     }
 
     pub fn save_screenshot(
@@ -6549,7 +7243,20 @@ impl Niri {
         path_arg: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
     ) -> anyhow::Result<()> {
-        let path = write_to_disk
+        self.save_screenshot_with_replies(size, pixels, write_to_disk, path_arg, ipc_reply, None)
+    }
+
+    pub fn save_screenshot_with_replies(
+        &self,
+        size: Size<i32, Physical>,
+        pixels: Vec<u8>,
+        write_to_disk: bool,
+        path_arg: Option<String>,
+        ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+    ) -> anyhow::Result<()> {
+        let must_write = write_to_disk || path_reply.is_some();
+        let mut path = must_write
             .then(|| {
                 // When given an explicit path, don't try to strftime it or create parents.
                 path_arg.map(|p| (PathBuf::from(p), false)).or_else(|| {
@@ -6563,6 +7270,16 @@ impl Niri {
                 })
             })
             .flatten();
+
+        if must_write && path.is_none() {
+            path = Some((
+                env::temp_dir().join(format!(
+                    "niri-portal-screenshot-{:016x}.png",
+                    fastrand::u64(..)
+                )),
+                false,
+            ));
+        }
 
         // Prepare to set the encoded image as our clipboard selection. This must be done from the
         // main thread.
@@ -6603,6 +7320,11 @@ impl Niri {
                     let _ = ipc_reply
                         .send_blocking(Err(format!("error encoding screenshot image: {err}")));
                 }
+                if let Some(path_reply) = path_reply {
+                    let _ = path_reply.send_blocking(Err(ScreenshotPortalError::Failed(format!(
+                        "error encoding screenshot image: {err}"
+                    ))));
+                }
                 return;
             }
 
@@ -6610,6 +7332,7 @@ impl Niri {
             let _ = tx.send(buf.clone());
 
             let mut image_path = None;
+            let mut save_error = None;
 
             if let Some((path, create_parent)) = path {
                 debug!("saving screenshot to {path:?}");
@@ -6631,6 +7354,7 @@ impl Niri {
                     Ok(()) => image_path = Some(path),
                     Err(err) => {
                         warn!("error saving screenshot image: {err:?}");
+                        save_error = Some(format!("error saving screenshot image: {err}"));
                     }
                 }
             } else {
@@ -6652,6 +7376,14 @@ impl Niri {
             if let Some(ipc_reply) = ipc_reply {
                 let _ = ipc_reply.send_blocking(Ok(buf));
             }
+            if let Some(path_reply) = path_reply {
+                let result = image_path.ok_or_else(|| {
+                    ScreenshotPortalError::Failed(
+                        save_error.unwrap_or_else(|| String::from("screenshot was not saved")),
+                    )
+                });
+                let _ = path_reply.send_blocking(result);
+            }
         });
 
         Ok(())
@@ -6662,11 +7394,9 @@ impl Niri {
         &mut self,
         renderer: &mut GlesRenderer,
         include_pointer: bool,
-        on_done: impl FnOnce(PathBuf) + Send + 'static,
+        path_reply: ScreenshotPathReplySender,
     ) -> anyhow::Result<()> {
         let _span = tracy_client::span!("Niri::screenshot_all_outputs");
-
-        self.update_render_elements(None);
 
         let outputs: Vec<_> = self.global_space.outputs().cloned().collect();
 
@@ -6674,60 +7404,16 @@ impl Niri {
         anyhow::ensure!(outputs.len() == 1);
 
         let output = outputs.into_iter().next().unwrap();
-        let geom = self.global_space.output_geometry(&output).unwrap();
 
-        let output_scale = output.current_scale().integer_scale();
-        let geom = geom.to_physical(output_scale);
-
-        let size = geom.size;
-        let transform = output.current_transform();
-        let size = transform.transform_size(size);
-
-        let ctx = RenderCtx {
+        self.screenshot_with_replies(
             renderer,
-            target: RenderTarget::ScreenCapture,
-            xray: None,
-        };
-        let elements = self.render_to_vec(ctx, &output, include_pointer);
-        let elements = elements.iter().rev();
-        let pixels = render_to_vec(
-            renderer,
-            size,
-            Scale::from(f64::from(output_scale)),
-            Transform::Normal,
-            Fourcc::Abgr8888,
-            elements,
-        )?;
-
-        let path = make_screenshot_path(&self.config.borrow())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                let mut path = env::temp_dir();
-                path.push("screenshot.png");
-                path
-            });
-        debug!("saving screenshot to {path:?}");
-
-        thread::spawn(move || {
-            let file = match std::fs::File::create(&path) {
-                Ok(file) => file,
-                Err(err) => {
-                    warn!("error creating file: {err:?}");
-                    return;
-                }
-            };
-
-            let w = std::io::BufWriter::new(file);
-            if let Err(err) = write_png_rgba8(w, size.w as u32, size.h as u32, &pixels) {
-                warn!("error encoding screenshot image: {err:?}");
-                return;
-            }
-
-            on_done(path);
-        });
-
-        Ok(())
+            &output,
+            true,
+            include_pointer,
+            None,
+            None,
+            Some(path_reply),
+        )
     }
 
     pub fn is_locked(&self) -> bool {
@@ -6771,6 +7457,8 @@ impl Niri {
         if self.output_state.is_empty() {
             // There are no outputs, lock the session right away.
             self.screenshot_ui.close();
+            #[cfg(feature = "xdp-gnome-screencast")]
+            self.screen_cast_picker.cancel_immediately();
             self.cursor_manager
                 .set_cursor_image(CursorImageStatus::default_named());
 
@@ -6831,6 +7519,8 @@ impl Niri {
                 self.event_loop.remove(deadline_token);
 
                 self.screenshot_ui.close();
+                #[cfg(feature = "xdp-gnome-screencast")]
+                self.screen_cast_picker.cancel_immediately();
                 self.cursor_manager
                     .set_cursor_image(CursorImageStatus::default_named());
                 self.cancel_mru();
@@ -7169,6 +7859,7 @@ impl Niri {
                     let ctx = RenderCtx {
                         renderer,
                         target,
+                        intent: RenderIntent::Normal,
                         xray: None,
                     };
                     let elements = self.render_to_vec(ctx, &output, false);
@@ -7438,6 +8129,7 @@ niri_render_elements! {
         Wayland = WaylandSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         ScreenshotUi = ScreenshotUiRenderElement,
+        ScreenCastPicker = ScreenCastPickerRenderElement<R>,
         WindowMruUi = WindowMruUiRenderElement<R>,
         ExitConfirmDialog = ExitConfirmDialogRenderElement,
         Texture = PrimaryGpuTextureRenderElement,
@@ -7575,5 +8267,64 @@ impl<'render>
         renderer: &mut crate::backend::tty::TtyRenderer<'render>,
     ) -> Option<smithay::backend::renderer::element::UnderlyingStorage<'_>> {
         (**self).underlying_storage(renderer)
+    }
+}
+
+#[cfg(feature = "xdp-gnome-screencast")]
+fn should_render_screen_cast_picker(
+    rendering_output: bool,
+    target: RenderTarget,
+    intent: RenderIntent,
+) -> bool {
+    rendering_output || (target == RenderTarget::Screencast && intent == RenderIntent::Normal)
+}
+
+#[cfg(feature = "xdp-gnome-screencast")]
+fn screen_cast_picker_preview_bounds(
+    source_size: Size<f64, Logical>,
+    factor: f64,
+    source_scale: Scale<f64>,
+) -> Rectangle<i32, Physical> {
+    Rectangle::from_size(
+        source_size
+            .upscale(factor)
+            .to_physical_precise_round(source_scale),
+    )
+}
+
+#[cfg(all(test, feature = "xdp-gnome-screencast"))]
+mod screen_cast_picker_preview_tests {
+    use super::*;
+
+    #[test]
+    fn preview_bounds_keep_the_source_output_origin_and_scale() {
+        let bounds =
+            screen_cast_picker_preview_bounds(Size::from((1920., 1200.)), 0.25, Scale::from(1.5));
+
+        assert_eq!(bounds, Rectangle::from_size(Size::from((720, 450))));
+    }
+
+    #[test]
+    fn picker_is_visible_to_outputs_and_real_monitor_casts_only() {
+        assert!(should_render_screen_cast_picker(
+            true,
+            RenderTarget::Output,
+            RenderIntent::Normal
+        ));
+        assert!(should_render_screen_cast_picker(
+            false,
+            RenderTarget::Screencast,
+            RenderIntent::Normal
+        ));
+        assert!(!should_render_screen_cast_picker(
+            false,
+            RenderTarget::Screencast,
+            RenderIntent::PickerPreview
+        ));
+        assert!(!should_render_screen_cast_picker(
+            false,
+            RenderTarget::ScreenCapture,
+            RenderIntent::Normal
+        ));
     }
 }

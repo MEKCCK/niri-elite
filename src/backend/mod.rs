@@ -164,7 +164,7 @@ impl Backend {
     {
         match self {
             Backend::Tty(tty) => tty.primary_gbm_device(),
-            Backend::Winit(_) => None,
+            Backend::Winit(winit) => winit.gbm_device(),
             Backend::Headless(_) => None,
         }
     }

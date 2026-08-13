@@ -4,13 +4,67 @@ The primary screencasting interface that niri offers is through portals and pipe
 It is supported by [OBS], Firefox, Chromium, Electron, Telegram, and other apps.
 You can screencast both monitors and individual windows.
 
-In order to use it, you need a working D-Bus session, pipewire, `xdg-desktop-portal-gnome`, and [running niri as a session](./Getting-Started.md) (i.e. through `niri-session` or from a display manager).
-On widely used distros this should all "just work".
+The ScreenCast and Screenshot portal backends are built into niri itself (`org.freedesktop.impl.portal.desktop.niri`), so no separate backend process such as `xdg-desktop-portal-gnome` is needed.
+In order to use it, you need a working D-Bus session, pipewire, `xdg-desktop-portal` (the portal broker), and [running niri as a session](./Getting-Started.md) (i.e. through `niri-session` or from a display manager).
+The niri package installs `niri.portal` and `niri-portals.conf`, which point the broker at the built-in backend; other portal interfaces (file chooser, etc.) can be provided by `xdg-desktop-portal-gtk`.
+
+Persisted screen cast permissions work through the portal `restore_token` mechanism: the first request from an app shows the picker, and later requests with a valid token restore monitor selections without prompting.
 
 Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which niri also supports.
 
 There are several features in niri designed for screencasting.
 Let's take a look!
+
+### Picker appearance
+
+The native screen cast picker has four optional color settings. They use the same [color syntax as the rest of the niri config](./Configuration:-Layout.md#colors). The defaults match the neutral dark gray and white palette of niri's screenshot UI.
+
+```kdl
+screen-cast-picker {
+    background-color "#1a1a1a"
+    accent-color "#ffffff"
+    text-color "#ffffff"
+    accent-text-color "#1a1a1a"
+    corner-radius 16
+}
+```
+
+Card surfaces, borders, hover and active states, secondary and disabled text, and the accent hover state are derived from these colors. The desktop backdrop remains 55% black. Changes apply on config reload, including while the picker is open.
+
+`corner-radius` sets the rounding of the picker panel's outer corners (default 16). Set it to the same value as your `geometry-corner-radius` window rule to keep the picker visually consistent with your windows.
+
+The picker remains visible in monitor screencasts that are already running. Windows protected by `block-out-from` use a black preview and generic title in that view, and display previews exclude the picker itself to avoid recursive previews.
+
+#### Matugen
+
+To follow a complete Matugen palette rather than only its light/dark mode, save the following as a Matugen template, for example at `~/.config/matugen/templates/niri-picker.kdl`:
+
+```jinja
+screen-cast-picker {
+    background-color "{{ colors.surface.default.hex }}"
+    accent-color "{{ colors.primary.default.hex }}"
+    text-color "{{ colors.on_surface.default.hex }}"
+    accent-text-color "{{ colors.on_primary.default.hex }}"
+}
+```
+
+Add it to `~/.config/matugen/config.toml`:
+
+```toml
+[config]
+
+[templates.niri-picker]
+input_path = "~/.config/matugen/templates/niri-picker.kdl"
+output_path = "~/.config/niri/matugen-picker.kdl"
+```
+
+Then include the generated output from the main niri config:
+
+```kdl
+include optional=true "~/.config/niri/matugen-picker.kdl"
+```
+
+Included files are watched for changes, so Matugen output triggers niri's normal live config reload without a post-hook.
 
 ### Block out windows
 

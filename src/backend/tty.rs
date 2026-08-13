@@ -67,7 +67,7 @@ use crate::frame_clock::FrameClock;
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::debug::draw_damage;
 use crate::render_helpers::renderer::AsGlesRenderer;
-use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
+use crate::render_helpers::{resources, shaders, RenderCtx, RenderIntent, RenderTarget};
 use crate::utils::{get_monotonic_time, is_laptop_panel, logical_output, PanelOrientation};
 
 // When copying from rendering Nvidia dGPU to target iGPU,
@@ -1905,6 +1905,7 @@ impl Tty {
         let ctx = RenderCtx {
             renderer: &mut renderer,
             target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         let mut elements = niri.render_to_vec(ctx, output, true);

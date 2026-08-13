@@ -13,7 +13,11 @@ pub mod mutter_display_config;
 pub mod mutter_service_channel;
 
 #[cfg(feature = "xdp-gnome-screencast")]
+pub mod freedesktop_portal;
+#[cfg(feature = "xdp-gnome-screencast")]
 pub mod mutter_screen_cast;
+#[cfg(feature = "xdp-gnome-screencast")]
+pub mod niri_portal_screen_cast;
 #[cfg(feature = "xdp-gnome-screencast")]
 use mutter_screen_cast::ScreenCast;
 
@@ -35,6 +39,10 @@ pub struct DBusServers {
     pub conn_introspect: Option<Connection>,
     #[cfg(feature = "xdp-gnome-screencast")]
     pub conn_screen_cast: Option<Connection>,
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub conn_portal: Option<Connection>,
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub portal_casts: Option<freedesktop_portal::PortalCastMap>,
     pub conn_login1: Option<Connection>,
     pub conn_locale1: Option<Connection>,
     pub conn_a11y_manager: Option<Connection>,
@@ -90,16 +98,15 @@ impl DBusServers {
             dbus.conn_screen_saver = try_start(screen_saver);
 
             let (to_niri, from_screenshot) = calloop::channel::channel();
-            let (to_screenshot, from_niri) = async_channel::unbounded();
+            #[cfg(feature = "xdp-gnome-screencast")]
+            let to_niri_screenshot = to_niri.clone();
             niri.event_loop
                 .insert_source(from_screenshot, move |event, _, state| match event {
-                    calloop::channel::Event::Msg(msg) => {
-                        state.on_screen_shot_msg(&to_screenshot, msg)
-                    }
+                    calloop::channel::Event::Msg(msg) => state.on_screen_shot_msg(msg),
                     calloop::channel::Event::Closed => (),
                 })
                 .unwrap();
-            let screenshot = gnome_shell_screenshot::Screenshot::new(to_niri, from_niri);
+            let screenshot = gnome_shell_screenshot::Screenshot::new(to_niri);
             dbus.conn_screen_shot = try_start(screenshot);
 
             let (to_niri, from_introspect) = calloop::channel::channel();
@@ -126,8 +133,22 @@ impl DBusServers {
                         }
                     })
                     .unwrap();
-                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_niri);
+                let screen_cast = ScreenCast::new(backend.ipc_outputs(), to_niri.clone());
                 dbus.conn_screen_cast = try_start(screen_cast);
+
+                match freedesktop_portal::start(
+                    to_niri,
+                    to_niri_screenshot,
+                    backend.ipc_outputs(),
+                ) {
+                    Ok((conn, casts)) => {
+                        dbus.conn_portal = Some(conn);
+                        dbus.portal_casts = Some(casts);
+                    }
+                    Err(err) => {
+                        warn!("error starting the built-in portal backend: {err:?}");
+                    }
+                }
             }
 
             let (to_niri, from_a11y) = calloop::channel::channel();

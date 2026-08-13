@@ -306,6 +306,16 @@ screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
 // You can also set this to null to disable saving screenshots to disk.
 // screenshot-path null
 
+// You can customize the native screen cast picker colors, including from a
+// generated file. See the Screencasting wiki page for a Matugen example.
+// screen-cast-picker {
+//     background-color "#1a1a1a"
+//     accent-color "#ffffff"
+//     text-color "#ffffff"
+//     accent-text-color "#1a1a1a"
+//     corner-radius 16
+// }
+
 // Cursor settings.
 cursor {
     // Set the XCursor theme. The cursor theme is loaded from

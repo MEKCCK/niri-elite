@@ -38,7 +38,9 @@ use crate::render_helpers::surface::{
     push_elements_from_surface_tree, render_snapshot_from_surface_tree,
 };
 use crate::render_helpers::xray::XrayPos;
-use crate::render_helpers::{background_effect, BakedBuffer, RenderCtx, RenderTarget};
+use crate::render_helpers::{
+    background_effect, BakedBuffer, RenderCtx, RenderIntent, RenderTarget,
+};
 use crate::utils::id::IdCounter;
 use crate::utils::transaction::Transaction;
 use crate::utils::{
@@ -547,6 +549,7 @@ impl Mapped {
             RenderCtx {
                 renderer,
                 target: RenderTarget::Screencast,
+                intent: RenderIntent::Normal,
                 xray: None,
             },
             location,

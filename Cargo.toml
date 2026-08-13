@@ -69,6 +69,7 @@ directories = "6.0.0"
 drm-ffi = "0.9.1"
 fastrand = "2.5.0"
 futures-util = { version = "0.3.33", default-features = false, features = ["std", "io"] }
+getrandom = { version = "0.3.4", optional = true }
 git-version = "0.3.9"
 glam = "0.33"
 input = { version = "0.10.0", features = ["libinput_1_21"] }
@@ -139,7 +140,7 @@ dbus = ["dep:zbus", "dep:async-io", "dep:accesskit", "dep:accesskit_unix"]
 # Enables systemd integration (global environment, apps in transient scopes).
 systemd = ["dbus"]
 # Enables screencasting support through xdg-desktop-portal-gnome.
-xdp-gnome-screencast = ["dbus", "pipewire"]
+xdp-gnome-screencast = ["dbus", "pipewire", "dep:getrandom"]
 # Enables the Tracy profiler instrumentation.
 profile-with-tracy = ["profiling/profile-with-tracy", "tracy-client/default", "smithay/tracy_gpu_profiling"]
 # Enables the on-demand Tracy profiler instrumentation.

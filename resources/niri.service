@@ -12,3 +12,5 @@ Before=xdg-desktop-autostart.target
 Slice=session.slice
 Type=notify
 ExecStart=niri --session
+# The broker may be D-Bus activated before niri imports its session environment.
+ExecStartPost=-/usr/bin/systemctl --user --no-block try-restart xdg-desktop-portal.service

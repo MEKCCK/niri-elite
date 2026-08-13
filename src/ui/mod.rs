@@ -1,6 +1,9 @@
 pub mod config_error_notification;
 pub mod exit_confirm_dialog;
 pub mod hotkey_overlay;
+#[cfg(feature = "xdp-gnome-screencast")]
+pub(crate) mod i18n;
 pub mod mru;
 pub mod screen_transition;
+pub mod screencast_picker;
 pub mod screenshot_ui;

@@ -60,6 +60,7 @@ pub mod xray;
 pub struct RenderCtx<'a, R> {
     pub renderer: &'a mut R,
     pub target: RenderTarget,
+    pub intent: RenderIntent,
     pub xray: Option<&'a Xray>,
 }
 
@@ -70,6 +71,7 @@ impl<'a, R> RenderCtx<'a, R> {
         RenderCtx {
             renderer: self.renderer,
             target: self.target,
+            intent: self.intent,
             xray: self.xray,
         }
     }
@@ -80,6 +82,7 @@ impl<'a, R: AsGlesRenderer> RenderCtx<'a, R> {
         RenderCtx {
             renderer: self.renderer.as_gles_renderer(),
             target: self.target,
+            intent: self.intent,
             xray: self.xray,
         }
     }
@@ -94,6 +97,12 @@ pub enum RenderTarget {
     Screencast,
     /// Rendering for any other screen capture.
     ScreenCapture,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderIntent {
+    Normal,
+    PickerPreview,
 }
 
 /// Buffer with location, src and dst.

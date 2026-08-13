@@ -69,15 +69,40 @@ pub struct OffscreenData {
 }
 
 impl OffscreenBuffer {
+    pub fn clear(&self) {
+        self.inner.borrow_mut().take();
+    }
+
     pub fn render(
         &self,
         renderer: &mut GlesRenderer,
         scale: Scale<f64>,
         elements: &[impl RenderElement<GlesRenderer>],
     ) -> anyhow::Result<(OffscreenRenderElement, SyncPoint, OffscreenData)> {
+        let geo = encompassing_geo(scale, elements.iter());
+        self.render_with_geometry(renderer, scale, geo, false, elements)
+    }
+
+    pub fn render_with_bounds(
+        &self,
+        renderer: &mut GlesRenderer,
+        scale: Scale<f64>,
+        bounds: Rectangle<i32, Physical>,
+        elements: &[impl RenderElement<GlesRenderer>],
+    ) -> anyhow::Result<(OffscreenRenderElement, SyncPoint, OffscreenData)> {
+        self.render_with_geometry(renderer, scale, bounds, true, elements)
+    }
+
+    fn render_with_geometry(
+        &self,
+        renderer: &mut GlesRenderer,
+        scale: Scale<f64>,
+        geo: Rectangle<i32, Physical>,
+        exact_size: bool,
+        elements: &[impl RenderElement<GlesRenderer>],
+    ) -> anyhow::Result<(OffscreenRenderElement, SyncPoint, OffscreenData)> {
         let _span = tracy_client::span!("OffscreenBuffer::render");
 
-        let geo = encompassing_geo(scale, elements.iter());
         let elements = Vec::from_iter(elements.iter().map(|ele| {
             RelocateRenderElement::from_element(ele, geo.loc.upscale(-1), Relocate::Relative)
         }));
@@ -103,9 +128,12 @@ impl OffscreenBuffer {
         }) = inner.as_mut()
         {
             let old_size = texture.size();
-            if old_size.w < src_size.w || old_size.h < src_size.h {
+            if (exact_size && old_size != src_size)
+                || old_size.w < src_size.w
+                || old_size.h < src_size.h
+            {
                 size_string = format!(
-                    "size increased from {} × {} to {} × {}",
+                    "size changed from {} × {} to {} × {}",
                     old_size.w, old_size.h, src_size.w, src_size.h
                 );
                 reason = &size_string;

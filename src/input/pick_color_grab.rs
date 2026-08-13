@@ -13,7 +13,7 @@ use smithay::input::SeatHandler;
 use smithay::utils::{Logical, Physical, Point, Scale, Size, Transform};
 
 use crate::niri::State;
-use crate::render_helpers::{render_and_download, RenderCtx, RenderTarget};
+use crate::render_helpers::{render_and_download, RenderCtx, RenderIntent, RenderTarget};
 
 pub struct PickColorGrab {
     start_data: PointerGrabStartData<State>,
@@ -53,6 +53,7 @@ impl PickColorGrab {
                     renderer,
                     // This is an interactive operation so we can render without blocking out.
                     target: RenderTarget::Output,
+                    intent: RenderIntent::Normal,
                     xray: None,
                 };
                 let elements = data.niri.render_to_vec(ctx, &output, false);

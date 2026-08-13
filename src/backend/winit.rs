@@ -24,7 +24,7 @@ use smithay::wayland::presentation::Refresh;
 use super::{IpcOutputMap, OutputId, RenderResult};
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::debug::draw_damage;
-use crate::render_helpers::{resources, shaders, RenderCtx, RenderTarget};
+use crate::render_helpers::{resources, shaders, RenderCtx, RenderIntent, RenderTarget};
 use crate::utils::{get_monotonic_time, logical_output};
 
 pub struct Winit {
@@ -217,6 +217,57 @@ impl Winit {
         "winit".to_owned()
     }
 
+    /// Opens a GBM device for screencast buffer allocation.
+    ///
+    /// The winit backend renders through the host compositor, so there's no
+    /// DRM device of our own; open the first available render node instead.
+    /// With multiple GPUs this may pick a different device than the one EGL
+    /// renders on, in which case dmabuf import can fail and casting falls
+    /// back to failing gracefully.
+    #[cfg(feature = "xdp-gnome-screencast")]
+    pub fn gbm_device(
+        &self,
+    ) -> Option<smithay::backend::allocator::gbm::GbmDevice<smithay::backend::drm::DrmDeviceFd>>
+    {
+        use smithay::backend::allocator::gbm::GbmDevice;
+        use smithay::backend::drm::DrmDeviceFd;
+        use smithay::utils::DeviceFd;
+
+        let mut nodes: Vec<_> = std::fs::read_dir("/dev/dri")
+            .ok()?
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("renderD")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        nodes.sort();
+
+        for path in nodes {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path);
+            let Ok(file) = file else { continue };
+
+            let fd = DrmDeviceFd::new(DeviceFd::from(std::os::fd::OwnedFd::from(file)));
+            match GbmDevice::new(fd) {
+                Ok(gbm) => {
+                    debug!("opened GBM device {path:?} for winit screencasting");
+                    return Some(gbm);
+                }
+                Err(err) => {
+                    warn!("error creating GBM device from {path:?}: {err:?}");
+                }
+            }
+        }
+
+        None
+    }
+
     pub fn with_primary_renderer<T>(
         &mut self,
         f: impl FnOnce(&mut GlesRenderer) -> T,
@@ -231,6 +282,7 @@ impl Winit {
         let ctx = RenderCtx {
             renderer: self.backend.renderer(),
             target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
             xray: None,
         };
         let mut elements = niri.render_to_vec(ctx, output, true);

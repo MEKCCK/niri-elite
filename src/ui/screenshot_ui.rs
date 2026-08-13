@@ -3,6 +3,7 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::iter::zip;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -46,6 +47,16 @@ const TEXT_SHOW_P: &str =
 
 pub type ScreenshotReplySender = async_channel::Sender<Result<Arc<[u8]>, String>>;
 
+#[derive(Clone, Debug)]
+pub enum ScreenshotPortalError {
+    Cancelled,
+    Failed(String),
+}
+
+pub type ScreenshotPathReplySender = async_channel::Sender<Result<PathBuf, ScreenshotPortalError>>;
+pub type ScreenshotSelectionReplySender =
+    async_channel::Sender<Result<(i32, i32, i32, i32), ScreenshotPortalError>>;
+
 // Ideally the screenshot UI should support cross-output selections. However, that poses some
 // technical challenges when the outputs have different scales and such. So, this implementation
 // allows only single-output selections for now.
@@ -68,6 +79,8 @@ pub enum ScreenshotUi {
         config: Rc<RefCell<Config>>,
         path: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+        selection_reply: Option<ScreenshotSelectionReplySender>,
     },
 }
 
@@ -148,6 +161,8 @@ impl ScreenshotUi {
         show_pointer: bool,
         path: Option<String>,
         ipc_reply: Option<ScreenshotReplySender>,
+        path_reply: Option<ScreenshotPathReplySender>,
+        selection_reply: Option<ScreenshotSelectionReplySender>,
     ) -> bool {
         if screenshots.is_empty() {
             return false;
@@ -244,6 +259,8 @@ impl ScreenshotUi {
             config: config.clone(),
             path,
             ipc_reply,
+            path_reply,
+            selection_reply,
         };
 
         self.update_buffers();
@@ -257,6 +274,8 @@ impl ScreenshotUi {
             clock,
             config,
             ipc_reply,
+            path_reply,
+            selection_reply,
             ..
         } = self
         else {
@@ -264,6 +283,8 @@ impl ScreenshotUi {
         };
 
         let ipc_reply = ipc_reply.take();
+        let path_reply = path_reply.take();
+        let selection_reply = selection_reply.take();
         let last_selection = Some((
             selection.0.downgrade(),
             rect_from_corner_points(selection.1, selection.2),
@@ -277,6 +298,12 @@ impl ScreenshotUi {
 
         if let Some(ipc_reply) = ipc_reply {
             let _ = ipc_reply.try_send(Err(String::from("screenshot was canceled")));
+        }
+        if let Some(path_reply) = path_reply {
+            let _ = path_reply.try_send(Err(ScreenshotPortalError::Cancelled));
+        }
+        if let Some(selection_reply) = selection_reply {
+            let _ = selection_reply.try_send(Err(ScreenshotPortalError::Cancelled));
         }
 
         true
@@ -799,6 +826,21 @@ impl ScreenshotUi {
         } else {
             None
         }
+    }
+
+    pub fn selection(&self) -> Option<(Output, Rectangle<i32, Physical>, f64)> {
+        let Self::Open {
+            selection,
+            output_data,
+            ..
+        } = self
+        else {
+            return None;
+        };
+
+        let scale = output_data[&selection.0].scale;
+        let rect = rect_from_corner_points(selection.1, selection.2);
+        Some((selection.0.clone(), rect, scale))
     }
 
     pub fn output_size(&self, output: &Output) -> Option<(Size<i32, Physical>, f64, Transform)> {
