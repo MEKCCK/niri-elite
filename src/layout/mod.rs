@@ -5993,6 +5993,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn confirm_grid_selection_for_window(&mut self, id: &W::Id) -> bool {
+        let overview_open = self.overview_open;
+        let overview_anim = self.options.animations.overview_open_close.0;
         let target_monitor_idx = {
             let MonitorSet::Normal {
                 monitors,
@@ -6024,7 +6026,15 @@ impl<W: LayoutElement> Layout<W> {
 
                 ws.set_grid_focus_for_window(id);
 
-                mon.active_workspace_idx = ws_idx;
+                // Go through the regular workspace switch, so that the previous workspace is
+                // remembered and an emptied workspace gets cleaned up afterwards.
+                if ws_idx != mon.active_workspace_idx {
+                    if overview_open {
+                        mon.activate_workspace_with_anim_config(ws_idx, Some(overview_anim));
+                    } else {
+                        mon.activate_workspace(ws_idx);
+                    }
+                }
                 *active_monitor_idx = mon_idx;
                 target = Some(mon_idx);
                 break;

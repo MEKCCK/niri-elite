@@ -4794,6 +4794,67 @@ fn grid_activating_a_window_moves_the_grid_focus() {
 }
 
 #[test]
+fn grid_confirming_on_another_workspace_switches_properly() {
+    let ws_windows = |layout: &Layout<TestWindow>| {
+        layout
+            .monitors()
+            .next()
+            .unwrap()
+            .workspaces
+            .iter()
+            .map(|ws| ws.windows().count())
+            .collect::<Vec<_>>()
+    };
+
+    // The active workspace was emptied by closing its last window.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::CloseWindow(2),
+        Op::ToggleOverview,
+        Op::ToggleGridOverview,
+    ]);
+    assert_eq!(ws_windows(&layout), vec![1, 0, 0]);
+
+    // Assigning the active workspace index directly used to leave the emptied workspace behind.
+    assert!(layout.confirm_grid_selection_for_window(&1));
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    assert_eq!(ws_windows(&layout), vec![1, 0]);
+
+    // The workspace switched away from is remembered for focus-workspace-previous.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusWorkspaceDown,
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::ToggleGridOverview,
+    ]);
+    assert!(layout.confirm_grid_selection_for_window(&1));
+    check_ops_on_layout(
+        &mut layout,
+        [Op::CompleteAnimations, Op::FocusWorkspacePrevious],
+    );
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        Some(2)
+    );
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
