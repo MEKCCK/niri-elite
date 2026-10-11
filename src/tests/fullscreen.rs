@@ -257,7 +257,7 @@ fn interactive_move_unfullscreen_to_scrolling_restores_size() {
 }
 
 #[test]
-fn interactive_move_unmaximize_to_scrolling_restores_size() {
+fn interactive_move_keeps_maximized() {
     let (mut f, id, surface) = set_up();
 
     let _ = f.client(id).window(&surface).recent_configures();
@@ -274,11 +274,9 @@ fn interactive_move_unmaximize_to_scrolling_restores_size() {
         @"size: 1920 × 1080, bounds: 1888 × 1048, states: [Activated, Maximized]"
     );
 
-    // Start an interactive move which causes an unmaximize.
+    // Start an interactive move. Grabbing the window shouldn't unmaximize it.
     let output = f.niri_output(1);
     let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
-    let window = mapped.window.clone();
     niri.layout
         .interactive_move_begin(window.clone(), &output, Point::default());
     niri.layout.interactive_move_update(
@@ -289,9 +287,59 @@ fn interactive_move_unmaximize_to_scrolling_restores_size() {
     );
     f.double_roundtrip(id);
 
-    // This should request the tiled size.
+    // Only the bounds change while moving; the size and the maximized state stay.
     assert_snapshot!(
         f.client(id).window(&surface).format_recent_configures(),
-        @"size: 936 × 1048, bounds: 1920 × 1080, states: [Activated]"
+        @"size: 1920 × 1080, bounds: 1920 × 1080, states: [Activated, Maximized]"
+    );
+
+    // Dropping it into a new column keeps it maximized.
+    f.niri().layout.interactive_move_end(&window);
+    f.double_roundtrip(id);
+
+    let niri = f.niri();
+    let mapped = niri.layout.windows().next().unwrap().1;
+    assert!(mapped.pending_sizing_mode().is_maximized());
+    let _ = f.client(id).window(&surface).recent_configures();
+
+    // Unmaximizing restores the column width from before the move.
+    f.niri().layout.set_maximized(&window, false);
+    f.double_roundtrip(id);
+
+    assert_snapshot!(
+        f.client(id).window(&surface).format_recent_configures(),
+        @"size: 936 × 1048, bounds: 1888 × 1048, states: [Activated]"
+    );
+}
+
+#[test]
+fn interactive_move_unfullscreen_into_maximized() {
+    let (mut f, id, surface) = set_up();
+
+    let niri = f.niri();
+    let mapped = niri.layout.windows().next().unwrap().1;
+    let window = mapped.window.clone();
+    niri.layout.set_maximized(&window, true);
+    niri.layout.set_fullscreen(&window, true);
+    f.double_roundtrip(id);
+
+    let _ = f.client(id).window(&surface).recent_configures();
+
+    // Grabbing a fullscreen window unfullscreens it, and it returns to maximized.
+    let output = f.niri_output(1);
+    let niri = f.niri();
+    niri.layout
+        .interactive_move_begin(window.clone(), &output, Point::default());
+    niri.layout.interactive_move_update(
+        &window,
+        Point::from((1000., 0.)),
+        output,
+        Point::default(),
+    );
+    f.double_roundtrip(id);
+
+    assert_snapshot!(
+        f.client(id).window(&surface).format_recent_configures(),
+        @"size: 1920 × 1080, bounds: 1920 × 1080, states: [Activated, Maximized]"
     );
 }

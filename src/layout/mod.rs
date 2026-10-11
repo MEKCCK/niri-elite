@@ -3095,7 +3095,17 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 InteractiveMoveState::Moving(move_) => {
                     assert_eq!(self.clock, move_.tile.clock);
-                    assert!(move_.tile.window().pending_sizing_mode().is_normal());
+                    let sizing_mode = move_.tile.window().pending_sizing_mode();
+                    assert!(
+                        !sizing_mode.is_fullscreen(),
+                        "interactively moved tile cannot be fullscreen"
+                    );
+                    if move_.is_floating {
+                        assert!(
+                            sizing_mode.is_normal(),
+                            "interactively moved floating tile cannot be maximized"
+                        );
+                    }
 
                     move_.tile.verify_invariants();
 
@@ -4954,12 +4964,15 @@ impl<W: LayoutElement> Layout<W> {
 
                 // Unset fullscreen before removing the tile. This will restore its size properly,
                 // and move it to floating if needed, so we don't have to deal with that here.
+                //
+                // Maximized windows stay maximized: grabbing a window shouldn't resize it. The
+                // pending maximized state travels with the window, so dropping it into a new
+                // column maximizes that column again.
                 let ws = self
                     .workspaces_mut()
                     .find(|ws| ws.has_window(&window_id))
                     .unwrap();
                 ws.set_fullscreen(window, false);
-                ws.set_maximized(window, false);
 
                 let RemovedTile {
                     mut tile,
@@ -5221,6 +5234,7 @@ impl<W: LayoutElement> Layout<W> {
 
                 let win_id = move_.tile.window().id().clone();
                 let tile_render_loc = move_.tile_render_location(zoom);
+                let restore_to_floating = move_.tile.restore_to_floating;
 
                 let ws_idx = match insert_ws {
                     InsertWorkspace::Existing(ws_id) => mon.idx_of_ws(ws_id).unwrap(),
@@ -5336,6 +5350,12 @@ impl<W: LayoutElement> Layout<W> {
                 let (new_tile_render_loc, new_scale) =
                     grid_target.unwrap_or_else(|| (ws_geo.loc + tile_offset.upscale(zoom), 1.));
 
+                // Adding the tile as a new column reset this. A window that was floating before
+                // it got maximized should still unmaximize back into floating after the drop.
+                if matches!(position, InsertPosition::NewColumn(_)) {
+                    tile.restore_to_floating = restore_to_floating;
+                }
+
                 tile.animate_move_from(
                     (tile_render_loc - new_tile_render_loc).downscale(new_scale * zoom),
                 );
@@ -5356,6 +5376,9 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 let ws = &mut workspaces[0];
 
+                let win_id = move_.tile.window().id().clone();
+                let restore_to_floating = move_.tile.restore_to_floating;
+
                 // No point in trying to use the pointer position without outputs.
                 ws.add_tile(
                     move_.tile,
@@ -5366,6 +5389,14 @@ impl<W: LayoutElement> Layout<W> {
                     move_.is_floating,
                     None,
                 );
+
+                if !move_.is_floating {
+                    let tile = ws
+                        .tiles_mut()
+                        .find(|tile| *tile.window().id() == win_id)
+                        .unwrap();
+                    tile.restore_to_floating = restore_to_floating;
+                }
             }
         }
     }

@@ -8912,6 +8912,155 @@ fn move_column_to_workspace_maximize_and_fullscreen() {
     assert_eq!(win.pending_sizing_mode(), SizingMode::Maximized);
 }
 
+fn tile_width(layout: &Layout<TestWindow>, id: usize) -> f64 {
+    let ws = layout.active_workspace().unwrap();
+    let tile = ws.tiles().find(|tile| *tile.window().id() == id).unwrap();
+    tile.tile_size().w
+}
+
+/// Starts an interactive move of maximized window 2 (with a custom column width), next to a
+/// normal window 1. Returns the unmaximized width of window 2 and the render rect of window 1
+/// once window 2 is lifted out of the layout.
+fn interactive_move_maximized_window_set_up() -> (Layout<TestWindow>, f64, Rectangle<f64, Logical>)
+{
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::SetColumnWidth(SizeChange::SetProportion(30.)),
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops(ops);
+    let width = tile_width(&layout, 2);
+
+    let ops = [
+        Op::MaximizeWindowToEdges { id: Some(2) },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+        Op::InteractiveMoveBegin {
+            window: 2,
+            output_idx: 1,
+            px: 640.,
+            py: 360.,
+        },
+        Op::InteractiveMoveUpdate {
+            window: 2,
+            dx: 0.,
+            dy: 1000.,
+            output_idx: 1,
+            px: 640.,
+            py: 360.,
+        },
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+
+    let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move else {
+        panic!("window 2 must be moving");
+    };
+    // Grabbing must not unmaximize the window.
+    assert!(move_.tile.window().pending_sizing_mode().is_maximized());
+    assert_eq!(move_.width, ColumnWidth::Proportion(0.3));
+
+    let ws = layout.active_workspace().unwrap();
+    let (tile, pos, _) = ws
+        .tiles_with_render_positions()
+        .find(|(tile, _, _)| *tile.window().id() == 1)
+        .unwrap();
+    let rect = Rectangle::new(pos, tile.tile_size());
+    (layout, width, rect)
+}
+
+#[test]
+fn interactive_move_maximized_into_new_column_stays_maximized() {
+    let (mut layout, width, rect) = interactive_move_maximized_window_set_up();
+
+    // Drop it right of window 1, between columns.
+    let pos: Point<f64, Logical> =
+        Point::from((rect.loc.x + rect.size.w + 1., rect.loc.y + rect.size.h / 2.));
+    let ops = [
+        Op::InteractiveMoveUpdate {
+            window: 2,
+            dx: 0.,
+            dy: 0.,
+            output_idx: 1,
+            px: pos.x,
+            py: pos.y,
+        },
+        Op::InteractiveMoveEnd { window: 2 },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+
+    let ws = layout.active_workspace().unwrap();
+    let col = ws
+        .scrolling()
+        .columns()
+        .find(|col| col.contains(&2))
+        .unwrap();
+    assert!(!col.contains(&1));
+    assert!(col.is_pending_maximized());
+    let (_, win) = layout.windows().find(|(_, win)| win.0.id == 2).unwrap();
+    assert!(win.pending_sizing_mode().is_maximized());
+
+    // Unmaximizing returns to the width from before the move.
+    let ops = [
+        Op::MaximizeWindowToEdges { id: Some(2) },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+    let ws = layout.active_workspace().unwrap();
+    let col = ws
+        .scrolling()
+        .columns()
+        .find(|col| col.contains(&2))
+        .unwrap();
+    assert!(!col.is_pending_maximized());
+    assert_eq!(tile_width(&layout, 2), width);
+}
+
+#[test]
+fn interactive_move_maximized_into_column_becomes_normal() {
+    let (mut layout, _, rect) = interactive_move_maximized_window_set_up();
+
+    // Drop it at the bottom edge of window 1, inside its column.
+    let pos: Point<f64, Logical> =
+        Point::from((rect.loc.x + rect.size.w / 2., rect.loc.y + rect.size.h - 5.));
+    let ops = [
+        Op::InteractiveMoveUpdate {
+            window: 2,
+            dx: 0.,
+            dy: 0.,
+            output_idx: 1,
+            px: pos.x,
+            py: pos.y,
+        },
+        Op::InteractiveMoveEnd { window: 2 },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+
+    // A column with several tiles can't be maximized, so the window joins it as a normal tile.
+    let ws = layout.active_workspace().unwrap();
+    let col = ws
+        .scrolling()
+        .columns()
+        .find(|col| col.contains(&2))
+        .unwrap();
+    assert!(col.contains(&1));
+    assert!(!col.is_pending_maximized());
+    let (_, win) = layout.windows().find(|(_, win)| win.0.id == 2).unwrap();
+    assert!(win.pending_sizing_mode().is_normal());
+}
+
 #[test]
 fn move_window_to_workspace_maximize_and_fullscreen() {
     let ops = [
