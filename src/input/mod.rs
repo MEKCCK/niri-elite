@@ -660,7 +660,14 @@ impl State {
                     }
                 }
 
-                let is_grid_overview_open = this.niri.layout.is_grid_overview_open();
+                // The grid takes the keys of the layout focus, except when that is a window outside
+                // the grid (an ignore-grid-overview window the user clicked): it gets its keys.
+                let is_grid_overview_open = this.niri.layout.is_grid_overview_open()
+                    && this.niri.layout.focus().is_none_or(|mapped| {
+                        this.niri
+                            .layout
+                            .window_is_in_open_grid_overview(&mapped.window)
+                    });
 
                 if pressed && raw == Some(Keysym::Escape) {
                     // Close grid overview on Escape.
@@ -2992,7 +2999,7 @@ impl State {
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.trigger_hot_corner(action);
+                self.niri.trigger_hot_corner(action, under.output.as_ref());
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -3102,7 +3109,7 @@ impl State {
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.trigger_hot_corner(action);
+                self.niri.trigger_hot_corner(action, under.output.as_ref());
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -3239,13 +3246,19 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
-            let is_grid_overview_open = self.niri.layout.is_grid_overview_open();
+            // Grid cells close on a middle click; windows outside the grid don't, be it on a
+            // monitor without the grid, or an ignore-grid-overview window over it.
+            let window_under_is_in_grid = self.niri.window_under_cursor().is_some_and(|mapped| {
+                self.niri
+                    .layout
+                    .window_is_in_open_grid_overview(&mapped.window)
+            });
 
             let magnifier_can_drag = self.niri.can_drag_magnifier_center();
 
             if should_close_window_on_middle_click(
                 button,
-                is_grid_overview_open,
+                window_under_is_in_grid,
                 is_overview_open,
                 pointer.is_grabbed(),
                 mod_down,
@@ -3656,13 +3669,19 @@ impl State {
                 .mods_with_vertical_wheel_binds
                 .contains(&modifiers);
             let should_handle_grid_workspace_scroll = grid_should_handle_workspace_wheel(
-                self.niri.layout.is_grid_overview_open(),
+                contents
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| self.niri.layout.is_grid_overview_open_on(output)),
                 is_overview_open,
                 is_mru_open,
                 self.niri.screenshot_ui.is_open()
                     || self.niri.is_locked()
                     || self.niri.exit_confirm_dialog.is_open(),
-                contents.layer.is_some(),
+                contents.layer.is_some()
+                    || contents.window.as_ref().is_some_and(|(window, _)| {
+                        !self.niri.layout.window_is_in_open_grid_overview(window)
+                    }),
                 modifiers,
                 has_vertical_wheel_binds,
             );
@@ -5671,14 +5690,15 @@ fn grid_should_handle_empty_click(
 
 /// Whether an unbound wheel scroll in the grid overview should switch workspaces.
 ///
-/// Layer-shell surfaces such as bars keep their scrolling, matching how a click on them doesn't
-/// close the grid overview.
+/// `is_grid_overview_open` is about the output under the pointer. Surfaces that aren't part of
+/// the grid keep their scrolling: layer-shell surfaces such as bars, matching how a click on them
+/// doesn't close the grid overview, and `ignore-grid-overview` windows.
 fn grid_should_handle_workspace_wheel(
     is_grid_overview_open: bool,
     is_overview_open: bool,
     is_mru_open: bool,
     is_compositor_ui_open: bool,
-    pointer_over_layer_shell: bool,
+    pointer_over_non_grid_surface: bool,
     modifiers: Modifiers,
     has_wheel_binds: bool,
 ) -> bool {
@@ -5686,14 +5706,14 @@ fn grid_should_handle_workspace_wheel(
         && !is_overview_open
         && !is_mru_open
         && !is_compositor_ui_open
-        && !pointer_over_layer_shell
+        && !pointer_over_non_grid_surface
         && modifiers.is_empty()
         && !has_wheel_binds
 }
 
 fn should_close_window_on_middle_click(
     button: Option<MouseButton>,
-    is_grid_overview_open: bool,
+    window_is_in_grid: bool,
     is_overview_open: bool,
     pointer_is_grabbed: bool,
     mod_down: bool,
@@ -5702,7 +5722,7 @@ fn should_close_window_on_middle_click(
     button == Some(MouseButton::Middle)
         && !pointer_is_grabbed
         && !mod_down
-        && (is_grid_overview_open || is_overview_open)
+        && (window_is_in_grid || is_overview_open)
         && !magnifier_can_drag
 }
 
@@ -6435,7 +6455,7 @@ mod tests {
             Modifiers::empty(),
             false,
         ));
-        // Pointer over a bar or another layer-shell surface.
+        // Pointer over a bar, another layer-shell surface or an ignore-grid-overview window.
         assert!(!grid_should_handle_workspace_wheel(
             true,
             false,

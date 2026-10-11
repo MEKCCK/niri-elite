@@ -120,7 +120,13 @@ pub fn refresh(state: &mut State) {
     // taskbars and title widgets follow the selection as it changes.
     let grid_focused_window = (state.niri.keyboard_focus.is_layout()
         && state.niri.layout.is_grid_overview_open())
-    .then(|| state.niri.layout.grid_focused_window_id())
+    .then(|| {
+        state
+            .niri
+            .layout
+            .focus()
+            .map(|mapped| mapped.window.clone())
+    })
     .flatten();
 
     // Handle new and existing windows.

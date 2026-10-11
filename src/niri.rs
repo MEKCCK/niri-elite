@@ -3998,10 +3998,19 @@ impl Niri {
         None
     }
 
-    pub fn trigger_hot_corner(&mut self, action: HotCornerAction) {
+    pub fn trigger_hot_corner(&mut self, action: HotCornerAction, output: Option<&Output>) {
         match action {
             HotCornerAction::Overview => self.layout.toggle_overview(),
-            HotCornerAction::GridOverview => self.layout.toggle_grid_overview(),
+            HotCornerAction::GridOverview => {
+                // Without grid-all-monitors, the grid toggles on the active monitor, so make that
+                // the monitor whose hot corner was hit.
+                if !self.config.borrow().grid_overview.grid_all_monitors {
+                    if let Some(output) = output {
+                        self.layout.focus_output(output);
+                    }
+                }
+                self.layout.toggle_grid_overview();
+            }
         }
     }
 
