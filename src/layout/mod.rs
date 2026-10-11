@@ -2502,10 +2502,13 @@ impl<W: LayoutElement> Layout<W> {
         } else {
             ActivateWindow::No
         };
-        if self.run_active_grid_overview_action_if_moved(|this| {
-            this.active_monitor()
-                .is_some_and(|monitor| monitor.move_to_workspace_up(activate))
-        }) {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| mon.active_workspace_idx.saturating_sub(1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_to_workspace_up(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2528,10 +2531,13 @@ impl<W: LayoutElement> Layout<W> {
         } else {
             ActivateWindow::No
         };
-        if self.run_active_grid_overview_action_if_moved(|this| {
-            this.active_monitor()
-                .is_some_and(|monitor| monitor.move_to_workspace_down(activate))
-        }) {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| (mon.active_workspace_idx + 1).min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_to_workspace_down(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2555,10 +2561,13 @@ impl<W: LayoutElement> Layout<W> {
         activate: ActivateWindow,
     ) {
         if window.is_none()
-            && self.run_active_grid_overview_action_if_moved(|this| {
-                this.active_monitor()
-                    .is_some_and(|monitor| monitor.move_to_workspace(None, idx, activate))
-            })
+            && self.run_active_grid_overview_action_if_moved(
+                |mon| idx.min(mon.workspaces.len() - 1),
+                |this| {
+                    this.active_monitor()
+                        .is_some_and(|monitor| monitor.move_to_workspace(None, idx, activate))
+                },
+            )
         {
             return;
         }
@@ -2591,10 +2600,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_workspace_up(&mut self, activate: bool) {
-        if self.run_active_grid_overview_action_if_moved(|this| {
-            this.active_monitor()
-                .is_some_and(|monitor| monitor.move_column_to_workspace_up(activate))
-        }) {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| mon.active_workspace_idx.saturating_sub(1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace_up(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2607,10 +2619,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_workspace_down(&mut self, activate: bool) {
-        if self.run_active_grid_overview_action_if_moved(|this| {
-            this.active_monitor()
-                .is_some_and(|monitor| monitor.move_column_to_workspace_down(activate))
-        }) {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| (mon.active_workspace_idx + 1).min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace_down(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2623,10 +2638,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
-        if self.run_active_grid_overview_action_if_moved(|this| {
-            this.active_monitor()
-                .is_some_and(|monitor| monitor.move_column_to_workspace(idx, activate))
-        }) {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| idx.min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace(idx, activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -6179,8 +6197,18 @@ impl<W: LayoutElement> Layout<W> {
     /// moved window/column jump.
     fn run_active_grid_overview_action_if_moved(
         &mut self,
+        target_workspace_idx: impl FnOnce(&Monitor<W>) -> usize,
         action: impl FnOnce(&mut Self) -> bool,
     ) -> bool {
+        // Moving to the workspace the window is already on does nothing. Check that before
+        // active_grid_overview_action(), which restores a minimized focused cell.
+        let Some(mon) = self.active_monitor_ref() else {
+            return false;
+        };
+        if target_workspace_idx(mon) == mon.active_workspace_idx {
+            return false;
+        }
+
         let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_overview_action()
         else {
             return false;

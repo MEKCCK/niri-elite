@@ -5071,6 +5071,33 @@ fn window_restored_as_the_grid_closes_doesnt_fade_out() {
 }
 
 #[test]
+fn grid_move_to_workspace_that_goes_nowhere_keeps_minimized_cell() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::MinimizeWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&1));
+
+    // This is the first workspace, so there is nowhere up to move. It used to restore the
+    // window anyway, before finding out.
+    layout.move_to_workspace_up(true);
+    layout.move_column_to_workspace_up(true);
+    layout.verify_invariants();
+    assert!(layout.is_window_minimized(&1));
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
