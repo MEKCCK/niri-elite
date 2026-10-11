@@ -4401,6 +4401,15 @@ impl Niri {
             return None;
         }
 
+        // A floating window focused above the fullscreen one lets the pointer go.
+        if !self
+            .layout
+            .focus()
+            .is_some_and(|win| win.sizing_mode().is_fullscreen())
+        {
+            return None;
+        }
+
         // This is the same check that puts the fullscreen window above the top layer: its column
         // is active and the view is stationary, outside the overview and the grid overview.
         let mon = self.layout.monitor_for_output(output)?;
