@@ -5098,6 +5098,30 @@ fn grid_move_to_workspace_that_goes_nowhere_keeps_minimized_cell() {
 }
 
 #[test]
+fn grid_unfocused_new_window_keeps_grid_selection() {
+    let mut layout = three_column_grid_layout(1);
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    layout.focus_right();
+    layout.focus_right();
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+
+    // Like a window opening with open-focused false.
+    layout.add_window(
+        TestWindow::new(TestWindowParams::new(4)),
+        AddWindowTarget::Auto,
+        None,
+        None,
+        false,
+        false,
+        ActivateWindow::No,
+    );
+    layout.verify_invariants();
+
+    // The grid selection used to jump back to the active window.
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

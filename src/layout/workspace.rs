@@ -1057,7 +1057,12 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.recompute_grid_overview_layout(true);
-        self.sync_grid_focus_to_active_window();
+
+        // A window that opened without focus (open-focused false) must not take the grid focus
+        // away from where the user navigated; the recompute kept that on its window.
+        if self.active_window().map(|win| win.id()) == Some(id) {
+            self.sync_grid_focus_to_active_window();
+        }
     }
 
     pub fn grid_window_was_added_while_open(&self, id: &W::Id) -> bool {
