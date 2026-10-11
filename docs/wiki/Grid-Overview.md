@@ -10,6 +10,7 @@ Use the arrow keys to navigate between windows.
 If a column contains multiple windows, use Up/Down to switch between them within the same cell.
 
 Click a window to activate it and close the grid overview.
+Focusing a window from elsewhere, like a taskbar or `niri msg action focus-window`, does the same.
 
 ### Minimized windows
 

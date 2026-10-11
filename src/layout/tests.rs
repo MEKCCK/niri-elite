@@ -4771,6 +4771,29 @@ fn grid_focus_follows_its_window_when_the_grid_reflows() {
 }
 
 #[test]
+fn grid_activating_a_window_moves_the_grid_focus() {
+    let mut layout = three_column_grid_layout(1);
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+
+    layout.activate_window(&3);
+    layout.verify_invariants();
+
+    // The grid used to keep highlighting window 1, and Return then activated it again.
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(3));
+    layout.confirm_grid_selection();
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        Some(3)
+    );
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

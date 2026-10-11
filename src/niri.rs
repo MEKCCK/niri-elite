@@ -1175,7 +1175,11 @@ impl State {
     pub fn focus_window(&mut self, window: &Window) {
         let active_output = self.niri.layout.active_output().cloned();
 
-        self.niri.layout.activate_window(window);
+        // A window shown in the grid overview is focused like picking its cell there: the grid
+        // closes and the window is activated.
+        if !self.niri.layout.confirm_grid_selection_for_window(window) {
+            self.niri.layout.activate_window(window);
+        }
 
         let new_active = self.niri.layout.active_output().cloned();
         if new_active != active_output {

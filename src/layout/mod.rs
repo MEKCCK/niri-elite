@@ -1654,6 +1654,12 @@ impl<W: LayoutElement> Layout<W> {
                 if ws.activate_window(window) {
                     *active_monitor_idx = monitor_idx;
 
+                    // Keep the grid focus on the active window, otherwise the grid keeps
+                    // highlighting, and Return confirms, some other window.
+                    if ws.is_grid_overview_open() {
+                        ws.set_grid_focus_for_window(window);
+                    }
+
                     // If currently in the middle of a vertical swipe between the target workspace
                     // and some other, don't switch the workspace.
                     match &mon.workspace_switch {
