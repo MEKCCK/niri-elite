@@ -3644,10 +3644,8 @@ impl State {
         //
         // Recompute rather than using self.niri.pointer_contents in order to take into account
         // making the pointer visible and unsetting the tablet cursor location.
-        let should_handle_in_overview = self
-            .niri
-            .contents_under(pointer.current_location())
-            .overview;
+        let contents = self.niri.contents_under(pointer.current_location());
+        let should_handle_in_overview = contents.overview;
 
         let is_overview_open = self.niri.layout.is_overview_open();
         let is_mru_open = self.niri.window_mru_ui.is_open();
@@ -3666,7 +3664,10 @@ impl State {
                 self.niri.layout.is_grid_overview_open(),
                 is_overview_open,
                 is_mru_open,
-                self.niri.screenshot_ui.is_open(),
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open(),
+                contents.layer.is_some(),
                 modifiers,
                 has_vertical_wheel_binds,
             );
@@ -5654,18 +5655,24 @@ fn grid_should_confirm_on_return(
         && (keyboard_focus.is_layout() || keyboard_focus.is_overview())
 }
 
+/// Whether an unbound wheel scroll in the grid overview should switch workspaces.
+///
+/// Layer-shell surfaces such as bars keep their scrolling, matching how a click on them doesn't
+/// close the grid overview.
 fn grid_should_handle_workspace_wheel(
     is_grid_overview_open: bool,
     is_overview_open: bool,
     is_mru_open: bool,
-    is_screenshot_open: bool,
+    is_compositor_ui_open: bool,
+    pointer_over_layer_shell: bool,
     modifiers: Modifiers,
     has_wheel_binds: bool,
 ) -> bool {
     is_grid_overview_open
         && !is_overview_open
         && !is_mru_open
-        && !is_screenshot_open
+        && !is_compositor_ui_open
+        && !pointer_over_layer_shell
         && modifiers.is_empty()
         && !has_wheel_binds
 }
@@ -6336,11 +6343,22 @@ mod tests {
             false,
             false,
             false,
+            false,
             Modifiers::empty(),
             false,
         ));
         assert!(!grid_should_handle_workspace_wheel(
             false,
+            false,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            true,
             false,
             false,
             false,
@@ -6349,14 +6367,7 @@ mod tests {
         ));
         assert!(!grid_should_handle_workspace_wheel(
             true,
-            true,
             false,
-            false,
-            Modifiers::empty(),
-            false,
-        ));
-        assert!(!grid_should_handle_workspace_wheel(
-            true,
             false,
             false,
             false,
@@ -6368,8 +6379,29 @@ mod tests {
             false,
             false,
             false,
+            false,
             Modifiers::empty(),
             true,
+        ));
+        // Screenshot UI, lock screen or exit dialog.
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            true,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        // Pointer over a bar or another layer-shell surface.
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            true,
+            Modifiers::empty(),
+            false,
         ));
     }
 
