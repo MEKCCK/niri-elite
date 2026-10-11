@@ -5297,6 +5297,95 @@ fn grid_or_monitor_focus_actions_cross_to_the_other_monitor_at_the_edge() {
     layout.verify_invariants();
 }
 
+fn grid_cell_ids(layout: &Layout<TestWindow>, output: &str) -> Vec<usize> {
+    let mon = layout
+        .monitors()
+        .find(|mon| mon.output_name() == output)
+        .unwrap();
+    let ws = mon.active_workspace_ref();
+    ws.grid_overview()
+        .filter(|go| go.open)
+        .map(|go| {
+            go.layout
+                .entries
+                .iter()
+                .map(|(item, _)| *item.window_id())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn grid_window_moved_to_another_monitor_gets_a_cell_there() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ToggleGridOverview,
+    ]);
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .unwrap()
+        .clone();
+
+    // The grid focus moves over with activation.
+    layout.move_to_output(None, &output2, None, ActivateWindow::Smart);
+    layout.verify_invariants();
+    assert_eq!(grid_cell_ids(&layout, "output1"), vec![2]);
+    // The target grid used to keep its old layout, and its old focus, until a commit.
+    assert_eq!(grid_cell_ids(&layout, "output2"), vec![1, 3]);
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+
+    // By window id, the grid it leaves is refreshed too.
+    layout.move_to_output(Some(&2), &output2, None, ActivateWindow::No);
+    layout.verify_invariants();
+    assert_eq!(grid_cell_ids(&layout, "output1"), Vec::<usize>::new());
+    assert_eq!(grid_cell_ids(&layout, "output2"), vec![1, 3, 2]);
+}
+
+#[test]
+fn grid_move_to_workspace_by_window_id_moves_it() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+
+    // Like `niri msg action move-window-to-workspace --window-id 2 2`. It used to report success
+    // and do nothing while the grid was open.
+    layout.move_to_workspace(Some(&2), 1, ActivateWindow::No);
+    layout.verify_invariants();
+    let ws_windows: Vec<Vec<usize>> = layout
+        .monitors()
+        .next()
+        .unwrap()
+        .workspaces
+        .iter()
+        .map(|ws| ws.windows().map(|w| *w.id()).collect())
+        .collect();
+    assert_eq!(ws_windows[0], vec![1]);
+    assert_eq!(ws_windows[1], vec![2]);
+    assert_eq!(grid_cell_ids(&layout, "output1"), vec![1]);
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+}
+
 #[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);

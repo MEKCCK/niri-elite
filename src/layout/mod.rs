@@ -2659,7 +2659,9 @@ impl<W: LayoutElement> Layout<W> {
         {
             return;
         }
-        if self.grid_move_guard() {
+        // A window named explicitly (by id) is moved even with the grid open; only moves of the
+        // grid focus go through the grid action above.
+        if window.is_none() && self.grid_move_guard() {
             return;
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
@@ -2667,6 +2669,7 @@ impl<W: LayoutElement> Layout<W> {
                 return;
             }
         }
+        let source_grid = window.and_then(|window| self.grid_snapshot_for_window(window));
 
         let monitor = if let Some(window) = window {
             match &mut self.monitor_set {
@@ -2685,6 +2688,28 @@ impl<W: LayoutElement> Layout<W> {
             monitor
         };
         monitor.move_to_workspace(window, idx, activate);
+
+        if let Some((ws_id, focus, snapshots)) = source_grid {
+            self.refresh_grid_workspace_after_action(ws_id, focus, true, snapshots);
+        }
+    }
+
+    /// For a window about to leave a workspace with an open grid, that workspace and what to
+    /// refresh its grid with afterwards: the grid focus to keep (unless it's the window) and the
+    /// visuals to animate from.
+    fn grid_snapshot_for_window(
+        &self,
+        window: &W::Id,
+    ) -> Option<(WorkspaceId, Option<W::Id>, Vec<GridWindowVisual<W>>)> {
+        let ws = self
+            .workspaces()
+            .map(|(_, _, ws)| ws)
+            .find(|ws| ws.has_window(window))?;
+        if !ws.is_grid_overview_open() {
+            return None;
+        }
+        let focus = ws.grid_focused_window_id().filter(|focus| focus != window);
+        Some((ws.id(), focus, ws.grid_window_visual_snapshots()))
     }
 
     pub fn move_column_to_workspace_up(&mut self, activate: bool) {
@@ -4089,7 +4114,11 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        let source_grid = window.and_then(|window| self.grid_snapshot_for_window(window));
         self.move_to_output_unchecked(window, output, target_ws_idx, activate);
+        if let Some((ws_id, focus, snapshots)) = source_grid {
+            self.refresh_grid_workspace_after_action(ws_id, focus, true, snapshots);
+        }
     }
 
     fn move_to_output_unchecked(
@@ -4183,6 +4212,11 @@ impl<W: LayoutElement> Layout<W> {
                 removed.is_floating,
                 None,
             );
+            // Give the window a cell in the target grid right away, rather than on its next
+            // commit, and move the grid focus to it when it became active.
+            if let Some(ws) = mon.workspaces.iter_mut().find(|ws| ws.id() == ws_id) {
+                ws.on_window_added_in_grid(&window);
+            }
             if activate.map_smart(|| false) {
                 *active_monitor_idx = new_idx;
             }
