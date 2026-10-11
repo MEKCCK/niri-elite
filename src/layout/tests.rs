@@ -6907,7 +6907,7 @@ fn minimized_ids(layout: &Layout<TestWindow>) -> Vec<usize> {
 
 #[test]
 fn grid_closing_with_all_windows_minimized_restores_nothing() {
-    let mut layout = check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -6976,7 +6976,7 @@ fn grid_closing_keeps_ignored_floating_window_active() {
         ..ResolvedWindowRules::default()
     });
 
-    let mut layout = check_ops([
+    let layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
             params: TestWindowParams::new(1),
@@ -8660,7 +8660,7 @@ fn grid_drop_onto_tabbed_minimized_cell_never_merges_into_it() {
         },
         ..Default::default()
     };
-    let mut layout = check_ops_with_options(
+    let layout = check_ops_with_options(
         options,
         [
             Op::AddOutput(1),
