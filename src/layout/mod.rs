@@ -455,6 +455,11 @@ struct InteractiveMoveData<W: LayoutElement> {
     pub(self) width: ColumnWidth,
     /// Whether the window column was full-width.
     pub(self) is_full_width: bool,
+    /// Whether the window column was maximized.
+    ///
+    /// A fullscreen window can be maximized underneath, and only its column knows that, so it
+    /// has to be carried over to the column the window is dropped into.
+    pub(self) is_maximized: bool,
     /// Whether the window targets the floating layout.
     pub(self) is_floating: bool,
     /// Pointer location within the visual window geometry as ratio from geometry size.
@@ -3095,16 +3100,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 InteractiveMoveState::Moving(move_) => {
                     assert_eq!(self.clock, move_.tile.clock);
-                    let sizing_mode = move_.tile.window().pending_sizing_mode();
-                    assert!(
-                        !sizing_mode.is_fullscreen(),
-                        "interactively moved tile cannot be fullscreen"
-                    );
                     if move_.is_floating {
                         assert!(
-                            sizing_mode.is_normal(),
-                            "interactively moved floating tile cannot be maximized"
+                            move_.tile.window().pending_sizing_mode().is_normal(),
+                            "interactively moved floating tile cannot be fullscreen or maximized"
                         );
+                        assert!(!move_.is_maximized);
                     }
 
                     move_.tile.verify_invariants();
@@ -4962,17 +4963,15 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
 
-                // Unset fullscreen before removing the tile. This will restore its size properly,
-                // and move it to floating if needed, so we don't have to deal with that here.
-                //
-                // Maximized windows stay maximized: grabbing a window shouldn't resize it. The
-                // pending maximized state travels with the window, so dropping it into a new
-                // column maximizes that column again.
-                let ws = self
-                    .workspaces_mut()
-                    .find(|ws| ws.has_window(&window_id))
-                    .unwrap();
-                ws.set_fullscreen(window, false);
+                // Fullscreen and maximized windows keep their state: grabbing a window shouldn't
+                // resize it. The pending sizing mode travels with the window, so dropping it into
+                // a new column makes that column fullscreen or maximized again.
+                let is_maximized = self
+                    .workspaces()
+                    .find_map(|(_, _, ws)| {
+                        ws.scrolling().columns().find(|col| col.contains(window))
+                    })
+                    .is_some_and(|col| col.is_pending_maximized());
 
                 let RemovedTile {
                     mut tile,
@@ -4998,8 +4997,7 @@ impl<W: LayoutElement> Layout<W> {
                 tile.update_config(view_size, scale, Rc::new(options));
 
                 if is_floating {
-                    // Unlock the view in case we locked it moving a fullscreen window that is
-                    // going to unfullscreen to floating.
+                    // Floating moves don't scroll the view; make sure it's unlocked.
                     for ws in self.workspaces_mut() {
                         ws.dnd_scroll_gesture_end();
                     }
@@ -5019,6 +5017,7 @@ impl<W: LayoutElement> Layout<W> {
                     pointer_pos_within_output,
                     width,
                     is_full_width,
+                    is_maximized,
                     is_floating,
                     pointer_ratio_within_window,
                     visual_scale,
@@ -5328,6 +5327,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
 
                 if let Some(ws) = mon.workspaces.iter_mut().find(|ws| ws.has_window(&win_id)) {
+                    // A fullscreen window that was also maximized should unfullscreen back into
+                    // maximized. Its own state only says fullscreen, so restore the column's.
+                    if move_.is_maximized && matches!(position, InsertPosition::NewColumn(_)) {
+                        ws.set_maximized(&win_id, true);
+                    }
+
                     if preserve_grid_move_animations {
                         ws.on_window_added_in_grid_preserving_move_animations(&win_id);
                     } else {
@@ -5391,6 +5396,10 @@ impl<W: LayoutElement> Layout<W> {
                 );
 
                 if !move_.is_floating {
+                    if move_.is_maximized {
+                        ws.set_maximized(&win_id, true);
+                    }
+
                     let tile = ws
                         .tiles_mut()
                         .find(|tile| *tile.window().id() == win_id)

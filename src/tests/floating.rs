@@ -410,7 +410,7 @@ fn moving_to_floating_doesnt_cancel_resize() {
 }
 
 #[test]
-fn interactive_move_unfullscreen_to_floating_restores_size() {
+fn interactive_move_keeps_fullscreen_and_restore_to_floating() {
     let (mut f, id, surface) = set_up();
 
     f.niri().layout.toggle_window_floating(None);
@@ -436,11 +436,9 @@ fn interactive_move_unfullscreen_to_floating_restores_size() {
         @"size: 1920 × 1080, bounds: 1888 × 1048, states: [Activated, Fullscreen]"
     );
 
-    // Start an interactive move which causes an unfullscreen into floating.
+    // Start an interactive move. Grabbing the window shouldn't unfullscreen it.
     let output = f.niri_output(1);
     let niri = f.niri();
-    let mapped = niri.layout.windows().next().unwrap().1;
-    let window = mapped.window.clone();
     niri.layout
         .interactive_move_begin(window.clone(), &output, Point::default());
     niri.layout.interactive_move_update(
@@ -451,11 +449,30 @@ fn interactive_move_unfullscreen_to_floating_restores_size() {
     );
     f.double_roundtrip(id);
 
-    // This should request the stored floating size (200 × 200).
+    // Only the bounds change while moving; the size and the fullscreen state stay.
+    assert_snapshot!(
+        f.client(id).window(&surface).format_recent_configures(),
+        @"size: 1920 × 1080, bounds: 1920 × 1080, states: [Activated, Fullscreen]"
+    );
+
+    // Drop it; it lands in a new fullscreen column.
+    f.niri().layout.interactive_move_end(&window);
+    f.double_roundtrip(id);
+    let _ = f.client(id).window(&surface).recent_configures();
+
+    // Unfullscreening should still go back into floating with the stored floating size.
+    f.niri().layout.set_fullscreen(&window, false);
+    f.double_roundtrip(id);
+
     assert_snapshot!(
         f.client(id).window(&surface).format_recent_configures(),
         @"size: 200 × 200, bounds: 1920 × 1080, states: [Activated]"
     );
+    let niri = f.niri();
+    assert!(niri
+        .layout
+        .workspaces()
+        .any(|(_, _, ws)| ws.is_floating(&window)));
 }
 
 #[test]

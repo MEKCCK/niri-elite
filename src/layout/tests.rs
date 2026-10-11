@@ -9027,6 +9027,58 @@ fn interactive_move_maximized_into_new_column_stays_maximized() {
 }
 
 #[test]
+fn interactive_move_keeps_full_width_column() {
+    let ops = [
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::MaximizeColumn,
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    let mut layout = check_ops(ops);
+    let width = tile_width(&layout, 2);
+
+    let ops = [
+        Op::InteractiveMoveBegin {
+            window: 2,
+            output_idx: 1,
+            px: 640.,
+            py: 360.,
+        },
+        Op::InteractiveMoveUpdate {
+            window: 2,
+            dx: 0.,
+            dy: 1000.,
+            output_idx: 1,
+            px: 640.,
+            py: 360.,
+        },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+
+    let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move else {
+        panic!("window 2 must be moving");
+    };
+    assert!(move_.is_full_width);
+    assert_eq!(move_.tile.tile_size().w, width);
+
+    let ops = [
+        Op::InteractiveMoveEnd { window: 2 },
+        Op::Communicate(2),
+        Op::CompleteAnimations,
+    ];
+    check_ops_on_layout(&mut layout, ops);
+    assert_eq!(tile_width(&layout, 2), width);
+}
+
+#[test]
 fn interactive_move_maximized_into_column_becomes_normal() {
     let (mut layout, _, rect) = interactive_move_maximized_window_set_up();
 
