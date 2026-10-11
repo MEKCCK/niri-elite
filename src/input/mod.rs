@@ -1053,9 +1053,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_fullscreen(&window);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -1074,9 +1071,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -1895,9 +1889,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), true);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SwitchPresetWindowWidthBackById(id) => {
@@ -1905,9 +1896,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), false);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SwitchPresetWindowHeight => {
@@ -2311,9 +2299,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_width(Some(&window), change);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SetWindowHeight(change) => {
@@ -2332,9 +2317,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_height(Some(&window), change);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::ResetWindowHeight => {
@@ -2348,16 +2330,15 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.reset_window_height(Some(&window));
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::ExpandColumnToAvailableWidth => {
-                self.niri.layout.expand_column_to_available_width();
+                // This acts on the active column, so in the grid, activate the selected window
+                // first.
                 if self.niri.layout.is_grid_overview_open() {
                     self.niri.layout.confirm_grid_selection();
                 }
+                self.niri.layout.expand_column_to_available_width();
             }
             Action::ShowHotkeyOverlay => {
                 if self.niri.hotkey_overlay.show() {

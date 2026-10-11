@@ -10,6 +10,7 @@ mod binds;
 mod confine_mouse;
 mod floating;
 mod fullscreen;
+mod grid_actions;
 mod grid_activation;
 mod grid_scroll;
 mod layer_shell;
