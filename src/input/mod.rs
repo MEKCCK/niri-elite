@@ -3521,12 +3521,16 @@ impl State {
 
                 // FIXME: granular.
                 self.niri.queue_redraw_all();
-            } else if !is_overview_open
-                && self.niri.layout.is_grid_overview_open()
-                && button == Some(MouseButton::Left)
-                && !pointer.is_grabbed()
-                && !self.niri.screenshot_ui.is_open()
-            {
+            } else if grid_should_handle_empty_click(
+                self.niri.layout.is_grid_overview_open(),
+                is_overview_open,
+                button,
+                pointer.is_grabbed(),
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open()
+                    || self.niri.window_mru_ui.is_open(),
+            ) {
                 let output_under_cursor = self.niri.output_under_cursor();
                 let active_output = self.niri.layout.active_output().cloned();
                 if let Some(output) =
@@ -5665,6 +5669,25 @@ fn grid_should_confirm_on_return(
         && (keyboard_focus.is_layout() || keyboard_focus.is_overview())
 }
 
+/// Whether a click outside any grid cell should close the grid overview (or focus the output
+/// under the pointer).
+///
+/// The lock screen and compositor UIs take such clicks for themselves: with the screen locked,
+/// clicking the password field used to close the grid behind it and activate its focused window.
+fn grid_should_handle_empty_click(
+    is_grid_overview_open: bool,
+    is_overview_open: bool,
+    button: Option<MouseButton>,
+    pointer_is_grabbed: bool,
+    is_compositor_ui_open: bool,
+) -> bool {
+    is_grid_overview_open
+        && !is_overview_open
+        && button == Some(MouseButton::Left)
+        && !pointer_is_grabbed
+        && !is_compositor_ui_open
+}
+
 /// Whether an unbound wheel scroll in the grid overview should switch workspaces.
 ///
 /// Layer-shell surfaces such as bars keep their scrolling, matching how a click on them doesn't
@@ -6344,6 +6367,34 @@ mod tests {
         assert!(grid_should_close_on_escape(true, &layout_focus));
         assert!(!grid_should_close_on_escape(true, &KeyboardFocus::Overview));
         assert!(!grid_should_close_on_escape(false, &layout_focus));
+    }
+
+    #[test]
+    fn grid_empty_click_is_left_for_lock_screen_and_compositor_uis() {
+        let left = Some(MouseButton::Left);
+        assert!(grid_should_handle_empty_click(
+            true, false, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            false, false, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true, true, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true,
+            false,
+            Some(MouseButton::Right),
+            false,
+            false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true, false, left, true, false
+        ));
+        // Lock screen, exit dialog, screenshot UI or MRU switcher.
+        assert!(!grid_should_handle_empty_click(
+            true, false, left, false, true
+        ));
     }
 
     #[test]
