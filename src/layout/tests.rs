@@ -795,6 +795,12 @@ enum Op {
     },
     ToggleOverview,
     ToggleGridOverview,
+    OpenGridOverview,
+    CloseGridOverview,
+    ConfirmGridSelection,
+    ConfirmGridSelectionForWindow(#[proptest(strategy = "1..=5usize")] usize),
+    ActivateWindowFromActivation(#[proptest(strategy = "1..=5usize")] usize),
+    SetGridAllMonitors(bool),
     UpdateConfig {
         #[proptest(strategy = "arbitrary_layout_part().prop_map(Box::new)")]
         layout_config: Box<niri_config::LayoutPart>,
@@ -1686,6 +1692,28 @@ impl Op {
             }
             Op::ToggleGridOverview => {
                 layout.toggle_grid_overview();
+            }
+            Op::OpenGridOverview => {
+                layout.open_grid_overview();
+            }
+            Op::CloseGridOverview => {
+                layout.close_grid_overview();
+            }
+            Op::ConfirmGridSelection => {
+                layout.confirm_grid_selection();
+            }
+            Op::ConfirmGridSelectionForWindow(id) => {
+                layout.confirm_grid_selection_for_window(&id);
+            }
+            Op::ActivateWindowFromActivation(id) => {
+                if layout.has_window(&id) {
+                    layout.activate_window_from_activation(&id);
+                }
+            }
+            Op::SetGridAllMonitors(all) => {
+                let mut options = Options::clone(&layout.options);
+                options.grid_overview.grid_all_monitors = all;
+                layout.update_options(options);
             }
             Op::UpdateConfig { layout_config } => {
                 let options = Options {
@@ -4879,6 +4907,135 @@ fn activating_minimized_window_without_raising_does_nothing() {
             .active_window()
             .map(|w| *w.id()),
         Some(2)
+    );
+}
+
+fn grid_open_flags(layout: &Layout<TestWindow>) -> Vec<(bool, Vec<bool>)> {
+    layout
+        .monitors()
+        .map(|mon| {
+            (
+                mon.is_grid_overview_open(),
+                mon.workspaces
+                    .iter()
+                    .filter(|ws| ws.has_windows())
+                    .map(|ws| ws.is_grid_overview_open())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn grid_extends_to_a_monitor_connected_while_open() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleGridOverview,
+        Op::AddOutput(2),
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+    ]);
+
+    // The new monitor used to stay out of the grid, while the open grid elsewhere made it
+    // impossible to open it there.
+    assert_eq!(
+        grid_open_flags(&layout),
+        vec![(true, vec![true]), (true, vec![true])]
+    );
+
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(
+        grid_open_flags(&layout),
+        vec![(false, vec![false]), (false, vec![false])]
+    );
+}
+
+#[test]
+fn grid_state_survives_unplugging_the_monitor() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::ToggleGridOverview,
+        Op::RemoveOutput(1),
+        Op::AddOutput(1),
+    ]);
+
+    // The workspace used to come back with its grid open on a monitor whose grid was closed,
+    // which Escape and close-grid-overview could not close.
+    assert_eq!(grid_open_flags(&layout), vec![(false, vec![false])]);
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(grid_open_flags(&layout), vec![(true, vec![true])]);
+}
+
+#[test]
+fn grid_workspace_moved_between_monitors_takes_their_grid_state() {
+    let options = Options {
+        grid_overview: niri_config::GridOverview {
+            grid_all_monitors: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddOutput(2),
+            Op::FocusOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::ToggleGridOverview,
+        ],
+    );
+    assert_eq!(
+        grid_open_flags(&layout),
+        vec![(true, vec![true]), (false, vec![])]
+    );
+
+    check_ops_on_layout(&mut layout, [Op::MoveWorkspaceToOutput(2)]);
+    assert_eq!(
+        grid_open_flags(&layout),
+        vec![(true, vec![]), (false, vec![false])]
+    );
+}
+
+#[test]
+fn grid_all_monitors_turned_on_while_open_opens_everywhere() {
+    let options = Options {
+        grid_overview: niri_config::GridOverview {
+            grid_all_monitors: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddOutput(2),
+            Op::FocusOutput(2),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::FocusOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::ToggleGridOverview,
+            Op::SetGridAllMonitors(true),
+        ],
+    );
+    assert_eq!(
+        grid_open_flags(&layout),
+        vec![(true, vec![true]), (true, vec![true])]
     );
 }
 

@@ -871,6 +871,12 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
+                // With grid-all-monitors, a monitor connected while the grid is open joins it.
+                if self.options.grid_overview.grid_all_monitors
+                    && monitors.iter().any(|mon| mon.is_grid_overview_open())
+                {
+                    monitor.set_grid_overview_open(true);
+                }
                 monitors.push(monitor);
 
                 MonitorSet::Normal {
@@ -3014,6 +3020,16 @@ impl<W: LayoutElement> Layout<W> {
         let mut seen_workspace_id = HashSet::new();
         let mut seen_workspace_name = Vec::<String>::new();
 
+        if let MonitorSet::Normal { monitors, .. } = &self.monitor_set {
+            if self.grid_all_monitors() {
+                let open = monitors[0].is_grid_overview_open();
+                assert!(
+                    monitors.iter().all(|mon| mon.is_grid_overview_open() == open),
+                    "with grid-all-monitors, the grid overview must be open on all monitors or none"
+                );
+            }
+        }
+
         let (monitors, &primary_idx, &active_monitor_idx) = match &self.monitor_set {
             MonitorSet::Normal {
                 monitors,
@@ -3025,6 +3041,11 @@ impl<W: LayoutElement> Layout<W> {
                     assert!(
                         workspace.has_windows_or_name(),
                         "with no outputs there cannot be empty unnamed workspaces"
+                    );
+
+                    assert!(
+                        !workspace.is_grid_overview_open(),
+                        "with no outputs there cannot be an open grid overview"
                     );
 
                     assert_eq!(self.clock, workspace.clock);
@@ -3538,8 +3559,15 @@ impl<W: LayoutElement> Layout<W> {
 
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
+                // Turning grid-all-monitors on while the grid is open on some monitor opens it on
+                // the others too.
+                let all_monitors = options.grid_overview.grid_all_monitors;
+                let any_open = monitors.iter().any(|mon| mon.is_grid_overview_open());
                 for mon in monitors {
                     mon.update_config(options.clone());
+                    if all_monitors && any_open && !mon.is_grid_overview_open() {
+                        mon.set_grid_overview_open(true);
+                    }
                 }
             }
             MonitorSet::NoOutputs { workspaces } => {

@@ -318,6 +318,8 @@ impl<W: LayoutElement> Monitor<W> {
 
             ws.set_output(Some(output.clone()));
             ws.update_config(options.clone());
+            // The grid starts closed on a new monitor.
+            ws.close_grid_overview();
 
             if ws_id_to_activate.is_some_and(|id| ws.id() == id) {
                 active_workspace_idx = idx;
@@ -361,6 +363,8 @@ impl<W: LayoutElement> Monitor<W> {
 
         for ws in &mut self.workspaces {
             ws.set_output(None);
+            // Wherever the workspace ends up, it takes on that grid state.
+            ws.close_grid_overview();
         }
 
         self.workspaces
@@ -761,7 +765,7 @@ impl<W: LayoutElement> Monitor<W> {
 
         self.workspaces.insert(idx, ws);
 
-        self.open_grid_for_workspace_if_needed(idx);
+        self.sync_workspace_grid_overview(idx);
 
         if idx <= self.active_workspace_idx {
             self.active_workspace_idx += 1;
@@ -791,8 +795,12 @@ impl<W: LayoutElement> Monitor<W> {
         // Push the workspaces from the removed monitor in the end, right before the
         // last, empty, workspace.
         let empty = self.workspaces.remove(self.workspaces.len() - 1);
+        let start = self.workspaces.len();
         self.workspaces.extend(workspaces);
         self.workspaces.push(empty);
+        for idx in start..self.workspaces.len() - 1 {
+            self.sync_workspace_grid_overview(idx);
+        }
 
         // If empty_workspace_above_first is set and the first workspace is now no longer empty,
         // add a new empty workspace on top.
@@ -1563,6 +1571,21 @@ impl<W: LayoutElement> Monitor<W> {
                 ws.activate_grid_focused_window_before_close();
                 ws.close_grid_overview();
             }
+        }
+    }
+
+    /// Opens or closes the grid of a workspace that came from elsewhere to match this monitor.
+    fn sync_workspace_grid_overview(&mut self, workspace_idx: usize) {
+        let open = self.grid_overview_open;
+        let Some(ws) = self.workspaces.get_mut(workspace_idx) else {
+            return;
+        };
+        if open {
+            if ws.has_windows() {
+                ws.open_grid_overview();
+            }
+        } else {
+            ws.close_grid_overview();
         }
     }
 
@@ -2462,6 +2485,20 @@ impl<W: LayoutElement> Monitor<W> {
             "monitor must have at least one workspace"
         );
         assert!(self.active_workspace_idx < self.workspaces.len());
+
+        for ws in &self.workspaces {
+            if ws.is_grid_overview_open() {
+                assert!(
+                    self.grid_overview_open,
+                    "a workspace grid overview can only be open on a monitor with an open grid"
+                );
+            } else if self.grid_overview_open {
+                assert!(
+                    !ws.has_windows(),
+                    "on a monitor with an open grid, every workspace with windows must show it"
+                );
+            }
+        }
 
         if let Some(WorkspaceSwitch::Animation(anim)) = &self.workspace_switch {
             let before_idx = anim.from() as usize;
