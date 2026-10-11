@@ -138,6 +138,14 @@ pub struct GridOverview<W: LayoutElement> {
     /// windows stay visible above the source grid they are crossing.
     pub flying_in_windows: Vec<W::Id>,
     added_window_ids: Vec<W::Id>,
+    /// Windows restored from a minimized cell during this grid session.
+    ///
+    /// An `ignore-grid-overview` window only has a cell while it is minimized. Restored from
+    /// there, it keeps that cell until the grid opens again: dropping it right away popped the
+    /// window out over the grid at its floating position, with no animation, and threw the grid
+    /// focus onto some other cell. Kept through the close animation, the cell carries the window
+    /// back into place like any other.
+    restored_window_ids: Vec<W::Id>,
     /// Filled highlights drawn behind the cells of minimized windows.
     ///
     /// They live here rather than on the tiles because they are sized in screen space: a marker
@@ -172,6 +180,7 @@ impl<W: LayoutElement> GridOverview<W> {
             grabbed_window: None,
             flying_in_windows: Vec::new(),
             added_window_ids: Vec::new(),
+            restored_window_ids: Vec::new(),
             minimized_highlights: Vec::new(),
             column_tile_focus: Vec::new(),
             clock,
@@ -1016,6 +1025,20 @@ impl<W: LayoutElement> GridOverview<W> {
 
     pub(super) fn window_was_added_while_open(&self, id: &W::Id) -> bool {
         self.added_window_ids.contains(id)
+    }
+
+    pub(super) fn record_restored_window(&mut self, id: W::Id) {
+        if !self.restored_window_ids.contains(&id) {
+            self.restored_window_ids.push(id);
+        }
+    }
+
+    pub(super) fn clear_restored_windows(&mut self) {
+        self.restored_window_ids.clear();
+    }
+
+    pub(super) fn window_was_restored(&self, id: &W::Id) -> bool {
+        self.restored_window_ids.contains(id)
     }
 
     pub fn focused_info(&self) -> Option<&GridEntryInfo> {

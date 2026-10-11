@@ -436,6 +436,10 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn toggle_grid_overview(&mut self) {
         let was_open = self.is_grid_overview_open();
         if !was_open {
+            // Windows restored in the previous session are back to being ignored.
+            if let Some(go) = &mut self.grid_overview {
+                go.clear_restored_windows();
+            }
             let items = self.grid_overview_items();
 
             if items.is_empty() {
@@ -1291,7 +1295,7 @@ impl<W: LayoutElement> Workspace<W> {
         items.extend(
             self.floating
                 .tiles()
-                .filter(|tile| !Self::tile_ignores_grid_overview(tile))
+                .filter(|tile| !self.tile_ignores_grid_overview(tile))
                 .map(|tile| {
                     (
                         GridItem::Floating {
@@ -1306,7 +1310,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     fn grid_item_for_window(&self, id: &W::Id) -> Option<GridItem<W>> {
         if let Some(tile) = self.floating.tiles().find(|tile| tile.window().id() == id) {
-            if Self::tile_ignores_grid_overview(tile) {
+            if self.tile_ignores_grid_overview(tile) {
                 return None;
             }
 
@@ -1332,10 +1336,17 @@ impl<W: LayoutElement> Workspace<W> {
             .then_some(active)
     }
 
-    fn tile_ignores_grid_overview(tile: &Tile<W>) -> bool {
+    fn tile_ignores_grid_overview(&self, tile: &Tile<W>) -> bool {
         // A minimized window has nowhere else to be seen and restored than the grid, so it gets
-        // a cell like any other minimized window.
-        tile.window().rules().ignore_grid_overview == Some(true) && !tile.window().is_minimized()
+        // a cell like any other minimized window, and keeps it once restored from there until
+        // the grid opens again.
+        let win = tile.window();
+        win.rules().ignore_grid_overview == Some(true)
+            && !win.is_minimized()
+            && !self
+                .grid_overview
+                .as_ref()
+                .is_some_and(|go| go.window_was_restored(win.id()))
     }
 
     fn grid_item_normal_render_pos(
@@ -3197,7 +3208,7 @@ impl<W: LayoutElement> Workspace<W> {
             for (tile, tile_pos) in self
                 .floating
                 .tiles_with_render_positions()
-                .filter(|(tile, _)| Self::tile_ignores_grid_overview(tile))
+                .filter(|(tile, _)| self.tile_ignores_grid_overview(tile))
             {
                 let xray_pos = base_xray_pos.offset(tile_pos);
                 let render_focus_ring = active_floating_id == Some(tile.window().id());
@@ -3679,7 +3690,7 @@ impl<W: LayoutElement> Workspace<W> {
         self.floating
             .tiles_with_render_positions()
             .find_map(|(tile, tile_pos)| {
-                if !Self::tile_ignores_grid_overview(tile) {
+                if !self.tile_ignores_grid_overview(tile) {
                     return None;
                 }
 
@@ -4004,6 +4015,12 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         if self.is_grid_overview_open() {
+            if !minimize {
+                if let Some(go) = &mut self.grid_overview {
+                    go.record_restored_window(id.clone());
+                }
+            }
+
             // Minimizing leaves the grid focus alone: the cell is still right there, only marked
             // now, and pressing minimize again restores it. Following the strip's activation
             // instead — which minimizing hands to some neighbor — flung the focus across the grid.
