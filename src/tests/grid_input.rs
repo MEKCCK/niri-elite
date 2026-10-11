@@ -319,3 +319,21 @@ fn grid_hot_corner_toggles_its_own_monitor() {
     assert!(layout.is_grid_overview_open_on(&output1));
     assert!(layout.is_grid_overview_open_on(&output2));
 }
+
+#[test]
+fn mod_tap_dismissing_exit_dialog_doesnt_toggle_grid() {
+    let SetUp { mut f, id, .. } = set_up();
+    assert!(f.niri().layout.close_grid_overview());
+    assert!(f.niri().exit_confirm_dialog.show());
+
+    // The tap only dismisses the dialog.
+    press_key(&mut f, "LWIN", KeyState::Pressed);
+    press_key(&mut f, "LWIN", KeyState::Released);
+    f.roundtrip(id);
+    assert!(!f.niri().layout.is_grid_overview_open());
+    assert!(f.niri().suppressed_keys.is_empty());
+
+    // Later taps work as usual.
+    tap_key(&mut f, id, "LWIN");
+    assert!(f.niri().layout.is_grid_overview_open());
+}

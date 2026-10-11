@@ -3039,7 +3039,7 @@ impl Niri {
         }
     }
 
-    fn screen_cast_picker_is_visible(&self) -> bool {
+    pub(crate) fn screen_cast_picker_is_visible(&self) -> bool {
         #[cfg(feature = "xdp-gnome-screencast")]
         {
             self.screen_cast_picker.is_visible()

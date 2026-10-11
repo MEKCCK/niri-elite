@@ -547,8 +547,16 @@ impl State {
                     }
                 }
 
+                // These UIs take the key press for themselves (the exit dialog hides on any key),
+                // so a modifier tap there must not fire a modifier bind on release. On the
+                // default-mod-action path, that also left the key in suppressed_keys, swallowing
+                // its next release and leaving it stuck in the focused client.
+                let modal_ui_open = this.niri.exit_confirm_dialog.is_open()
+                    || this.niri.screen_cast_picker_is_visible()
+                    || this.niri.window_mru_ui.is_open();
+
                 if let Some(raw) = raw {
-                    if pressed && modifier_from_keysym(raw).is_some() {
+                    if pressed && modifier_from_keysym(raw).is_some() && !modal_ui_open {
                         let magnifier = MagnifierBindsFilter::new(&this.niri);
                         let config = this.niri.config.borrow();
                         let bindings = make_binds_iter(
