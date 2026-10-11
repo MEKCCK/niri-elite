@@ -3550,11 +3550,6 @@ impl<W: LayoutElement> Layout<W> {
         let Some(InteractiveMoveState::Moving(move_)) = self.interactive_move.take() else {
             unreachable!()
         };
-        warn!(
-            is_floating = move_.is_floating,
-            pointer = ?move_.pointer_pos_within_output,
-            "Layout::update_insert_hint moving"
-        );
         if output.is_some_and(|out| &move_.output != out) {
             self.interactive_move = Some(InteractiveMoveState::Moving(move_));
             return;
@@ -3576,10 +3571,8 @@ impl<W: LayoutElement> Layout<W> {
                     } else if let Some((position, area)) =
                         ws.grid_insert_position_and_hint_area(pos_within_workspace)
                     {
-                        warn!(?position, ?area, "Layout::update_insert_hint grid hint");
                         (position, Some(area))
                     } else if ws.is_grid_overview_open() {
-                        warn!("Layout::update_insert_hint no grid hint while grid open");
                         self.interactive_move = Some(InteractiveMoveState::Moving(move_));
                         return;
                     } else {
@@ -3906,34 +3899,19 @@ impl<W: LayoutElement> Layout<W> {
                 return;
             }
         }
-        warn!(
-            is_grid_open = self.grid_move_guard(),
-            has_interactive_move = self.interactive_move.is_some(),
-            "Layout::toggle_window_floating enter"
-        );
         if self.grid_move_guard() {
             let moving_target = self.interactive_move.as_ref().is_some_and(|move_| {
                 move_.moving().is_some_and(|move_| {
                     window.is_none() || window == Some(move_.tile.window().id())
                 })
             });
-            warn!(moving_target, "Layout::toggle_window_floating grid guard");
             if !moving_target {
                 return;
             }
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
-                warn!(
-                    before_is_floating = move_.is_floating,
-                    "Layout::toggle_window_floating moving target"
-                );
                 move_.is_floating = !move_.is_floating;
-                warn!(
-                    after_is_floating = move_.is_floating,
-                    "Layout::toggle_window_floating toggled moving target"
-                );
-
                 // When going to floating, restore the floating window size.
                 if move_.is_floating {
                     let floating_size = move_.tile.floating_window_size;
