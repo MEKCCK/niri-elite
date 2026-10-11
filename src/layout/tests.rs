@@ -7013,6 +7013,24 @@ fn grid_closing_keeps_ignored_floating_window_active() {
 }
 
 #[test]
+fn grid_dragged_window_keeps_focus() {
+    let mut layout = large_grid_layout();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+
+    let (output, start, _) = grid_window_point(&layout, 3, 0.5, 0.5);
+    let (_, target, _) = grid_window_point(&layout, 1, 0.5, 0.25);
+    assert!(layout.interactive_move_begin(3, &output, start));
+    assert!(layout.interactive_move_update(&3, Point::from((300., 0.)), output.clone(), target));
+
+    // The dragged window used to lose keyboard focus for the whole drag.
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(3));
+
+    layout.interactive_move_end(&3);
+    layout.verify_invariants();
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(3));
+}
+
+#[test]
 fn grid_merge_insert_computes_final_targets_immediately() {
     let mut ops = vec![Op::AddOutput(1)];
     for id in 1..=3 {

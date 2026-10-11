@@ -2822,9 +2822,20 @@ impl<W: LayoutElement> Layout<W> {
             }
 
             if let Some(id) = self.grid_focused_window_id() {
-                return self
+                // While a cell is being dragged, the grid focus is the dragged window, which is
+                // held by the interactive move rather than by any workspace.
+                if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+                    if move_.tile.window().id() == &id {
+                        return Some(move_.tile.window());
+                    }
+                }
+
+                if let Some(win) = self
                     .workspaces()
-                    .find_map(|(_, _, ws)| ws.windows().find(|w| *w.id() == id));
+                    .find_map(|(_, _, ws)| ws.windows().find(|w| *w.id() == id))
+                {
+                    return Some(win);
+                }
             }
         }
         self.focus_with_output().map(|(win, _out)| win)
