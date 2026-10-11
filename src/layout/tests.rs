@@ -4620,6 +4620,121 @@ fn grid_closing_nonfocused_column_preserves_grid_focus() {
 }
 
 #[test]
+fn grid_closing_column_left_of_focus_keeps_grid_focus() {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=4 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    ops.extend([Op::FocusWindow(1), Op::ToggleGridOverview]);
+    let mut layout = check_ops(ops);
+
+    layout.focus_right();
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+
+    // Every column right of the closed one shifts left by one index, so a focus kept as a cell
+    // position used to land on the next window.
+    check_ops_on_layout(&mut layout, [Op::CloseWindow(1)]);
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+
+    let ws = layout.active_workspace().unwrap();
+    let go = ws.grid_overview().unwrap();
+    let (row, col) = go.focus;
+    let (item, _) = &go.layout.entries[row * go.layout.cols + col];
+    assert_eq!(item.window_id(), &2);
+}
+
+#[test]
+fn grid_column_tile_choice_follows_its_column() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ConsumeOrExpelWindowLeft { id: None },
+        Op::AddWindow {
+            params: TestWindowParams::new(4),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(5),
+        },
+        Op::ConsumeOrExpelWindowLeft { id: None },
+        Op::FocusWindow(2),
+        Op::FocusWindow(4),
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    assert_eq!(
+        scrolling_column_ids(&layout),
+        vec![vec![1], vec![2, 3], vec![4, 5]]
+    );
+
+    // Pick the second window of the middle column, then move on to the last column.
+    layout.focus_right();
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+    layout.focus_down();
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    layout.focus_right();
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+
+    // The remembered window choices used to be keyed by column index, so they moved over to the
+    // neighbouring column when a column to the left closed.
+    check_ops_on_layout(&mut layout, [Op::CloseWindow(1)]);
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+    layout.focus_left();
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+}
+
+#[test]
+fn grid_closing_focused_minimized_cell_moves_focus_without_restoring() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::MinimizeWindow(2),
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&2));
+
+    // The minimized window's client goes away while its cell is focused. It used to be restored
+    // first, to let the scrolling layout pick a neighbour.
+    let active_before = layout
+        .active_workspace()
+        .unwrap()
+        .active_window()
+        .map(|w| *w.id());
+    check_ops_on_layout(&mut layout, [Op::CloseWindow(2)]);
+
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        active_before
+    );
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

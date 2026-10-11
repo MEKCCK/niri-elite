@@ -488,9 +488,13 @@ impl<W: LayoutElement> Workspace<W> {
 
                 // Initialize column_tile_focus for Column items.
                 for (item, _) in &go.layout.entries {
-                    if let GridItem::Column { col_idx, .. } = item {
+                    if let GridItem::Column {
+                        col_idx, window_id, ..
+                    } = item
+                    {
                         let active_tile = self.scrolling.column_active_tile_idx(*col_idx);
-                        go.column_tile_focus.push((*col_idx, active_tile));
+                        go.column_tile_focus
+                            .push((*col_idx, active_tile, Some(window_id.clone())));
                     }
                 }
 
@@ -499,10 +503,23 @@ impl<W: LayoutElement> Workspace<W> {
                 go.focus_is_fallback = focus.is_none();
                 if let Some(focus) = focus {
                     go.focus = focus;
+                    go.focused_window = focus_id;
                 }
 
-                go.toggle();
                 self.grid_overview = Some(go);
+                if self
+                    .grid_overview
+                    .as_ref()
+                    .unwrap()
+                    .focused_window
+                    .is_none()
+                {
+                    let id = self.grid_window_at_focus();
+                    self.grid_overview.as_mut().unwrap().focused_window = id;
+                }
+                let go = self.grid_overview.as_mut().unwrap();
+
+                go.toggle();
             }
 
             // Lift the suspended hint from minimized windows so their previews go live, and
@@ -597,6 +614,13 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
 
+        // Navigation doesn't change the layout, so the cell position resolves to the right window
+        // here. Remember it, so that the focus can follow it through later layout changes.
+        let focused = self.grid_window_at_focus();
+        if let Some(go) = self.grid_overview.as_mut() {
+            go.focused_window = focused;
+        }
+
         self.grid_focused_window_id() != previous
     }
 
@@ -614,6 +638,21 @@ impl<W: LayoutElement> Workspace<W> {
             return Some(id.clone());
         }
 
+        if let Some(id) = &go.focused_window {
+            if self.grid_item_for_window(id).is_some() {
+                return Some(id.clone());
+            }
+        }
+
+        self.grid_window_at_focus()
+    }
+
+    /// The window at the grid focus cell position.
+    ///
+    /// Only meaningful while the grid layout matches the scrolling layout, i.e. not between a
+    /// layout change and the following grid recompute.
+    fn grid_window_at_focus(&self) -> Option<W::Id> {
+        let go = self.grid_overview.as_ref()?;
         let item = go.focused_item()?;
         if let GridItem::Column {
             col_idx, window_id, ..
@@ -727,6 +766,39 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.grid_window_visual_snapshots()
+    }
+
+    /// Prepares the grid focus for `window` leaving the workspace.
+    ///
+    /// When the grid focus is on `window`, the focus has to move to a neighbour. For an ordinary
+    /// window, activating it first lets the scrolling layout pick the neighbour as it does when an
+    /// active window closes. A minimized window can't be activated without restoring it, so its
+    /// grid successor is returned instead, for the caller to focus after the removal.
+    pub(super) fn prepare_grid_focus_for_removal(&mut self, window: &W::Id) -> Option<W::Id> {
+        if !self.is_grid_overview_open() || self.grid_focused_window_id().as_ref() != Some(window) {
+            return None;
+        }
+
+        if self.has_minimized_window(window) {
+            return self.grid_focus_successor(window);
+        }
+
+        self.activate_window_from_grid(window);
+        None
+    }
+
+    /// The window whose cell should take the grid focus when the focused `window` goes away.
+    ///
+    /// This is the next cell in grid order, or the previous one for the last cell.
+    pub(super) fn grid_focus_successor(&self, window: &W::Id) -> Option<W::Id> {
+        let go = self.grid_overview.as_ref()?;
+        let item = self.grid_item_for_window(window)?;
+        let entries = &go.layout.entries;
+        let idx = entries.iter().position(|(entry, _)| entry == &item)?;
+        let successor = entries
+            .get(idx + 1)
+            .or_else(|| idx.checked_sub(1).map(|i| &entries[i]));
+        successor.map(|(item, _)| item.window_id().clone())
     }
 
     pub(super) fn grid_window_close_preserves_move_animations(&self, window: &W::Id) -> bool {
@@ -946,7 +1018,12 @@ impl<W: LayoutElement> Workspace<W> {
         window_visual_snapshots: Vec<GridWindowVisual<W>>,
         stop_move_animations: bool,
     ) {
-        let previous_focus = self.grid_focused_window_id();
+        // The layout has already changed, so the focus has to be read by window rather than by
+        // cell position, which may now point at the next column.
+        let previous_focus = self
+            .grid_overview
+            .as_ref()
+            .and_then(|go| go.focused_window.clone());
         if stop_move_animations && self.is_grid_overview_open() {
             self.scrolling.stop_move_animations();
         }
@@ -1007,6 +1084,16 @@ impl<W: LayoutElement> Workspace<W> {
             self.grid_overview = Some(go);
             return false;
         }
+
+        // Cell positions shift when the layout changes; remember which windows the focus and the
+        // previous focus were on.
+        let previous_focus_window = go.previous_focus.and_then(|(row, col)| {
+            go.layout
+                .entries
+                .get(row * go.layout.cols + col)
+                .map(|(item, _)| item.window_id().clone())
+        });
+
         let rearrange_restarted = go.compute_layout(&items, working_area, restart_rearrange);
 
         // If a flying-in window is no longer in this grid (it was moved away again before
@@ -1015,34 +1102,64 @@ impl<W: LayoutElement> Workspace<W> {
         go.flying_in_windows
             .retain(|id| self.grid_item_for_window(id).is_some());
 
-        // Sync column_tile_focus with new layout.
-        let valid_col_indices: Vec<_> = go
-            .layout
-            .entries
-            .iter()
-            .filter_map(|(item, _)| {
-                if let GridItem::Column { col_idx, .. } = item {
-                    Some(*col_idx)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        go.column_tile_focus
-            .retain(|(col_idx, _)| valid_col_indices.contains(col_idx));
-        for col_idx in valid_col_indices {
-            let tile_count = self.scrolling.column_tile_count(col_idx);
-            if let Some(entry) = go.column_tile_focus.iter_mut().find(|(c, _)| *c == col_idx) {
-                if entry.1 >= tile_count {
-                    entry.1 = self.scrolling.column_active_tile_idx(col_idx);
-                }
-            } else {
-                let active_tile = self.scrolling.column_active_tile_idx(col_idx);
-                go.column_tile_focus.push((col_idx, active_tile));
+        // Sync column_tile_focus with the new layout. Each remembered tile follows its window to
+        // wherever its column is now.
+        let old_tile_focus = std::mem::take(&mut go.column_tile_focus);
+        for (item, _) in &mut go.layout.entries {
+            let GridItem::Column {
+                col_idx, window_id, ..
+            } = item
+            else {
+                continue;
+            };
+            let Some(col) = self.scrolling.columns().nth(*col_idx) else {
+                continue;
+            };
+
+            let remembered = old_tile_focus.iter().find_map(|(_, _, id)| {
+                let id = id.as_ref()?;
+                col.position(id).map(|tile_idx| (tile_idx, id.clone()))
+            });
+            let (tile_idx, id) = remembered.unwrap_or_else(|| {
+                let tile_idx = self.scrolling.column_active_tile_idx(*col_idx);
+                let id = col
+                    .tiles()
+                    .nth(tile_idx)
+                    .map(|(tile, _)| tile.window().id().clone());
+                (tile_idx, id.unwrap_or_else(|| window_id.clone()))
+            });
+
+            *window_id = id.clone();
+            go.column_tile_focus.push((*col_idx, tile_idx, Some(id)));
+        }
+
+        // Put the focus back on its window's cell.
+        let cell_of = |go: &GridOverview<W>, id: &W::Id| {
+            let item = self.grid_item_for_window(id)?;
+            go.find_grid_index_for_item(&item)
+        };
+        if let Some(focus) = go.focused_window.as_ref().and_then(|id| cell_of(&go, id)) {
+            go.focus = focus;
+        }
+        go.previous_focus = previous_focus_window
+            .as_ref()
+            .and_then(|id| cell_of(&go, id));
+
+        self.grid_overview = Some(go);
+
+        // The focused window is gone from the grid; keep whatever is in its cell now.
+        let focused_gone = self
+            .grid_overview
+            .as_ref()
+            .and_then(|go| go.focused_window.as_ref())
+            .is_none_or(|id| self.grid_item_for_window(id).is_none());
+        if focused_gone {
+            let id = self.grid_window_at_focus();
+            if let Some(go) = &mut self.grid_overview {
+                go.focused_window = id;
             }
         }
 
-        self.grid_overview = Some(go);
         rearrange_restarted
     }
     pub fn fix_floating_state_for_active(&mut self) {
@@ -1292,6 +1409,7 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             go.set_focused_window_id(id.clone());
         }
+        go.focused_window = Some(id.clone());
         true
     }
 

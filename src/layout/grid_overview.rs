@@ -112,6 +112,13 @@ pub struct GridOverview<W: LayoutElement> {
     /// `ignore-grid-overview` floating window, or every window is minimized) and the focus hasn't
     /// moved since. Closing the grid then must not activate that arbitrary first cell.
     pub(super) focus_is_fallback: bool,
+    /// The window that `focus` is on.
+    ///
+    /// The scrolling layout changes underneath the grid (a column to the left closes, the grid
+    /// reflows to another column count), so `focus` alone, a cell position, would end up on a
+    /// different window. After every layout recompute, `focus` is moved back to this window's
+    /// cell.
+    pub(super) focused_window: Option<W::Id>,
     pub saved_active_window_id: Option<W::Id>,
     pub saved_view_offset: f64,
     pub entry_positions: Vec<(GridItem<W>, Point<f64, Logical>)>,
@@ -136,8 +143,9 @@ pub struct GridOverview<W: LayoutElement> {
     /// They live here rather than on the tiles because they are sized in screen space: a marker
     /// that scaled with the cell would get thinner the more windows the grid shows.
     minimized_highlights: Vec<MinimizedHighlight<W>>,
-    /// col_idx → tile_idx for Column items that have multiple tiles.
-    pub column_tile_focus: Vec<(usize, usize)>,
+    /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
+    /// tile, so that the choice can follow its column when column indices shift.
+    pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
     pub clock: Clock,
     pub options: Rc<Options>,
 }
@@ -150,6 +158,7 @@ impl<W: LayoutElement> GridOverview<W> {
             layout: GridLayout::empty(),
             focus: (0, 0),
             focus_is_fallback: false,
+            focused_window: None,
             saved_active_window_id: None,
             saved_view_offset: 0.,
             entry_positions: Vec::new(),
@@ -654,8 +663,8 @@ impl<W: LayoutElement> GridOverview<W> {
     pub fn get_column_tile_focus(&self, col_idx: usize) -> usize {
         self.column_tile_focus
             .iter()
-            .find(|(c, _)| *c == col_idx)
-            .map(|(_, t)| *t)
+            .find(|(c, _, _)| *c == col_idx)
+            .map(|(_, t, _)| *t)
             .unwrap_or(0)
     }
 
@@ -664,16 +673,24 @@ impl<W: LayoutElement> GridOverview<W> {
         if let Some(entry) = self
             .column_tile_focus
             .iter_mut()
-            .find(|(c, _)| *c == col_idx)
+            .find(|(c, _, _)| *c == col_idx)
         {
             entry.1 = tile_idx;
+            entry.2 = None;
         } else {
-            self.column_tile_focus.push((col_idx, tile_idx));
+            self.column_tile_focus.push((col_idx, tile_idx, None));
         }
     }
 
     pub fn set_column_tile_focus(&mut self, col_idx: usize, tile_idx: usize, window_id: W::Id) {
         self.set_column_tile_focus_raw(col_idx, tile_idx);
+        if let Some(entry) = self
+            .column_tile_focus
+            .iter_mut()
+            .find(|(c, _, _)| *c == col_idx)
+        {
+            entry.2 = Some(window_id.clone());
+        }
         // Update the window_id in the layout entry.
         for (item, _) in &mut self.layout.entries {
             if let GridItem::Column {

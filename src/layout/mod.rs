@@ -1235,17 +1235,16 @@ impl<W: LayoutElement> Layout<W> {
                                 ws.grid_window_close_preserves_move_animations(window);
                             let window_visual_snapshots =
                                 ws.grid_window_visual_snapshots_for_closing_window(window);
-                            if ws.is_grid_overview_open()
-                                && ws.grid_focused_window_id().as_ref() == Some(window)
-                            {
-                                ws.activate_window_from_grid(window);
-                            }
+                            let grid_focus_successor = ws.prepare_grid_focus_for_removal(window);
 
                             let removed = ws.remove_tile(window, transaction);
                             ws.on_window_closed_in_grid(
                                 window_visual_snapshots,
                                 !preserve_move_animations,
                             );
+                            if let Some(id) = grid_focus_successor {
+                                ws.set_grid_focus_for_window(&id);
+                            }
 
                             // Clean up empty workspaces that are not active and not last.
                             if !ws.has_windows_or_name()
@@ -1283,17 +1282,16 @@ impl<W: LayoutElement> Layout<W> {
                             ws.grid_window_close_preserves_move_animations(window);
                         let window_visual_snapshots =
                             ws.grid_window_visual_snapshots_for_closing_window(window);
-                        if ws.is_grid_overview_open()
-                            && ws.grid_focused_window_id().as_ref() == Some(window)
-                        {
-                            ws.activate_window_from_grid(window);
-                        }
+                        let grid_focus_successor = ws.prepare_grid_focus_for_removal(window);
 
                         let removed = ws.remove_tile(window, transaction);
                         ws.on_window_closed_in_grid(
                             window_visual_snapshots,
                             !preserve_move_animations,
                         );
+                        if let Some(id) = grid_focus_successor {
+                            ws.set_grid_focus_for_window(&id);
+                        }
 
                         // Clean up empty workspaces.
                         if !ws.has_windows_or_name() {
