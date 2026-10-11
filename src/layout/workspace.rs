@@ -4166,7 +4166,21 @@ impl<W: LayoutElement> Workspace<W> {
             GridItem::Tab {
                 col_idx, tile_idx, ..
             } => {
-                if source_pos.x < edge {
+                // A minimized window that was alone in a tabbed column (or any minimized window
+                // with tabbed default-column-display) is a tabbed placeholder column. As above,
+                // it must never be merged into.
+                let is_placeholder = self
+                    .scrolling
+                    .columns()
+                    .nth(*col_idx)
+                    .is_some_and(|col| !col.has_visible_tiles());
+                if is_placeholder {
+                    if source_pos.x < source_size.w / 2. {
+                        InsertPosition::NewColumn(*col_idx)
+                    } else {
+                        InsertPosition::NewColumn(col_idx + 1)
+                    }
+                } else if source_pos.x < edge {
                     InsertPosition::NewColumn(*col_idx)
                 } else if source_pos.x > source_size.w - edge {
                     InsertPosition::NewColumn(col_idx + 1)
