@@ -5,9 +5,10 @@ It shows every window as a tile in a grid, letting you quickly navigate between 
 
 Open it with the `toggle-grid-overview` bind, or by tapping the `Mod` key (pressing and releasing it without pressing any other key in between). The `Mod` key tap behavior is built in and works even without an explicit binding, controlled by the `default-mod-action` setting (enabled by default).
 
-While in the grid overview, all keyboard shortcuts keep working.
-Use the arrow keys to navigate between windows.
-If a column contains multiple windows, use Up/Down to switch between them within the same cell.
+While in the grid overview, all keyboard shortcuts keep working, and the focus actions (like `focus-column-left` or `focus-window-down`) move between cells.
+On top of that, <kbd>H</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> without modifiers navigate between windows; bare arrow keys are not built in, they still go to the window.
+If a column contains multiple windows, use <kbd>J</kbd>/<kbd>K</kbd> to switch between them within the same cell.
+<kbd>Return</kbd> activates the selected window, and <kbd>Escape</kbd> closes the grid.
 
 Click a window to activate it and close the grid overview.
 Focusing a window from elsewhere, like a taskbar or `niri msg action focus-window`, does the same.
