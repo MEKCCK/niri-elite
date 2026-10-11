@@ -542,6 +542,7 @@ binds {
     Mod+Alt+WheelScrollDown { adjust-magnifier-zoom -0.2; }
 
     Mod+Q repeat=false { close-window; }
+    Alt+F4 repeat=false { close-window; }
     Mod+N repeat=false { minimize-window; }
 
     Mod+Left  { focus-column-left; }
