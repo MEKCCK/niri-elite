@@ -1115,6 +1115,20 @@ impl<W: LayoutElement> GridLayout<W> {
             rows = n.div_ceil(cols);
         }
 
+        // A gap too large for the grid would leave the cells with negative sizes, and the windows
+        // with negative scales. Shrink it so every cell keeps at least a pixel.
+        let max_gap = |content: f64, count: usize| {
+            if count > 1 {
+                (content - count as f64) / (count - 1) as f64
+            } else {
+                f64::INFINITY
+            }
+        };
+        let gap = gap
+            .min(max_gap(content_w, cols))
+            .min(max_gap(content_h, rows))
+            .max(0.);
+
         let cell_w = (content_w - gap * (cols as f64 - 1.)) / cols as f64;
         let cell_h = (content_h - gap * (rows as f64 - 1.)) / rows as f64;
         let cell_ar = cell_w / cell_h;

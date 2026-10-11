@@ -5424,6 +5424,34 @@ fn grid_reflows_when_a_window_goes_fullscreen_out_of_its_column() {
 }
 
 #[test]
+fn grid_with_a_gap_too_large_keeps_positive_sizes() {
+    let options = Options {
+        grid_overview: niri_config::GridOverview {
+            gap: 5000.,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=9 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    ops.push(Op::ToggleGridOverview);
+    let layout = check_ops_with_options(options, ops);
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    for (_, info) in &go.layout.entries {
+        assert!(info.target_scale > 0., "{info:?}");
+        assert!(
+            info.target_size.w > 0. && info.target_size.h > 0.,
+            "{info:?}"
+        );
+    }
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
