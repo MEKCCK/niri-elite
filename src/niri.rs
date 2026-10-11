@@ -36,8 +36,6 @@ use smithay::backend::renderer::element::{
     RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
-#[cfg(feature = "xdp-gnome-screencast")]
-use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::Color32F;
 use smithay::desktop::utils::{
@@ -2292,19 +2290,10 @@ impl State {
             })
             .collect();
 
-        self.niri.update_render_elements(Some(&output));
-        let frozen_backdrop = self
-            .backend
-            .with_primary_renderer(|renderer| {
-                self.niri
-                    .capture_screen_cast_picker_backdrop(renderer, &output)
-            })
-            .flatten();
-
         if self
             .niri
             .screen_cast_picker
-            .open(request, output, displays, windows, frozen_backdrop)
+            .open(request, output, displays, windows)
         {
             self.niri.seat.get_pointer().unwrap().unset_grab(
                 self,
@@ -5577,53 +5566,6 @@ impl Niri {
     }
 
     #[cfg(feature = "xdp-gnome-screencast")]
-    fn capture_screen_cast_picker_backdrop(
-        &self,
-        renderer: &mut GlesRenderer,
-        output: &Output,
-    ) -> Option<[TextureBuffer<GlesTexture>; 3]> {
-        let mode = output.current_mode()?;
-        let size = output.current_transform().transform_size(mode.size);
-        let scale = Scale::from(output.current_scale().fractional_scale());
-        let targets = [
-            RenderTarget::Output,
-            RenderTarget::Screencast,
-            RenderTarget::ScreenCapture,
-        ];
-        let buffers = targets.map(|target| {
-            let ctx = RenderCtx {
-                renderer: &mut *renderer,
-                target,
-                intent: RenderIntent::Normal,
-                xray: None,
-            };
-            let elements = self.render_to_vec(ctx, output, false);
-            let result = render_to_texture(
-                renderer,
-                size,
-                scale,
-                Transform::Normal,
-                Fourcc::Abgr8888,
-                elements.iter().rev(),
-            );
-            if let Err(err) = &result {
-                warn!(
-                    "error capturing screen cast picker backdrop for {}: {err:?}",
-                    output.name()
-                );
-            }
-            result.ok().map(|(texture, _)| {
-                TextureBuffer::from_texture(renderer, texture, scale, Transform::Normal, Vec::new())
-            })
-        });
-
-        if buffers.iter().any(Option::is_none) {
-            return None;
-        }
-        Some(buffers.map(Option::unwrap))
-    }
-
-    #[cfg(feature = "xdp-gnome-screencast")]
     fn refresh_screen_cast_picker_display_previews(
         &self,
         renderer: &mut GlesRenderer,
@@ -5954,13 +5896,10 @@ impl Niri {
         if self.screen_cast_picker.is_visible()
             && should_render_screen_cast_picker(_rendering_output, ctx.intent)
         {
-            let frozen = self
-                .screen_cast_picker
+            // Render the picker on top of the live output contents, so that the background
+            // keeps updating while the picker is open.
+            self.screen_cast_picker
                 .render(self, output, ctx.r(), &mut |elem| push(elem.into()));
-            if frozen {
-                push(backdrop);
-                return;
-            }
         }
 
         // Draw the hotkey overlay on top.
@@ -6802,11 +6741,13 @@ impl Niri {
         for mapped in self.layout.windows_for_output_mut(output) {
             #[cfg(feature = "xdp-gnome-screencast")]
             if picker_display_preview || picker_window_previews.contains(&mapped.id().get()) {
+                // Surfaces visible behind the picker keep their regular frame callbacks, while
+                // ones visible only in previews are throttled to the preview interval.
                 mapped.send_frame(
                     output,
                     frame_callback_time,
                     Some(PREVIEW_FRAME_INTERVAL),
-                    |_, _| None,
+                    should_send,
                 );
                 continue;
             }
@@ -6851,7 +6792,7 @@ impl Niri {
                     output,
                     frame_callback_time,
                     Some(PREVIEW_FRAME_INTERVAL),
-                    |_, _| None,
+                    should_send,
                 );
                 continue;
             }

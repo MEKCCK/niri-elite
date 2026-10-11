@@ -293,12 +293,6 @@ mod enabled {
         }
     }
 
-    struct FrozenBackdrop {
-        output: WeakOutput,
-        // Output, screencast and screen capture variants.
-        buffers: [TextureBuffer<GlesTexture>; 3],
-    }
-
     pub struct DisplayPreviewRequest {
         pub name: String,
         pub size: Size<f64, Logical>,
@@ -361,7 +355,6 @@ mod enabled {
         display_previews: RefCell<HashMap<String, DisplayPreview>>,
         display_preview_last_refresh: Cell<Option<Duration>>,
         window_previews: RefCell<WindowPreviewCache>,
-        frozen_backdrop: RefCell<Option<FrozenBackdrop>>,
         transition_buffers: [OffscreenBuffer; 3],
         clock: Clock,
         config: Rc<RefCell<Config>>,
@@ -386,7 +379,6 @@ mod enabled {
                 display_previews: RefCell::new(HashMap::new()),
                 display_preview_last_refresh: Cell::new(None),
                 window_previews: RefCell::new(WindowPreviewCache::default()),
-                frozen_backdrop: RefCell::new(None),
                 transition_buffers: [
                     OffscreenBuffer::default(),
                     OffscreenBuffer::default(),
@@ -555,7 +547,6 @@ mod enabled {
             output: Output,
             displays: Vec<PickerCandidate>,
             windows: Vec<PickerCandidate>,
-            frozen_backdrop: Option<[TextureBuffer<GlesTexture>; 3]>,
         ) -> bool {
             if self.is_visible() {
                 request.fail("screen cast picker is already open");
@@ -601,11 +592,6 @@ mod enabled {
                 messages: messages_from_env(),
             };
             self.clear_caches();
-            self.frozen_backdrop
-                .replace(frozen_backdrop.map(|buffers| FrozenBackdrop {
-                    output: output.downgrade(),
-                    buffers,
-                }));
             self.state = PickerUiState::Open {
                 picker,
                 animation: Some(self.animation(0., 1.)),
@@ -835,29 +821,29 @@ mod enabled {
             true
         }
 
+        /// Renders the picker on top of the regular, live output contents.
         pub fn render<R: NiriRenderer>(
             &self,
             niri: &Niri,
             output: &Output,
             mut ctx: RenderCtx<R>,
             push: &mut dyn FnMut(ScreenCastPickerRenderElement<R>),
-        ) -> bool {
+        ) {
             let Some(state) = self.state.visible() else {
-                return false;
+                return;
             };
             let Some(host_output) = state.output.upgrade() else {
-                return false;
+                return;
             };
-            let target = ctx.target;
             let variant = PickerRenderVariant::from_target(ctx.target);
             let progress = self.state.progress() as f32;
             if progress <= 0. {
-                return self.render_frozen_backdrop(output, target, push);
+                return;
             }
 
             if host_output != *output || progress >= 1. {
                 self.render_contents(niri, output, ctx, progress, push);
-                return self.render_frozen_backdrop(output, target, push);
+                return;
             }
 
             let scale = output.current_scale().fractional_scale();
@@ -887,36 +873,6 @@ mod enabled {
                     );
                 }
             }
-            self.render_frozen_backdrop(output, target, push)
-        }
-
-        fn render_frozen_backdrop<R: NiriRenderer>(
-            &self,
-            output: &Output,
-            target: RenderTarget,
-            push: &mut dyn FnMut(ScreenCastPickerRenderElement<R>),
-        ) -> bool {
-            let backdrop = self.frozen_backdrop.borrow();
-            let Some(backdrop) = backdrop.as_ref() else {
-                return false;
-            };
-            if backdrop.output.upgrade().as_ref() != Some(output) {
-                return false;
-            }
-
-            let index = PickerRenderVariant::from_target(target) as usize;
-            let element = TextureRenderElement::from_texture_buffer(
-                backdrop.buffers[index].clone(),
-                Point::new(0., 0.),
-                1.,
-                None,
-                Some(output_size(output)),
-                Kind::Unspecified,
-            );
-            push(ScreenCastPickerRenderElement::<R>::Texture(
-                PrimaryGpuTextureRenderElement(element),
-            ));
-            true
         }
 
         fn render_contents<R: NiriRenderer>(
@@ -1300,7 +1256,6 @@ mod enabled {
             self.display_previews.borrow_mut().clear();
             self.display_preview_last_refresh.set(None);
             self.window_previews.borrow_mut().clear();
-            self.frozen_backdrop.borrow_mut().take();
             for buffer in &self.transition_buffers {
                 buffer.clear();
             }
