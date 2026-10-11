@@ -4386,7 +4386,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.set_fullscreen(id, is_fullscreen);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
@@ -4404,7 +4406,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.toggle_fullscreen(id);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
@@ -4445,7 +4449,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.set_maximized(id, maximize);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
@@ -4560,7 +4566,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.toggle_maximized(id);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }

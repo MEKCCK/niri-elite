@@ -1045,6 +1045,16 @@ impl<W: LayoutElement> Workspace<W> {
         self.set_grid_window_transition_starts(window_visual_snapshots, rearrange_restarted);
     }
 
+    /// Refreshes the open grid for a layout change that keeps the grid focus, like a window
+    /// going fullscreen out of a multi-window column into a column of its own.
+    pub(super) fn refresh_grid_overview_layout(&mut self, snapshots: Vec<GridWindowVisual<W>>) {
+        if !self.is_grid_overview_open() {
+            return;
+        }
+        let rearrange_restarted = self.recompute_grid_overview_layout(true);
+        self.set_grid_window_transition_starts(snapshots, rearrange_restarted);
+    }
+
     pub fn refresh_grid_entry_positions(&mut self) {
         let positions: Vec<_> = {
             let go = match &self.grid_overview {

@@ -5387,6 +5387,43 @@ fn grid_move_to_workspace_by_window_id_moves_it() {
 }
 
 #[test]
+fn grid_reflows_when_a_window_goes_fullscreen_out_of_its_column() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ConsumeOrExpelWindowLeft { id: None },
+        Op::AddWindow {
+            params: TestWindowParams::new(4),
+        },
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    layout.focus_column_last();
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+
+    // Window 3 asks to go fullscreen, which moves it into a column of its own.
+    layout.set_fullscreen(&3, true);
+    layout.verify_invariants();
+    assert_eq!(
+        scrolling_column_ids(&layout),
+        vec![vec![1], vec![2], vec![3], vec![4]]
+    );
+
+    // The grid used to keep its three cells until some window committed.
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert_eq!(go.layout.entries.len(), 4);
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
