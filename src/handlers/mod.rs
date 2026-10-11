@@ -539,9 +539,13 @@ impl ForeignToplevelHandler for State {
     fn activate(&mut self, wl_surface: WlSurface) {
         if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
+            // In the grid overview, activating a window picks its cell: the grid closes and the
+            // window is activated, restored first if it was minimized.
+            if self.niri.layout.confirm_grid_selection_for_window(&window) {
+                self.maybe_warp_cursor_to_focus();
             // Activating a minimized window restores it first. This makes taskbars that only know
             // how to send activate work with minimized windows.
-            if self.niri.layout.is_window_minimized(&window) {
+            } else if self.niri.layout.is_window_minimized(&window) {
                 self.unminimize_window(&window, true);
             } else {
                 self.niri.layout.activate_window(&window);

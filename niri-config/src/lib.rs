@@ -731,6 +731,21 @@ mod tests {
     }
 
     #[test]
+    fn grid_overview_minimized_highlight_on_overrides_earlier_off() {
+        // Like an included file turning it off, then a later one turning it back on.
+        let off = Config::parse_mem("grid-overview { minimized-highlight { off; }; }").unwrap();
+        let on = GridMinimizedHighlightPart {
+            on: true,
+            ..Default::default()
+        };
+
+        let mut highlight = off.grid_overview.minimized_highlight;
+        assert!(highlight.off);
+        highlight.merge_with(&on);
+        assert!(!highlight.off);
+    }
+
+    #[test]
     fn grid_overview_grid_all_monitors_parses() {
         let config = Config::parse_mem(
             r#"

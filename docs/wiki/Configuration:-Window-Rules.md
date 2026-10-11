@@ -509,8 +509,12 @@ Keep a floating window out of the grid overview. The window stays visible in its
 position and can still be clicked, but it does not become a grid item and is not selected by grid
 navigation.
 
+While the grid is open, the window gets all its input as usual: middle click, the scroll wheel
+and keys like Return, Escape and hjkl go to the window instead of driving the grid.
+
 This only applies to floating windows. Tiled windows keep their normal grid behavior even if this
-rule matches them.
+rule matches them. A minimized window gets a grid cell regardless, since the grid is where it can
+be seen and restored.
 
 ```kdl
 // Keep short-lived notification-style windows out of the grid overview.

@@ -106,6 +106,19 @@ pub struct GridOverview<W: LayoutElement> {
     pub(super) progress: Option<OverviewProgress>,
     pub layout: GridLayout<W>,
     pub focus: (usize, usize),
+    /// Whether `focus` is only the first cell because nothing else was there to focus.
+    ///
+    /// This is the case when the grid opens while the active window has no cell (it is an
+    /// `ignore-grid-overview` floating window, or every window is minimized) and the focus hasn't
+    /// moved since. Closing the grid then must not activate that arbitrary first cell.
+    pub(super) focus_is_fallback: bool,
+    /// The window that `focus` is on.
+    ///
+    /// The scrolling layout changes underneath the grid (a column to the left closes, the grid
+    /// reflows to another column count), so `focus` alone, a cell position, would end up on a
+    /// different window. After every layout recompute, `focus` is moved back to this window's
+    /// cell.
+    pub(super) focused_window: Option<W::Id>,
     pub saved_active_window_id: Option<W::Id>,
     pub saved_view_offset: f64,
     pub entry_positions: Vec<(GridItem<W>, Point<f64, Logical>)>,
@@ -130,8 +143,9 @@ pub struct GridOverview<W: LayoutElement> {
     /// They live here rather than on the tiles because they are sized in screen space: a marker
     /// that scaled with the cell would get thinner the more windows the grid shows.
     minimized_highlights: Vec<MinimizedHighlight<W>>,
-    /// col_idx → tile_idx for Column items that have multiple tiles.
-    pub column_tile_focus: Vec<(usize, usize)>,
+    /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
+    /// tile, so that the choice can follow its column when column indices shift.
+    pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
     pub clock: Clock,
     pub options: Rc<Options>,
 }
@@ -143,6 +157,8 @@ impl<W: LayoutElement> GridOverview<W> {
             progress: None,
             layout: GridLayout::empty(),
             focus: (0, 0),
+            focus_is_fallback: false,
+            focused_window: None,
             saved_active_window_id: None,
             saved_view_offset: 0.,
             entry_positions: Vec::new(),
@@ -237,6 +253,11 @@ impl<W: LayoutElement> GridOverview<W> {
     ) -> bool {
         let old_layout = self.layout.clone();
         let new_layout = GridLayout::compute(items, area, &self.options.grid_overview);
+        let new_ids: Vec<_> = new_layout
+            .entries
+            .iter()
+            .map(|(item, _)| item.window_id().clone())
+            .collect();
         let progress_value = self.progress_value();
         let rearrange_value = self.rearrange_anim.as_ref().map(|anim| anim.value());
         let opening_retarget_value = if self.open
@@ -255,10 +276,19 @@ impl<W: LayoutElement> GridOverview<W> {
         let should_rearrange = self.open && (!old_layout.entries.is_empty() || restart_rearrange);
         let targets_changed = old_layout.entries.len() != new_layout.entries.len()
             || new_layout.entries.iter().any(|(item, info)| {
-                Self::matching_value(&old_layout.entries, item)
+                Self::matching_old_value(&old_layout.entries, item, &new_ids)
                     .is_none_or(|old_info| !old_info.same_target(info))
             });
-        let restart_rearrange = should_rearrange && restart_rearrange && targets_changed;
+        // Retargeting a running animation extrapolates its start point by 1 / (1 - value). Late in
+        // the animation, and past its end with an underdamped spring, that blows up the rest of
+        // the movement, overshoot included, or makes the cell jump. Restart from the current
+        // visual state there instead.
+        let late_to_retarget = rearrange_value
+            .or(opening_retarget_value)
+            .is_some_and(|value| value > 0.9);
+        let restart_rearrange =
+            should_rearrange && (restart_rearrange || late_to_retarget) && targets_changed;
+        let opening_retarget_value = opening_retarget_value.filter(|_| !restart_rearrange);
         if restart_rearrange {
             self.rearrange_anim = Some(Animation::new(
                 self.clock.clone(),
@@ -271,8 +301,9 @@ impl<W: LayoutElement> GridOverview<W> {
         self.layout = new_layout;
         let mut new_entries = Vec::new();
         for (item, info) in &self.layout.entries {
-            let old_info = Self::matching_value(&old_layout.entries, item);
-            let entry_pos = Self::matching_value(&self.entry_positions, item).copied();
+            let old_info = Self::matching_old_value(&old_layout.entries, item, &new_ids);
+            let entry_pos =
+                Self::matching_old_value(&self.entry_positions, item, &new_ids).copied();
             let position_target_unchanged =
                 old_info.is_some_and(|old_info| old_info.same_position_target(info));
             let current_pos = match (rearrange_value, entry_pos, old_info) {
@@ -304,17 +335,26 @@ impl<W: LayoutElement> GridOverview<W> {
         self.entry_positions = new_entries;
         let mut new_scales = Vec::new();
         for (item, info) in &self.layout.entries {
-            let old_info = Self::matching_value(&old_layout.entries, item);
-            let entry_scale = Self::matching_value(&self.entry_scales, item).copied();
+            let old_info = Self::matching_old_value(&old_layout.entries, item, &new_ids);
+            let entry_scale = Self::matching_old_value(&self.entry_scales, item, &new_ids).copied();
             let scale_target_unchanged =
                 old_info.is_some_and(|old_info| old_info.same_scale_target(info));
+            // Like entry_visual_transform(), which this must match: the scale doesn't overshoot.
+            let lerp_scale = |entry: f64, target: f64, value: f64| {
+                let scale = entry + (target - entry) * value;
+                if target < entry {
+                    scale.max(target)
+                } else {
+                    scale.min(target)
+                }
+            };
             let current_scale = match (rearrange_value, entry_scale, old_info) {
                 (Some(value), Some(entry), Some(old_info)) => {
-                    entry + (old_info.target_scale - entry) * value
+                    lerp_scale(entry, old_info.target_scale, value)
                 }
                 (_, entry, Some(old_info)) if self.open => {
                     let entry = entry.unwrap_or(1.);
-                    entry + (old_info.target_scale - entry) * progress_value
+                    lerp_scale(entry, old_info.target_scale, progress_value)
                 }
                 _ => entry_scale
                     .or_else(|| old_info.map(|old_info| old_info.target_scale))
@@ -342,7 +382,7 @@ impl<W: LayoutElement> GridOverview<W> {
         self.entry_scales = new_scales;
         let mut new_focus_boosts = Vec::new();
         for (item, _) in &self.layout.entries {
-            let boost = Self::matching_value(&self.focus_boosts, item)
+            let boost = Self::matching_old_value(&self.focus_boosts, item, &new_ids)
                 .copied()
                 .unwrap_or(1.);
             new_focus_boosts.push((item.clone(), boost));
@@ -356,6 +396,28 @@ impl<W: LayoutElement> GridOverview<W> {
         }
 
         restart_rearrange
+    }
+
+    /// Like [`Self::matching_value`], for matching new layout items against old state.
+    ///
+    /// A column whose shown window changed has no identity match, so it falls back to the old
+    /// entry at the same column index. That fallback only takes old entries whose window is gone
+    /// from the new layout: otherwise a column inserted in the middle would take over the old
+    /// state of the column that was at its index and still exists further along.
+    fn matching_old_value<'a, T>(
+        entries: &'a [(GridItem<W>, T)],
+        item: &GridItem<W>,
+        new_ids: &[W::Id],
+    ) -> Option<&'a T> {
+        entries
+            .iter()
+            .find(|(entry, _)| entry.same_animation_identity(item))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|(entry, _)| entry == item && !new_ids.contains(entry.window_id()))
+            })
+            .map(|(_, value)| value)
     }
 
     fn matching_value<'a, T>(entries: &'a [(GridItem<W>, T)], item: &GridItem<W>) -> Option<&'a T> {
@@ -554,6 +616,7 @@ impl<W: LayoutElement> GridOverview<W> {
         if self.focus == focus {
             return;
         }
+        self.focus_is_fallback = false;
 
         let old_focus = self.focus;
         if self.open {
@@ -608,6 +671,7 @@ impl<W: LayoutElement> GridOverview<W> {
         if self.focus == focus {
             return;
         }
+        self.focus_is_fallback = false;
 
         self.focus = focus;
         self.previous_focus = None;
@@ -645,25 +709,34 @@ impl<W: LayoutElement> GridOverview<W> {
     pub fn get_column_tile_focus(&self, col_idx: usize) -> usize {
         self.column_tile_focus
             .iter()
-            .find(|(c, _)| *c == col_idx)
-            .map(|(_, t)| *t)
+            .find(|(c, _, _)| *c == col_idx)
+            .map(|(_, t, _)| *t)
             .unwrap_or(0)
     }
 
     fn set_column_tile_focus_raw(&mut self, col_idx: usize, tile_idx: usize) {
+        self.focus_is_fallback = false;
         if let Some(entry) = self
             .column_tile_focus
             .iter_mut()
-            .find(|(c, _)| *c == col_idx)
+            .find(|(c, _, _)| *c == col_idx)
         {
             entry.1 = tile_idx;
+            entry.2 = None;
         } else {
-            self.column_tile_focus.push((col_idx, tile_idx));
+            self.column_tile_focus.push((col_idx, tile_idx, None));
         }
     }
 
     pub fn set_column_tile_focus(&mut self, col_idx: usize, tile_idx: usize, window_id: W::Id) {
         self.set_column_tile_focus_raw(col_idx, tile_idx);
+        if let Some(entry) = self
+            .column_tile_focus
+            .iter_mut()
+            .find(|(c, _, _)| *c == col_idx)
+        {
+            entry.2 = Some(window_id.clone());
+        }
         // Update the window_id in the layout entry.
         for (item, _) in &mut self.layout.entries {
             if let GridItem::Column {
@@ -739,18 +812,35 @@ impl<W: LayoutElement> GridOverview<W> {
             }
         }
 
-        // Cross-cell movement.
+        // Cross-cell movement. Up and down go to the cell in that row whose center is closest
+        // horizontally: a shorter last row is centered, so its cells don't sit under the same
+        // column indices of the rows above.
+        let closest_in_row = |target_row: usize| {
+            let center_x = |info: &GridEntryInfo| info.target_pos.x + info.target_size.w / 2.;
+            let current = self.layout.entries.get(row * self.layout.cols + col)?;
+            let current_x = center_x(&current.1);
+            self.layout
+                .entries
+                .iter()
+                .filter(|(_, info)| info.row == target_row)
+                .min_by(|(_, a), (_, b)| {
+                    let da = (center_x(a) - current_x).abs();
+                    let db = (center_x(b) - current_x).abs();
+                    da.total_cmp(&db)
+                })
+                .map(|(_, info)| (info.row, info.col))
+        };
         let mut new_focus = match dir {
             GridDirection::Up => {
                 if row > 0 {
-                    (row - 1, col)
+                    closest_in_row(row - 1).unwrap_or((row - 1, col))
                 } else {
                     (row, col)
                 }
             }
             GridDirection::Down => {
                 if row + 1 < self.layout.rows {
-                    (row + 1, col)
+                    closest_in_row(row + 1).unwrap_or((row + 1, col))
                 } else {
                     (row, col)
                 }
@@ -920,6 +1010,10 @@ impl<W: LayoutElement> GridOverview<W> {
         }
     }
 
+    pub(super) fn clear_added_windows(&mut self) {
+        self.added_window_ids.clear();
+    }
+
     pub(super) fn window_was_added_while_open(&self, id: &W::Id) -> bool {
         self.added_window_ids.contains(id)
     }
@@ -1083,6 +1177,20 @@ impl<W: LayoutElement> GridLayout<W> {
             cols -= 1;
             rows = n.div_ceil(cols);
         }
+
+        // A gap too large for the grid would leave the cells with negative sizes, and the windows
+        // with negative scales. Shrink it so every cell keeps at least a pixel.
+        let max_gap = |content: f64, count: usize| {
+            if count > 1 {
+                (content - count as f64) / (count - 1) as f64
+            } else {
+                f64::INFINITY
+            }
+        };
+        let gap = gap
+            .min(max_gap(content_w, cols))
+            .min(max_gap(content_h, rows))
+            .max(0.);
 
         let cell_w = (content_w - gap * (cols as f64 - 1.)) / cols as f64;
         let cell_h = (content_h - gap * (rows as f64 - 1.)) / rows as f64;

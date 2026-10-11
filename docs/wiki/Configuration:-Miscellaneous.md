@@ -349,6 +349,33 @@ grid-overview {
 }
 ```
 
+#### `min-scale`
+
+<sup>Since: 26.04 (fork)</sup>
+
+The smallest a window preview may get along its short side, as a fraction of its cell.
+Very wide or very tall windows are scaled to fit their cell, which would make them a thin strip; this keeps them at least this thick.
+Ranges from 0 to 1, and defaults to 0.08.
+
+```kdl
+grid-overview {
+    min-scale 0.15
+}
+```
+
+#### `grid-all-monitors`
+
+<sup>Since: 26.04 (fork)</sup>
+
+When `true` (the default), the Grid Overview opens and closes on all monitors at once, and a monitor connected while it is open joins it.
+Set this to `false` to open it only on the focused monitor; each monitor then has its own grid, and mouse input such as the scroll wheel, middle click and hot corners acts on the monitor under the pointer.
+
+```kdl
+grid-overview {
+    grid-all-monitors false
+}
+```
+
 #### `focused-column-scale`
 
 Scale the focused column relative to its cell.
@@ -387,7 +414,7 @@ grid-overview {
 
 `color` takes any CSS color, so these all give the same 70% grey: `"#999999b3"`, `"rgba(153, 153, 153, 0.7)"`, or the unquoted 4-argument RGBA form `color 153 153 153 179`.
 
-Use `off` to remove the marker:
+Use `off` to remove the marker, and `on` to bring it back when an earlier (for example `include`d) config turned it off:
 
 ```kdl
 grid-overview {

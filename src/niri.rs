@@ -1175,7 +1175,11 @@ impl State {
     pub fn focus_window(&mut self, window: &Window) {
         let active_output = self.niri.layout.active_output().cloned();
 
-        self.niri.layout.activate_window(window);
+        // A window shown in the grid overview is focused like picking its cell there: the grid
+        // closes and the window is activated.
+        if !self.niri.layout.confirm_grid_selection_for_window(window) {
+            self.niri.layout.activate_window(window);
+        }
 
         let new_active = self.niri.layout.active_output().cloned();
         if new_active != active_output {
@@ -3035,7 +3039,7 @@ impl Niri {
         }
     }
 
-    fn screen_cast_picker_is_visible(&self) -> bool {
+    pub(crate) fn screen_cast_picker_is_visible(&self) -> bool {
         #[cfg(feature = "xdp-gnome-screencast")]
         {
             self.screen_cast_picker.is_visible()
@@ -3994,10 +3998,19 @@ impl Niri {
         None
     }
 
-    pub fn trigger_hot_corner(&mut self, action: HotCornerAction) {
+    pub fn trigger_hot_corner(&mut self, action: HotCornerAction, output: Option<&Output>) {
         match action {
             HotCornerAction::Overview => self.layout.toggle_overview(),
-            HotCornerAction::GridOverview => self.layout.toggle_grid_overview(),
+            HotCornerAction::GridOverview => {
+                // Without grid-all-monitors, the grid toggles on the active monitor, so make that
+                // the monitor whose hot corner was hit.
+                if !self.config.borrow().grid_overview.grid_all_monitors {
+                    if let Some(output) = output {
+                        self.layout.focus_output(output);
+                    }
+                }
+                self.layout.toggle_grid_overview();
+            }
         }
     }
 
@@ -8619,7 +8632,12 @@ impl Niri {
         }
 
         if let Some(window) = &new_focus.window {
-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
+            // Like in the overview, hovering grid cells doesn't focus them: that would activate
+            // windows behind the grid without the grid focus following.
+            if !self.layout.is_overview_open()
+                && !self.layout.window_is_in_open_grid_overview(&window.0)
+                && current_focus.window.as_ref() != Some(window)
+            {
                 let (window, hit) = window;
 
                 // Don't trigger focus-follows-mouse over the tab indicator.

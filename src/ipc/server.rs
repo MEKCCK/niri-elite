@@ -735,10 +735,11 @@ impl State {
         let mut batch_change_layouts: Vec<(u64, WindowLayout)> = Vec::new();
 
         // While the grid overview is open, report the grid-focused window as focused so that
-        // IPC consumers (e.g. waybar's focused-window title) follow the selection.
+        // IPC consumers (e.g. waybar's focused-window title) follow the selection. The layout
+        // focus is that, or an ignore-grid-overview window that the user clicked.
         let grid_focused_window = (self.niri.keyboard_focus.is_layout()
             && layout.is_grid_overview_open())
-        .then(|| layout.grid_focused_window_id())
+        .then(|| layout.focus().map(|mapped| mapped.window.clone()))
         .flatten();
 
         // Check for window changes.

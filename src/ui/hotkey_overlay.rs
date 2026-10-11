@@ -511,26 +511,8 @@ fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
 
     // Compositor mod goes first.
     if has_comp_mod {
-        match mod_key {
-            ModKey::Super => {
-                name.push_str("Super + ");
-            }
-            ModKey::Alt => {
-                name.push_str("Alt + ");
-            }
-            ModKey::Shift => {
-                name.push_str("Shift + ");
-            }
-            ModKey::Ctrl => {
-                name.push_str("Ctrl + ");
-            }
-            ModKey::IsoLevel3Shift => {
-                name.push_str("Mod5 + ");
-            }
-            ModKey::IsoLevel5Shift => {
-                name.push_str("Mod3 + ");
-            }
-        }
+        name.push_str(mod_key_name(mod_key));
+        name.push_str(" + ");
     }
 
     if key.modifiers.contains(Modifiers::SUPER) && !(has_comp_mod && mod_key == ModKey::Super) {
@@ -571,7 +553,7 @@ fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
         Trigger::TouchpadScrollUp => String::from("Touchpad Scroll Up"),
         Trigger::TouchpadScrollLeft => String::from("Touchpad Scroll Left"),
         Trigger::TouchpadScrollRight => String::from("Touchpad Scroll Right"),
-        Trigger::Modifier(modifier) => modifier_trigger_name(modifier),
+        Trigger::Modifier(modifier) => modifier_trigger_name(mod_key, modifier),
         Trigger::TabletStylusButton1 => String::from("Tablet Stylus Button 1"),
         Trigger::TabletStylusButton2 => String::from("Tablet Stylus Button 2"),
         Trigger::TabletStylusButton3 => String::from("Tablet Stylus Button 3"),
@@ -581,8 +563,23 @@ fn key_name(screen_reader: bool, mod_key: ModKey, key: &Key) -> String {
     name
 }
 
-fn modifier_trigger_name(modifier: Modifiers) -> String {
+fn mod_key_name(mod_key: ModKey) -> &'static str {
+    match mod_key {
+        ModKey::Super => "Super",
+        ModKey::Alt => "Alt",
+        ModKey::Shift => "Shift",
+        ModKey::Ctrl => "Ctrl",
+        ModKey::IsoLevel3Shift => "Mod5",
+        ModKey::IsoLevel5Shift => "Mod3",
+    }
+}
+
+fn modifier_trigger_name(mod_key: ModKey, modifier: Modifiers) -> String {
     let mut parts = Vec::new();
+    // A bare `Mod` bind, like the default grid overview toggle.
+    if modifier.contains(Modifiers::COMPOSITOR) {
+        parts.push(mod_key_name(mod_key));
+    }
     if modifier.contains(Modifiers::SUPER) {
         parts.push("Super");
     }
@@ -665,6 +662,20 @@ mod tests {
         } else {
             String::from("None")
         }
+    }
+
+    #[test]
+    fn bare_mod_bind_is_named_after_the_mod_key() {
+        // This used to show up as "Modifier".
+        assert_snapshot!(
+            check(
+                r#"binds {
+                    Mod { toggle-grid-overview; }
+                }"#,
+                Action::ToggleGridOverview,
+            ),
+            @" Super : Toggle Grid Overview"
+        );
     }
 
     #[test]

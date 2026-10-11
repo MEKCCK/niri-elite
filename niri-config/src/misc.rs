@@ -526,6 +526,8 @@ pub struct GridMinimizedHighlightPart {
     #[knuffel(child)]
     pub off: bool,
     #[knuffel(child)]
+    pub on: bool,
+    #[knuffel(child)]
     pub color: Option<Color>,
     #[knuffel(child)]
     pub urgent_color: Option<Color>,
@@ -538,6 +540,9 @@ pub struct GridMinimizedHighlightPart {
 impl MergeWith<GridMinimizedHighlightPart> for GridMinimizedHighlight {
     fn merge_with(&mut self, part: &GridMinimizedHighlightPart) {
         self.off |= part.off;
+        if part.on {
+            self.off = false;
+        }
         merge_clone!((self, part), color, urgent_color);
         merge!((self, part), padding, corner_radius);
     }
