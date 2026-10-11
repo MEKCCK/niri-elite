@@ -5477,6 +5477,69 @@ fn grid_up_from_a_centered_last_row_goes_to_the_cell_above_it() {
 }
 
 #[test]
+fn grid_retarget_during_spring_overshoot_doesnt_jump() {
+    use niri_config::animations::{Kind, SpringParams};
+
+    use super::grid_overview::{GridItem, GridOverview};
+    use super::OverviewProgress;
+
+    let mut options = Options::default();
+    options.animations.window_movement.0 = niri_config::Animation {
+        off: false,
+        kind: Kind::Spring(SpringParams {
+            damping_ratio: 0.3,
+            stiffness: 800,
+            epsilon: 0.0001,
+        }),
+    };
+    let options = Rc::new(options);
+    let mut clock = Clock::with_time(Duration::ZERO);
+    let mut go = GridOverview::<TestWindow>::new(clock.clone(), options);
+    go.open = true;
+    go.progress = Some(OverviewProgress::Open);
+
+    let area = Rectangle::from_size(Size::from((1000., 1000.)));
+    let items = |sizes: &[f64]| {
+        sizes
+            .iter()
+            .enumerate()
+            .map(|(id, w)| {
+                (
+                    GridItem::Floating { window_id: id + 1 },
+                    Size::from((*w, 300.)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    go.compute_layout(&items(&[300., 300.]), area, true);
+    // A change that starts the rearrange animation.
+    go.compute_layout(&items(&[300., 900.]), area, true);
+
+    // Run the spring into its overshoot.
+    let mut t = Duration::ZERO;
+    while go.rearrange_anim.as_ref().unwrap().value() <= 1.05 {
+        t += Duration::from_millis(1);
+        assert!(t < Duration::from_secs(2), "the spring never overshot");
+        clock.set_unadjusted(t);
+    }
+
+    // The second window is the one whose cell changes.
+    let visual = |go: &GridOverview<TestWindow>| {
+        let (item, info) = &go.layout.entries[1];
+        go.entry_visual_transform(item, info, info.target_pos)
+    };
+    let before = visual(&go);
+
+    // A passive recompute, like a window committing a new size, retargets the running animation.
+    go.compute_layout(&items(&[300., 600.]), area, false);
+    let after = visual(&go);
+
+    approx::assert_abs_diff_eq!(before.0.x, after.0.x, epsilon = 0.5);
+    approx::assert_abs_diff_eq!(before.0.y, after.0.y, epsilon = 0.5);
+    approx::assert_abs_diff_eq!(before.1, after.1, epsilon = 0.001);
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

@@ -274,7 +274,16 @@ impl<W: LayoutElement> GridOverview<W> {
                 Self::matching_value(&old_layout.entries, item)
                     .is_none_or(|old_info| !old_info.same_target(info))
             });
-        let restart_rearrange = should_rearrange && restart_rearrange && targets_changed;
+        // Retargeting a running animation extrapolates its start point by 1 / (1 - value). Late in
+        // the animation, and past its end with an underdamped spring, that blows up the rest of
+        // the movement, overshoot included, or makes the cell jump. Restart from the current
+        // visual state there instead.
+        let late_to_retarget = rearrange_value
+            .or(opening_retarget_value)
+            .is_some_and(|value| value > 0.9);
+        let restart_rearrange =
+            should_rearrange && (restart_rearrange || late_to_retarget) && targets_changed;
+        let opening_retarget_value = opening_retarget_value.filter(|_| !restart_rearrange);
         if restart_rearrange {
             self.rearrange_anim = Some(Animation::new(
                 self.clock.clone(),
@@ -324,13 +333,22 @@ impl<W: LayoutElement> GridOverview<W> {
             let entry_scale = Self::matching_value(&self.entry_scales, item).copied();
             let scale_target_unchanged =
                 old_info.is_some_and(|old_info| old_info.same_scale_target(info));
+            // Like entry_visual_transform(), which this must match: the scale doesn't overshoot.
+            let lerp_scale = |entry: f64, target: f64, value: f64| {
+                let scale = entry + (target - entry) * value;
+                if target < entry {
+                    scale.max(target)
+                } else {
+                    scale.min(target)
+                }
+            };
             let current_scale = match (rearrange_value, entry_scale, old_info) {
                 (Some(value), Some(entry), Some(old_info)) => {
-                    entry + (old_info.target_scale - entry) * value
+                    lerp_scale(entry, old_info.target_scale, value)
                 }
                 (_, entry, Some(old_info)) if self.open => {
                     let entry = entry.unwrap_or(1.);
-                    entry + (old_info.target_scale - entry) * progress_value
+                    lerp_scale(entry, old_info.target_scale, progress_value)
                 }
                 _ => entry_scale
                     .or_else(|| old_info.map(|old_info| old_info.target_scale))
