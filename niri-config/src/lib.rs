@@ -976,6 +976,7 @@ mod tests {
 
                 warp-mouse-to-focus
                 focus-follows-mouse
+                confine-mouse-to-fullscreen
                 workspace-auto-back-and-forth
 
                 mod-key "Mod5"
@@ -1394,6 +1395,7 @@ mod tests {
                         max_scroll_amount: None,
                     },
                 ),
+                confine_mouse_to_fullscreen: true,
                 workspace_auto_back_and_forth: true,
                 mod_key: Some(
                     IsoLevel3Shift,

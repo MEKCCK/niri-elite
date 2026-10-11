@@ -42,6 +42,8 @@ This backdrop helps match the screen size when the window itself remains too sma
 When a fullscreen window is focused and not animating, it will cover floating windows and the top layer-shell layer.
 If you want for example your layer-shell notifications or launcher to appear over fullscreen windows, configure the respective tools to put them on the overlay layer-shell layer.
 
+On multiple monitors, the [`confine-mouse-to-fullscreen`](./Configuration:-Input.md#confine-mouse-to-fullscreen) setting keeps the mouse from leaving a focused fullscreen window for another monitor.
+
 ![Screenshot of a fullscreen window.](./img/fullscreen-window.png)
 
 You can make a window open fullscreen, or prevent a window from fullscreening upon opening, with the [`open-fullscreen`](./Configuration:-Window-Rules.md#open-fullscreen) window rule.

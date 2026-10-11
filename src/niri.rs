@@ -4379,6 +4379,43 @@ impl Niri {
         self.global_space.output_under(pos).next().cloned()
     }
 
+    /// Returns the output that pointer motion from `pos` must stay within, because the focused
+    /// window on it is fullscreen (`confine-mouse-to-fullscreen`).
+    pub fn fullscreen_output_confining_pointer(&self, pos: Point<f64, Logical>) -> Option<Output> {
+        if !self.config.borrow().input.confine_mouse_to_fullscreen {
+            return None;
+        }
+
+        // Compositor UIs and the lock screen may need the pointer on other outputs.
+        if self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.screen_cast_picker_is_visible()
+            || self.exit_confirm_dialog.is_open()
+            || self.window_mru_ui.is_open()
+        {
+            return None;
+        }
+
+        let output = self.global_space.output_under(pos).next()?;
+        if self.layout.active_output() != Some(output) {
+            return None;
+        }
+
+        // A floating window focused above the fullscreen one lets the pointer go.
+        if !self
+            .layout
+            .focus()
+            .is_some_and(|win| win.sizing_mode().is_fullscreen())
+        {
+            return None;
+        }
+
+        // This is the same check that puts the fullscreen window above the top layer: its column
+        // is active and the view is stationary, outside the overview and the grid overview.
+        let mon = self.layout.monitor_for_output(output)?;
+        mon.render_above_top_layer().then(|| output.clone())
+    }
+
     pub fn output_left_of(&self, current: &Output) -> Option<Output> {
         let current_geo = self.global_space.output_geometry(current)?;
         let extended_geo = Rectangle::new(
