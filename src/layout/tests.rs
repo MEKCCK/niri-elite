@@ -5122,6 +5122,44 @@ fn grid_unfocused_new_window_keeps_grid_selection() {
 }
 
 #[test]
+fn grid_reopened_while_closing_starts_from_the_current_state() {
+    let mut layout = three_column_grid_layout(1);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleGridOverview, Op::CompleteAnimations],
+    );
+
+    // Pick window 3 and close the grid; the view scrolls over to it.
+    layout.focus_right();
+    layout.focus_right();
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        Some(3)
+    );
+
+    // Window 2 goes away during the close animation, then the grid opens again.
+    check_ops_on_layout(&mut layout, [Op::CloseWindow(2), Op::ToggleGridOverview]);
+
+    let ws = layout.active_workspace().unwrap();
+    let go = ws.grid_overview().unwrap();
+    // It used to keep the previous session's cells, one for the closed window included.
+    let cells: Vec<_> = go
+        .layout
+        .entries
+        .iter()
+        .map(|(item, _)| *item.window_id())
+        .collect();
+    assert_eq!(cells, vec![1, 3]);
+    assert_eq!(go.saved_active_window_id, Some(3));
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

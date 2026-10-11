@@ -947,6 +947,10 @@ impl<W: LayoutElement> GridOverview<W> {
         }
     }
 
+    pub(super) fn clear_added_windows(&mut self) {
+        self.added_window_ids.clear();
+    }
+
     pub(super) fn window_was_added_while_open(&self, id: &W::Id) -> bool {
         self.added_window_ids.contains(id)
     }

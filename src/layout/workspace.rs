@@ -472,6 +472,25 @@ impl<W: LayoutElement> Workspace<W> {
                     .collect();
                 go.focus_boosts.clear();
                 go.reopen();
+
+                // This is a new grid session: start it from the current layout and active
+                // window, like a fresh open, rather than from the closed session's state.
+                let active_window = self.active_window().map(|w| w.id().clone());
+                let view_offset = self.scrolling.view_pos();
+                let go = self.grid_overview.as_mut().unwrap();
+                go.saved_active_window_id = active_window;
+                go.saved_view_offset = view_offset;
+                go.clear_added_windows();
+                self.recompute_grid_overview_layout(false);
+                let has_cell = self
+                    .active_window()
+                    .is_some_and(|win| self.grid_item_for_window(win.id()).is_some());
+                if has_cell {
+                    self.sync_grid_focus_to_active_window_without_animation();
+                }
+                if let Some(go) = &mut self.grid_overview {
+                    go.focus_is_fallback = !has_cell;
+                }
             } else {
                 let mut go = GridOverview::new(self.clock.clone(), self.options.clone());
                 go.saved_active_window_id = self.active_window().map(|w| w.id().clone());
