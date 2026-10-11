@@ -3877,6 +3877,11 @@ impl<W: LayoutElement> Workspace<W> {
             if let Some(win) = self.windows_mut().find(|win| win.id() == id) {
                 win.set_suspended(false);
             }
+            // A restore while the grid is closing would otherwise let the thumbnail's fade-out
+            // carry on over the restored window, making it vanish and then pop back.
+            if let Some(tile) = self.tiles_mut().find(|tile| tile.window().id() == id) {
+                tile.ensure_alpha_animates_to_1();
+            }
         }
 
         // Keep focus on the side that still has a visible active window.

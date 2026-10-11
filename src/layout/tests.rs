@@ -4883,6 +4883,37 @@ fn activating_minimized_window_without_raising_does_nothing() {
 }
 
 #[test]
+fn window_restored_as_the_grid_closes_doesnt_fade_out() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::MinimizeWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    // An activation request for the minimized window closes the grid, which starts fading the
+    // minimized thumbnails out, then restores the window.
+    layout.activate_window_from_activation(&1);
+    layout.verify_invariants();
+
+    assert!(!layout.is_window_minimized(&1));
+    let tile = layout
+        .active_workspace()
+        .unwrap()
+        .tiles()
+        .find(|tile| tile.window().id() == &1)
+        .unwrap();
+    assert!(tile
+        .alpha_animation
+        .as_ref()
+        .is_none_or(|alpha| alpha.anim.to() == 1.));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
