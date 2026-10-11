@@ -4735,6 +4735,42 @@ fn grid_closing_focused_minimized_cell_moves_focus_without_restoring() {
 }
 
 #[test]
+fn grid_focus_follows_its_window_when_the_grid_reflows() {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=5 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    ops.extend([Op::FocusWindow(5), Op::ToggleGridOverview]);
+    let mut layout = check_ops(ops);
+    assert_eq!(layout.grid_focused_window_id(), Some(5));
+    let cols_before = layout
+        .active_workspace()
+        .unwrap()
+        .grid_overview()
+        .unwrap()
+        .layout
+        .cols;
+
+    // Rotate the output, so the grid reflows to a different column count.
+    let output = layout.outputs().next().unwrap().clone();
+    output.change_current_state(None, Some(Transform::_90), None, None);
+    smithay::desktop::layer_map_for_output(&output).arrange();
+    layout.update_output_size(&output);
+    layout.verify_invariants();
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert_ne!(go.layout.cols, cols_before);
+    let (row, col) = go.focus;
+    assert_eq!(
+        go.layout.entries[row * go.layout.cols + col].0.window_id(),
+        &5
+    );
+    assert_eq!(layout.grid_focused_window_id(), Some(5));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

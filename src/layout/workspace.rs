@@ -1779,6 +1779,10 @@ impl<W: LayoutElement> Workspace<W> {
                 window.set_preferred_scale_transform(self.scale, self.transform);
             }
         }
+
+        // Reflow the grid to the new working area right away (output rotated, a bar shown or
+        // hidden) rather than on some window's next commit.
+        self.recompute_grid_overview_layout(true);
     }
 
     pub fn view_size(&self) -> Size<f64, Logical> {
