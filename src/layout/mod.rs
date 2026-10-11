@@ -6067,6 +6067,15 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn window_is_in_open_grid_overview(&self, id: &W::Id) -> bool {
+        // A window dragged over the grid is out of the layout for the time being, but it is still
+        // a grid window rather than one sitting on top of the grid (like an ignore-grid-overview
+        // one), e.g. the wheel over it should keep switching workspaces.
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == id {
+                return self.is_grid_overview_open_on(&move_.output);
+            }
+        }
+
         self.workspaces()
             .any(|(_, _, ws)| ws.window_is_in_grid_overview(id))
     }
