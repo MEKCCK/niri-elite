@@ -2081,17 +2081,10 @@ impl<W: LayoutElement> Monitor<W> {
                 };
 
             let output_geo = Rectangle::from_size(self.view_size);
-            for (idx, (ws, geo)) in self
-                .workspaces
-                .iter()
-                .zip(self.workspaces_render_geo())
-                .enumerate()
-            {
+            for (ws, geo) in self.workspaces.iter().zip(self.workspaces_render_geo()) {
                 if cull && geo.intersection(output_geo).is_none() {
                     continue;
                 }
-
-                let workspace_focus_ring = focus_ring && idx == self.active_workspace_idx;
 
                 // Macro instead of closure because ws and insert hint have different elem types.
                 macro_rules! push {
@@ -2119,7 +2112,7 @@ impl<W: LayoutElement> Monitor<W> {
                         ws.render_floating(
                             ctx.r(),
                             xray_pos,
-                            workspace_focus_ring,
+                            focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
                             push!(),
                         );
@@ -2128,7 +2121,7 @@ impl<W: LayoutElement> Monitor<W> {
                         ws.render_floating(
                             ctx.r(),
                             xray_pos,
-                            workspace_focus_ring,
+                            focus_ring,
                             RenderLayer::Normal,
                             push!(),
                         );
@@ -2147,7 +2140,7 @@ impl<W: LayoutElement> Monitor<W> {
                         ws.render_scrolling(
                             ctx.r(),
                             xray_pos,
-                            workspace_focus_ring,
+                            focus_ring,
                             RenderLayer::MovingBetweenWorkspaces,
                             push!(),
                         );
@@ -2156,7 +2149,7 @@ impl<W: LayoutElement> Monitor<W> {
                         ws.render_scrolling(
                             ctx.r(),
                             xray_pos,
-                            workspace_focus_ring,
+                            focus_ring,
                             RenderLayer::Normal,
                             push!(),
                         );
