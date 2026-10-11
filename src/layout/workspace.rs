@@ -495,10 +495,10 @@ impl<W: LayoutElement> Workspace<W> {
                 }
 
                 let focus_id = self.active_window().map(|w| w.id().clone());
-                if let Some(ref fid) = focus_id {
-                    if let Some((row, col)) = go.find_grid_index(fid) {
-                        go.focus = (row, col);
-                    }
+                let focus = focus_id.as_ref().and_then(|fid| go.find_grid_index(fid));
+                go.focus_is_fallback = focus.is_none();
+                if let Some(focus) = focus {
+                    go.focus = focus;
                 }
 
                 go.toggle();
@@ -659,9 +659,21 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub(super) fn activate_grid_focused_window_before_close(&mut self) -> bool {
-        let Some(id) = self.grid_focused_window_id() else {
+        if self
+            .grid_overview
+            .as_ref()
+            .is_none_or(|go| go.focus_is_fallback)
+        {
+            return false;
+        }
+        let Some(id) = self.grid_action_window() else {
             return false;
         };
+        // Closing the grid only confirms ordinary windows. Restoring a minimized one takes an
+        // explicit confirmation, like Return or a click.
+        if self.has_minimized_window(&id) {
+            return false;
+        }
 
         if !self.set_grid_focus_for_window(&id) {
             return false;
@@ -1249,6 +1261,9 @@ impl<W: LayoutElement> Workspace<W> {
         let Some(item) = self.grid_item_for_window(id) else {
             return false;
         };
+        if let Some(go) = &mut self.grid_overview {
+            go.focus_is_fallback = false;
+        }
 
         let column_tile_focus = if let GridItem::Column { col_idx, .. } = &item {
             self.scrolling

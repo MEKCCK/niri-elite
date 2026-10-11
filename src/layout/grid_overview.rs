@@ -106,6 +106,12 @@ pub struct GridOverview<W: LayoutElement> {
     pub(super) progress: Option<OverviewProgress>,
     pub layout: GridLayout<W>,
     pub focus: (usize, usize),
+    /// Whether `focus` is only the first cell because nothing else was there to focus.
+    ///
+    /// This is the case when the grid opens while the active window has no cell (it is an
+    /// `ignore-grid-overview` floating window, or every window is minimized) and the focus hasn't
+    /// moved since. Closing the grid then must not activate that arbitrary first cell.
+    pub(super) focus_is_fallback: bool,
     pub saved_active_window_id: Option<W::Id>,
     pub saved_view_offset: f64,
     pub entry_positions: Vec<(GridItem<W>, Point<f64, Logical>)>,
@@ -143,6 +149,7 @@ impl<W: LayoutElement> GridOverview<W> {
             progress: None,
             layout: GridLayout::empty(),
             focus: (0, 0),
+            focus_is_fallback: false,
             saved_active_window_id: None,
             saved_view_offset: 0.,
             entry_positions: Vec::new(),
@@ -554,6 +561,7 @@ impl<W: LayoutElement> GridOverview<W> {
         if self.focus == focus {
             return;
         }
+        self.focus_is_fallback = false;
 
         let old_focus = self.focus;
         if self.open {
@@ -608,6 +616,7 @@ impl<W: LayoutElement> GridOverview<W> {
         if self.focus == focus {
             return;
         }
+        self.focus_is_fallback = false;
 
         self.focus = focus;
         self.previous_focus = None;
@@ -651,6 +660,7 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     fn set_column_tile_focus_raw(&mut self, col_idx: usize, tile_idx: usize) {
+        self.focus_is_fallback = false;
         if let Some(entry) = self
             .column_tile_focus
             .iter_mut()

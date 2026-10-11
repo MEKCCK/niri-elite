@@ -14,7 +14,8 @@ Click a window to activate it and close the grid overview.
 ### Minimized windows
 
 The grid overview is where [minimized windows](./Configuration:-Key-Bindings.md#minimize-window) live: a minimized window keeps its place in the layout and only shows up here, as a cell marked with a colored frame.
-Activating that cell restores the window.
+Activating that cell (<kbd>Return</kbd> or a click) restores the window.
+Closing the grid while a minimized cell is selected leaves it minimized.
 
 Minimized cells count as normal cells for navigation *and* for moving:
 moving a window with `move-column-left`/`move-column-right` steps onto the minimized cell instead of jumping over it, and moving a minimized cell itself reorders it without restoring it.

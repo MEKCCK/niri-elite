@@ -6721,6 +6721,123 @@ fn grid_width_actions_during_drag_do_nothing() {
     layout.verify_invariants();
 }
 
+fn minimized_ids(layout: &Layout<TestWindow>) -> Vec<usize> {
+    let mut ids: Vec<_> = layout
+        .windows()
+        .map(|(_, win)| *win.id())
+        .filter(|id| layout.is_window_minimized(id))
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn grid_closing_with_all_windows_minimized_restores_nothing() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::MinimizeWindow(1),
+        Op::MinimizeWindow(2),
+        Op::ToggleGridOverview,
+        Op::ToggleGridOverview,
+    ]);
+    layout.verify_invariants();
+
+    // Nothing was picked: the grid focus only sat on the first cell for lack of an active window.
+    assert_eq!(minimized_ids(&layout), vec![1, 2]);
+}
+
+#[test]
+fn grid_closing_on_a_minimized_cell_keeps_it_minimized() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::MinimizeWindow(1),
+        Op::FocusWindow(3),
+        Op::ToggleGridOverview,
+    ]);
+
+    // Minimizing the focused cell in the grid keeps the grid focus on it.
+    check_ops_on_layout(&mut layout, [Op::MinimizeWindow(3)]);
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(minimized_ids(&layout), vec![1, 3]);
+
+    // Navigating onto a minimized cell and closing doesn't restore it either.
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    let active_before = layout
+        .active_workspace()
+        .unwrap()
+        .active_window()
+        .map(|w| *w.id());
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&1));
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert_eq!(minimized_ids(&layout), vec![1, 3]);
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        active_before
+    );
+
+    // Confirming one explicitly still restores it.
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert!(layout.confirm_grid_selection_for_window(&1));
+    layout.verify_invariants();
+    assert_eq!(minimized_ids(&layout), vec![3]);
+}
+
+#[test]
+fn grid_closing_keeps_ignored_floating_window_active() {
+    let mut ignored_floating = TestWindowParams::new(2);
+    ignored_floating.is_floating = true;
+    ignored_floating.rules = Some(ResolvedWindowRules {
+        ignore_grid_overview: Some(true),
+        ..ResolvedWindowRules::default()
+    });
+
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: ignored_floating,
+        },
+        Op::FocusWindow(2),
+        Op::ToggleGridOverview,
+        Op::ToggleGridOverview,
+    ]);
+    layout.verify_invariants();
+
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id()),
+        Some(2)
+    );
+}
+
 #[test]
 fn grid_merge_insert_computes_final_targets_immediately() {
     let mut ops = vec![Op::AddOutput(1)];
