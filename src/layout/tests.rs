@@ -5200,6 +5200,104 @@ fn grid_shows_minimized_ignored_window_as_a_minimized_cell() {
 }
 
 #[test]
+fn grid_column_focus_actions_move_the_grid_focus() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ConsumeOrExpelWindowLeft { id: None },
+        Op::AddWindow {
+            params: TestWindowParams::new(4),
+        },
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+    ]);
+    assert_eq!(
+        scrolling_column_ids(&layout),
+        vec![vec![1], vec![2, 3], vec![4]]
+    );
+    let active = |layout: &Layout<TestWindow>| {
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|w| *w.id())
+    };
+
+    // These used to act on the scrolling layout hidden behind the grid, leaving the grid focus
+    // where it was.
+    layout.focus_column_last();
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+    layout.focus_column_first();
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+    // The middle column's cell remembers its active window, 3.
+    layout.focus_column(2);
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    layout.focus_window_top();
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+    layout.focus_window_bottom();
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    layout.focus_window_in_column(1);
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+    layout.focus_window_down_or_top();
+    assert_eq!(layout.grid_focused_window_id(), Some(3));
+    layout.focus_window_down_or_top();
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+    layout.focus_column_left_or_last();
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+    layout.focus_column_left_or_last();
+    assert_eq!(layout.grid_focused_window_id(), Some(4));
+
+    // Like grid navigation, none of this activates windows before the grid closes.
+    assert_eq!(active(&layout), Some(1));
+    layout.verify_invariants();
+}
+
+#[test]
+fn grid_or_monitor_focus_actions_cross_to_the_other_monitor_at_the_edge() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddOutput(2),
+        Op::FocusOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::FocusOutput(2),
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusOutput(1),
+        Op::ToggleGridOverview,
+    ]);
+    let output2 = layout
+        .outputs()
+        .find(|o| o.name() == "output2")
+        .unwrap()
+        .clone();
+
+    // The grid has a single cell, so there's nowhere to go within it. These used to keep
+    // quietly moving the hidden scrolling layout, or never cross over.
+    assert!(layout.focus_column_right_or_output(&output2));
+    assert_eq!(layout.active_output().unwrap().name(), "output2");
+
+    let output1 = layout
+        .outputs()
+        .find(|o| o.name() == "output1")
+        .unwrap()
+        .clone();
+    assert!(layout.focus_window_down_or_output(&output1));
+    assert_eq!(layout.active_output().unwrap().name(), "output1");
+    layout.verify_invariants();
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);

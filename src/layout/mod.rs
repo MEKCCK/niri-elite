@@ -2286,6 +2286,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_column(0);
+            return;
+        }
         workspace.focus_column_first();
     }
 
@@ -2293,6 +2297,11 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            let count = workspace.scrolling().columns().count();
+            workspace.grid_focus_column(count.saturating_sub(1));
+            return;
+        }
         workspace.focus_column_last();
     }
 
@@ -2300,6 +2309,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_navigate(GridDirection::Right) {
+                workspace.grid_focus_edge_cell(false);
+            }
+            return;
+        }
         workspace.focus_column_right_or_first();
     }
 
@@ -2307,6 +2322,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_navigate(GridDirection::Left) {
+                workspace.grid_focus_edge_cell(true);
+            }
+            return;
+        }
         workspace.focus_column_left_or_last();
     }
 
@@ -2314,14 +2335,22 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            let count = workspace.scrolling().columns().count();
+            workspace.grid_focus_column(index.saturating_sub(1).min(count.saturating_sub(1)));
+            return;
+        }
         workspace.focus_column(index);
     }
 
     pub fn focus_window_up_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
             if workspace.is_grid_overview_open() {
-                workspace.grid_navigate(GridDirection::Up);
-                return false;
+                if workspace.grid_navigate(GridDirection::Up) {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
             }
             if workspace.is_grid_overview_animation() {
                 let moved = workspace.focus_up();
@@ -2344,8 +2373,11 @@ impl<W: LayoutElement> Layout<W> {
     pub fn focus_window_down_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
             if workspace.is_grid_overview_open() {
-                workspace.grid_navigate(GridDirection::Down);
-                return false;
+                if workspace.grid_navigate(GridDirection::Down) {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
             }
             if workspace.is_grid_overview_animation() {
                 let moved = workspace.focus_down();
@@ -2367,7 +2399,12 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn focus_column_left_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_left() {
+            let moved = if workspace.is_grid_overview_open() {
+                workspace.grid_navigate(GridDirection::Left)
+            } else {
+                workspace.focus_left()
+            };
+            if moved {
                 return false;
             }
         }
@@ -2378,7 +2415,12 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn focus_column_right_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_right() {
+            let moved = if workspace.is_grid_overview_open() {
+                workspace.grid_navigate(GridDirection::Right)
+            } else {
+                workspace.focus_right()
+            };
+            if moved {
                 return false;
             }
         }
@@ -2391,6 +2433,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|_, _| usize::from(index).saturating_sub(1));
+            return;
+        }
         workspace.focus_window_in_column(index);
     }
 
@@ -2430,6 +2476,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|count, cur| (cur + 1).min(count - 1)) {
+                workspace.grid_navigate(GridDirection::Left);
+            }
+            return;
+        }
         workspace.focus_down_or_left();
     }
 
@@ -2437,6 +2489,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|count, cur| (cur + 1).min(count - 1)) {
+                workspace.grid_navigate(GridDirection::Right);
+            }
+            return;
+        }
         workspace.focus_down_or_right();
     }
 
@@ -2444,6 +2502,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|_, cur| cur.saturating_sub(1)) {
+                workspace.grid_navigate(GridDirection::Left);
+            }
+            return;
+        }
         workspace.focus_up_or_left();
     }
 
@@ -2451,6 +2515,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|_, cur| cur.saturating_sub(1)) {
+                workspace.grid_navigate(GridDirection::Right);
+            }
+            return;
+        }
         workspace.focus_up_or_right();
     }
 
@@ -2472,6 +2542,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|_, _| 0);
+            return;
+        }
         workspace.focus_window_top();
     }
 
@@ -2479,6 +2553,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|count, _| count - 1);
+            return;
+        }
         workspace.focus_window_bottom();
     }
 
@@ -2486,6 +2564,11 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace
+                .grid_focus_tile_in_column(|count, cur| if cur + 1 < count { cur + 1 } else { 0 });
+            return;
+        }
         workspace.focus_window_down_or_top();
     }
 
@@ -2493,6 +2576,11 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace
+                .grid_focus_tile_in_column(|count, cur| if cur > 0 { cur - 1 } else { count - 1 });
+            return;
+        }
         workspace.focus_window_up_or_bottom();
     }
 

@@ -643,6 +643,71 @@ impl<W: LayoutElement> Workspace<W> {
         self.grid_focused_window_id() != previous
     }
 
+    /// Moves the grid focus to the cell of the scrolling column at `col_idx`, on the tile that
+    /// cell remembers.
+    pub fn grid_focus_column(&mut self, col_idx: usize) -> bool {
+        let Some(col) = self.scrolling.columns().nth(col_idx) else {
+            return false;
+        };
+        let remembered = self.grid_overview.as_ref().and_then(|go| {
+            go.column_tile_focus
+                .iter()
+                .find_map(|(c, _, id)| (*c == col_idx).then(|| id.clone()).flatten())
+                .filter(|id| col.contains(id))
+        });
+        let id = remembered.or_else(|| {
+            let tile_idx = self.scrolling.column_active_tile_idx(col_idx);
+            col.tiles()
+                .nth(tile_idx)
+                .map(|(tile, _)| tile.window().id().clone())
+        });
+        id.is_some_and(|id| self.set_grid_focus_for_window(&id))
+    }
+
+    /// Moves the grid focus within the column of the grid-focused window, to the tile that `pick`
+    /// returns given the column's tile count and the focused tile index.
+    pub fn grid_focus_tile_in_column(&mut self, pick: impl FnOnce(usize, usize) -> usize) -> bool {
+        let Some(id) = self.grid_action_window() else {
+            return false;
+        };
+        let Some(col) = self.scrolling.columns().find(|col| col.contains(&id)) else {
+            return false;
+        };
+        let Some(current) = col.position(&id) else {
+            return false;
+        };
+        let count = col.tiles().count();
+        let target = pick(count, current).min(count - 1);
+        if target == current {
+            return false;
+        }
+        let target = col
+            .tiles()
+            .nth(target)
+            .map(|(tile, _)| tile.window().id().clone());
+        target.is_some_and(|id| self.set_grid_focus_for_window(&id))
+    }
+
+    /// Moves the grid focus to the first or last cell.
+    pub fn grid_focus_edge_cell(&mut self, last: bool) -> bool {
+        let Some(go) = &self.grid_overview else {
+            return false;
+        };
+        let entry = if last {
+            go.layout.entries.last()
+        } else {
+            go.layout.entries.first()
+        };
+        let Some((item, _)) = entry else {
+            return false;
+        };
+        let item = item.clone();
+        match &item {
+            GridItem::Column { col_idx, .. } => self.grid_focus_column(*col_idx),
+            _ => self.set_grid_focus_for_window(item.window_id()),
+        }
+    }
+
     pub fn set_grid_grabbed_window(&mut self, id: Option<W::Id>) {
         if let Some(go) = &mut self.grid_overview {
             go.set_grabbed_window(id);
