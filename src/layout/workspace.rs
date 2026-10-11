@@ -3523,17 +3523,6 @@ impl<W: LayoutElement> Workspace<W> {
                 });
             };
 
-            // Fading minimized windows render at the bottom while the grid closes, so they
-            // don't cover the windows flying back on top of them.
-            if is_closing {
-                for (item, info) in &layout.entries {
-                    let is_focused = info.row == focus.0 && info.col == focus.1;
-                    if item_is_minimized(item) && should_render_grid_item(item) {
-                        render_grid_item(&mut ctx, item, info, is_focused);
-                    }
-                }
-            }
-
             if is_closing {
                 for (item, info) in &layout.entries {
                     let is_focused = info.row == focus.0 && info.col == focus.1;
@@ -3642,6 +3631,18 @@ impl<W: LayoutElement> Workspace<W> {
                             continue;
                         }
 
+                        render_grid_item(&mut ctx, item, info, is_focused);
+                    }
+                }
+            }
+
+            // Fading minimized windows render at the bottom while the grid closes, so they don't
+            // cover the windows flying back over them. Elements are queued front-to-back, so they
+            // go last.
+            if is_closing {
+                for (item, info) in &layout.entries {
+                    let is_focused = info.row == focus.0 && info.col == focus.1;
+                    if item_is_minimized(item) && should_render_grid_item(item) {
                         render_grid_item(&mut ctx, item, info, is_focused);
                     }
                 }
