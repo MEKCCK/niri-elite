@@ -50,7 +50,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
-use crate::niri::{CastTarget, KeyboardFocus, Niri, PointerVisibility, State};
+use crate::niri::{CastTarget, KeyboardFocus, Niri, PointContents, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -3449,7 +3449,12 @@ impl State {
                     }
                 }
                 // Check if we need to start an interactive resize.
-                else if button == Some(MouseButton::Right) && !pointer.is_grabbed() && mod_down {
+                // Grid cells are scaled previews: their edges aren't the window's edges.
+                else if button == Some(MouseButton::Right)
+                    && !pointer.is_grabbed()
+                    && mod_down
+                    && !self.niri.layout.window_is_in_open_grid_overview(&window)
+                {
                     let location = pointer.current_location();
                     let (output, pos_within_output) = self.niri.output_under(location).unwrap();
                     let edges = self
@@ -4399,6 +4404,18 @@ impl State {
                                 window,
                             );
                             tool.set_grab(self, grab, time, serial, Focus::Clear);
+                        } else if let Some((window, _)) =
+                            under.window.as_ref().filter(|(window, _)| {
+                                !mod_down
+                                    && self.niri.layout.window_is_in_open_grid_overview(window)
+                            })
+                        {
+                            // A tap on a grid cell picks it, like a click.
+                            self.niri.layout.confirm_grid_selection_for_window(window);
+                            self.niri.queue_redraw_all();
+                        } else if self.grid_tap_closes_grid(&under) {
+                            self.niri.layout.close_grid_overview();
+                            self.niri.queue_redraw_all();
                         } else if let Some((window, _)) = under.window {
                             self.niri.layout.activate_window(&window);
 
@@ -5009,6 +5026,15 @@ impl State {
                     window,
                 );
                 handle.set_grab(self, grab, serial);
+            } else if let Some((window, _)) = under.window.as_ref().filter(|(window, _)| {
+                !mod_down && self.niri.layout.window_is_in_open_grid_overview(window)
+            }) {
+                // A tap on a grid cell picks it, like a click.
+                self.niri.layout.confirm_grid_selection_for_window(window);
+                self.niri.queue_redraw_all();
+            } else if self.grid_tap_closes_grid(&under) {
+                self.niri.layout.close_grid_overview();
+                self.niri.queue_redraw_all();
             } else if let Some((window, _)) = under.window {
                 self.niri.layout.activate_window(&window);
 
@@ -5675,6 +5701,29 @@ fn grid_should_confirm_on_return(
     is_grid_overview_open
         && has_grid_focus
         && (keyboard_focus.is_layout() || keyboard_focus.is_overview())
+}
+
+impl State {
+    /// Whether a touch or tablet tap at `under` hits the empty space of an open grid, which closes
+    /// it like a click there.
+    fn grid_tap_closes_grid(&self, under: &PointContents) -> bool {
+        under.window.is_none()
+            && under.layer.is_none()
+            && under
+                .output
+                .as_ref()
+                .is_some_and(|output| self.niri.layout.is_grid_overview_open_on(output))
+            && grid_should_handle_empty_click(
+                true,
+                self.niri.layout.is_overview_open(),
+                Some(MouseButton::Left),
+                false,
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open()
+                    || self.niri.window_mru_ui.is_open(),
+            )
+    }
 }
 
 /// Whether a click outside any grid cell should close the grid overview (or focus the output

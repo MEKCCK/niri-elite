@@ -8,10 +8,12 @@ use wayland_client::protocol::wl_pointer;
 use wayland_client::protocol::wl_surface::WlSurface;
 
 use super::*;
+use crate::input::resize_grab::ResizeGrab;
 use crate::tests::client::KeyboardEvent;
 use crate::tests::test_input_backend::{TestInputBackend, TestKeyboardKeyEvent};
 
 const BTN_MIDDLE: u32 = 0x112;
+const BTN_RIGHT: u32 = 0x111;
 const KEY_ENTER: u32 = 28;
 
 fn add_window(f: &mut Fixture, id: ClientId, title: Option<&str>) -> WlSurface {
@@ -318,6 +320,72 @@ fn grid_hot_corner_toggles_its_own_monitor() {
     let layout = &f.niri().layout;
     assert!(layout.is_grid_overview_open_on(&output1));
     assert!(layout.is_grid_overview_open_on(&output2));
+}
+
+#[test]
+fn mod_right_drag_on_grid_cell_doesnt_resize() {
+    let SetUp {
+        mut f,
+        id,
+        pointer,
+        tiled,
+        tiled_surface,
+        ..
+    } = set_up();
+
+    // Make the window large enough for its place in the scrolling layout to overlap its grid
+    // cell.
+    let window = f.client(id).window(&tiled_surface);
+    window.set_size(1200, 1000);
+    window.commit();
+    f.double_roundtrip(id);
+
+    // Pick a point on the grid cell that is also on the hidden window in the scrolling layout,
+    // so that it has resize edges there.
+    let niri = f.niri();
+    let ws = niri.layout.active_workspace().unwrap();
+    let (tile, tile_pos, _) = ws
+        .tiles_with_render_positions()
+        .find(|(tile, _, _)| tile.window().window == tiled)
+        .unwrap();
+    let tile_size = tile.tile_size();
+    let mut pos = None;
+    'outer: for y in (0..tile_size.h as i32).step_by(5) {
+        for x in (0..tile_size.w as i32).step_by(5) {
+            let p = tile_pos + Point::from((x as f64, y as f64));
+            let under = niri.window_under(p).is_some_and(|m| m.window == tiled);
+            if under
+                && ws
+                    .resize_edges_under(p)
+                    .is_some_and(|edges| !edges.is_empty())
+            {
+                pos = Some(p);
+                break 'outer;
+            }
+        }
+    }
+    let pos = pos.expect("no point with resize edges on the grid cell");
+    f.niri_state().move_cursor(pos);
+
+    // Grid cells are scaled previews: Mod+RMB used to start a resize with the edges of the
+    // hidden window in the scrolling layout.
+    press_key(&mut f, "LWIN", KeyState::Pressed);
+    pointer.button(0, BTN_RIGHT, wl_pointer::ButtonState::Pressed);
+    pointer.frame();
+    f.roundtrip(id);
+    let resizing = f
+        .niri()
+        .seat
+        .get_pointer()
+        .unwrap()
+        .with_grab(|_, grab| grab.as_any().is::<ResizeGrab>())
+        .unwrap_or(false);
+    assert!(!resizing);
+
+    pointer.button(0, BTN_RIGHT, wl_pointer::ButtonState::Released);
+    pointer.frame();
+    press_key(&mut f, "LWIN", KeyState::Released);
+    f.roundtrip(id);
 }
 
 #[test]
