@@ -253,6 +253,11 @@ impl<W: LayoutElement> GridOverview<W> {
     ) -> bool {
         let old_layout = self.layout.clone();
         let new_layout = GridLayout::compute(items, area, &self.options.grid_overview);
+        let new_ids: Vec<_> = new_layout
+            .entries
+            .iter()
+            .map(|(item, _)| item.window_id().clone())
+            .collect();
         let progress_value = self.progress_value();
         let rearrange_value = self.rearrange_anim.as_ref().map(|anim| anim.value());
         let opening_retarget_value = if self.open
@@ -271,7 +276,7 @@ impl<W: LayoutElement> GridOverview<W> {
         let should_rearrange = self.open && (!old_layout.entries.is_empty() || restart_rearrange);
         let targets_changed = old_layout.entries.len() != new_layout.entries.len()
             || new_layout.entries.iter().any(|(item, info)| {
-                Self::matching_value(&old_layout.entries, item)
+                Self::matching_old_value(&old_layout.entries, item, &new_ids)
                     .is_none_or(|old_info| !old_info.same_target(info))
             });
         // Retargeting a running animation extrapolates its start point by 1 / (1 - value). Late in
@@ -296,8 +301,9 @@ impl<W: LayoutElement> GridOverview<W> {
         self.layout = new_layout;
         let mut new_entries = Vec::new();
         for (item, info) in &self.layout.entries {
-            let old_info = Self::matching_value(&old_layout.entries, item);
-            let entry_pos = Self::matching_value(&self.entry_positions, item).copied();
+            let old_info = Self::matching_old_value(&old_layout.entries, item, &new_ids);
+            let entry_pos =
+                Self::matching_old_value(&self.entry_positions, item, &new_ids).copied();
             let position_target_unchanged =
                 old_info.is_some_and(|old_info| old_info.same_position_target(info));
             let current_pos = match (rearrange_value, entry_pos, old_info) {
@@ -329,8 +335,8 @@ impl<W: LayoutElement> GridOverview<W> {
         self.entry_positions = new_entries;
         let mut new_scales = Vec::new();
         for (item, info) in &self.layout.entries {
-            let old_info = Self::matching_value(&old_layout.entries, item);
-            let entry_scale = Self::matching_value(&self.entry_scales, item).copied();
+            let old_info = Self::matching_old_value(&old_layout.entries, item, &new_ids);
+            let entry_scale = Self::matching_old_value(&self.entry_scales, item, &new_ids).copied();
             let scale_target_unchanged =
                 old_info.is_some_and(|old_info| old_info.same_scale_target(info));
             // Like entry_visual_transform(), which this must match: the scale doesn't overshoot.
@@ -376,7 +382,7 @@ impl<W: LayoutElement> GridOverview<W> {
         self.entry_scales = new_scales;
         let mut new_focus_boosts = Vec::new();
         for (item, _) in &self.layout.entries {
-            let boost = Self::matching_value(&self.focus_boosts, item)
+            let boost = Self::matching_old_value(&self.focus_boosts, item, &new_ids)
                 .copied()
                 .unwrap_or(1.);
             new_focus_boosts.push((item.clone(), boost));
@@ -390,6 +396,28 @@ impl<W: LayoutElement> GridOverview<W> {
         }
 
         restart_rearrange
+    }
+
+    /// Like [`Self::matching_value`], for matching new layout items against old state.
+    ///
+    /// A column whose shown window changed has no identity match, so it falls back to the old
+    /// entry at the same column index. That fallback only takes old entries whose window is gone
+    /// from the new layout: otherwise a column inserted in the middle would take over the old
+    /// state of the column that was at its index and still exists further along.
+    fn matching_old_value<'a, T>(
+        entries: &'a [(GridItem<W>, T)],
+        item: &GridItem<W>,
+        new_ids: &[W::Id],
+    ) -> Option<&'a T> {
+        entries
+            .iter()
+            .find(|(entry, _)| entry.same_animation_identity(item))
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|(entry, _)| entry == item && !new_ids.contains(entry.window_id()))
+            })
+            .map(|(_, value)| value)
     }
 
     fn matching_value<'a, T>(entries: &'a [(GridItem<W>, T)], item: &GridItem<W>) -> Option<&'a T> {

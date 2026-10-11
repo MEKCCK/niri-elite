@@ -5540,6 +5540,48 @@ fn grid_retarget_during_spring_overshoot_doesnt_jump() {
 }
 
 #[test]
+fn grid_column_inserted_in_the_middle_doesnt_take_over_its_neighbours_cell() {
+    use super::grid_overview::{GridItem, GridOverview};
+    use super::OverviewProgress;
+
+    let options = Rc::new(Options::default());
+    let mut go = GridOverview::<TestWindow>::new(Clock::with_time(Duration::ZERO), options);
+    go.open = true;
+    go.progress = Some(OverviewProgress::Open);
+
+    let area = Rectangle::from_size(Size::from((1600., 1000.)));
+    let columns = |ids: &[usize]| {
+        ids.iter()
+            .enumerate()
+            .map(|(col_idx, id)| {
+                (
+                    GridItem::Column {
+                        col_idx,
+                        window_id: *id,
+                    },
+                    Size::from((400., 300.)),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    go.compute_layout(&columns(&[1, 2, 3]), area, true);
+    let old_cell_of_2 = go.find_grid_info(&2).unwrap().target_pos;
+
+    // Window 4 opens as a new column between 1 and 2.
+    go.compute_layout(&columns(&[1, 4, 2, 3]), area, true);
+
+    // The new column used to match the old column at its index, window 2's, and fly out of
+    // window 2's old cell with window 2's scale.
+    let start_of_4 = go
+        .entry_positions
+        .iter()
+        .find(|(item, _)| item.window_id() == &4)
+        .map(|(_, pos)| *pos)
+        .unwrap();
+    assert_ne!(start_of_4, old_cell_of_2);
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
