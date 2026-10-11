@@ -4208,18 +4208,32 @@ impl<W: LayoutElement> Workspace<W> {
 
         let (item, info, visual_pos, visual_scale, source_size, dist_sq) = nearest?;
         let max_distance = go.layout.gap.max(100.);
-        if dist_sq > max_distance * max_distance {
-            return None;
-        }
-
-        let position = self.grid_insert_position_for_item(
-            item,
-            pos,
-            visual_pos,
-            visual_scale,
-            source_size,
-            column_count,
-        );
+        let position = if dist_sq <= max_distance * max_distance {
+            self.grid_insert_position_for_item(
+                item,
+                pos,
+                visual_pos,
+                visual_scale,
+                source_size,
+                column_count,
+            )
+        } else {
+            // Far from every cell, like in the padding around the grid: make a new column on the
+            // pointer's side of the nearest cell. Without a position here, the drop used to fall
+            // back to the scrolling layout's insert position for a point in grid coordinates, an
+            // arbitrary column.
+            let center_x = visual_pos.x + source_size.w * visual_scale / 2.;
+            match item {
+                GridItem::Column { col_idx, .. } | GridItem::Tab { col_idx, .. } => {
+                    if pos.x < center_x {
+                        InsertPosition::NewColumn(*col_idx)
+                    } else {
+                        InsertPosition::NewColumn(col_idx + 1)
+                    }
+                }
+                GridItem::Floating { .. } => InsertPosition::NewColumn(column_count),
+            }
+        };
         let hint_area = self.grid_insert_hint_area_for_item(
             go,
             item,

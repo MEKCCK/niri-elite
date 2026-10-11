@@ -7566,6 +7566,58 @@ fn grid_insert_hint_area_uses_grid_visual_coordinates() {
 }
 
 #[test]
+fn grid_drop_far_from_every_cell_goes_beside_the_nearest_one() {
+    // Wide padding, to have room for points far from every cell.
+    let options = Options {
+        grid_overview: niri_config::GridOverview {
+            padding: niri_config::GridOverviewPadding::uniform(300.),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=3 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    ops.extend([
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+    ]);
+    let mut layout = check_ops_with_options(options, ops);
+
+    let first = grid_window_visual_rect(&layout, 1);
+    let last = grid_window_visual_rect(&layout, 3);
+    let ws = layout.active_workspace().unwrap();
+
+    // Points in the padding around the grid, far from every cell. These used to have no insert
+    // position, and a drop there fell back to an arbitrary column.
+    let far_left = Point::from((first.loc.x - 150., first.loc.y + first.size.h / 2.));
+    let far_right = Point::from((
+        last.loc.x + last.size.w + 150.,
+        last.loc.y + last.size.h / 2.,
+    ));
+    assert!(far_left.x > 0.);
+    let (position, _) = ws.grid_insert_position_and_hint_area(far_left).unwrap();
+    assert_eq!(position, InsertPosition::NewColumn(0));
+    let (position, _) = ws.grid_insert_position_and_hint_area(far_right).unwrap();
+    assert_eq!(position, InsertPosition::NewColumn(3));
+
+    // Dropping window 1 there makes it the last column.
+    let (output, start, _) = grid_window_point(&layout, 1, 0.5, 0.5);
+    assert!(layout.interactive_move_begin(1, &output, start));
+    assert!(layout.interactive_move_update(&1, Point::from((300., 0.)), output.clone(), far_right));
+    layout.interactive_move_end(&1);
+    layout.verify_invariants();
+    assert_eq!(
+        scrolling_column_ids(&layout),
+        vec![vec![2], vec![3], vec![1]]
+    );
+}
+
+#[test]
 fn grid_new_column_insert_hint_does_not_span_wrapped_rows() {
     let mut ops = vec![Op::AddOutput(1)];
     for id in 1..=8 {
