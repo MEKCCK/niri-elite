@@ -708,11 +708,6 @@ impl<W: LayoutElement> Workspace<W> {
         let Some(id) = self.grid_action_window() else {
             return false;
         };
-        // Closing the grid only confirms ordinary windows. Restoring a minimized one takes an
-        // explicit confirmation, like Return or a click.
-        if self.has_minimized_window(&id) {
-            return false;
-        }
 
         if !self.set_grid_focus_for_window(&id) {
             return false;

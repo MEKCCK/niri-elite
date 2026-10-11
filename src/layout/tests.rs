@@ -6927,7 +6927,7 @@ fn grid_closing_with_all_windows_minimized_restores_nothing() {
 }
 
 #[test]
-fn grid_closing_on_a_minimized_cell_keeps_it_minimized() {
+fn grid_closing_on_a_minimized_cell_restores_it() {
     let mut layout = check_ops([
         Op::AddOutput(1),
         Op::AddWindow {
@@ -6944,39 +6944,27 @@ fn grid_closing_on_a_minimized_cell_keeps_it_minimized() {
         Op::ToggleGridOverview,
     ]);
 
-    // Minimizing the focused cell in the grid keeps the grid focus on it.
-    check_ops_on_layout(&mut layout, [Op::MinimizeWindow(3)]);
-    assert_eq!(layout.grid_focused_window_id(), Some(3));
-    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
-    assert_eq!(minimized_ids(&layout), vec![1, 3]);
-
-    // Navigating onto a minimized cell and closing doesn't restore it either.
-    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
-    let active_before = layout
-        .active_workspace()
-        .unwrap()
-        .active_window()
-        .map(|w| *w.id());
+    // Closing the grid confirms its focused cell, minimized or not.
     assert!(layout
         .active_workspace_mut()
         .unwrap()
         .set_grid_focus_for_window(&1));
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
-    assert_eq!(minimized_ids(&layout), vec![1, 3]);
+    assert_eq!(minimized_ids(&layout), Vec::<usize>::new());
     assert_eq!(
         layout
             .active_workspace()
             .unwrap()
             .active_window()
             .map(|w| *w.id()),
-        active_before
+        Some(1)
     );
 
-    // Confirming one explicitly still restores it.
+    // That includes a window just minimized in the grid, which keeps the grid focus.
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview, Op::MinimizeWindow(1)]);
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
-    assert!(layout.confirm_grid_selection_for_window(&1));
-    layout.verify_invariants();
-    assert_eq!(minimized_ids(&layout), vec![3]);
+    assert_eq!(minimized_ids(&layout), Vec::<usize>::new());
 }
 
 #[test]
