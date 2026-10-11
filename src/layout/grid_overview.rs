@@ -766,18 +766,35 @@ impl<W: LayoutElement> GridOverview<W> {
             }
         }
 
-        // Cross-cell movement.
+        // Cross-cell movement. Up and down go to the cell in that row whose center is closest
+        // horizontally: a shorter last row is centered, so its cells don't sit under the same
+        // column indices of the rows above.
+        let closest_in_row = |target_row: usize| {
+            let center_x = |info: &GridEntryInfo| info.target_pos.x + info.target_size.w / 2.;
+            let current = self.layout.entries.get(row * self.layout.cols + col)?;
+            let current_x = center_x(&current.1);
+            self.layout
+                .entries
+                .iter()
+                .filter(|(_, info)| info.row == target_row)
+                .min_by(|(_, a), (_, b)| {
+                    let da = (center_x(a) - current_x).abs();
+                    let db = (center_x(b) - current_x).abs();
+                    da.total_cmp(&db)
+                })
+                .map(|(_, info)| (info.row, info.col))
+        };
         let mut new_focus = match dir {
             GridDirection::Up => {
                 if row > 0 {
-                    (row - 1, col)
+                    closest_in_row(row - 1).unwrap_or((row - 1, col))
                 } else {
                     (row, col)
                 }
             }
             GridDirection::Down => {
                 if row + 1 < self.layout.rows {
-                    (row + 1, col)
+                    closest_in_row(row + 1).unwrap_or((row + 1, col))
                 } else {
                     (row, col)
                 }

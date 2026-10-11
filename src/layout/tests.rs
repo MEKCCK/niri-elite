@@ -5452,6 +5452,31 @@ fn grid_with_a_gap_too_large_keeps_positive_sizes() {
 }
 
 #[test]
+fn grid_up_from_a_centered_last_row_goes_to_the_cell_above_it() {
+    use super::grid_overview::{GridDirection, GridItem, GridLayout, GridOverview};
+
+    let options = Rc::new(Options::default());
+    let items: Vec<_> = (1..=7)
+        .map(|id| {
+            (
+                GridItem::Floating { window_id: id },
+                Size::from((400., 400.)),
+            )
+        })
+        .collect();
+    let area = Rectangle::from_size(Size::from((1000., 1000.)));
+    let mut go = GridOverview::<TestWindow>::new(Clock::with_time(Duration::ZERO), options.clone());
+    go.layout = GridLayout::compute(&items, area, &options.grid_overview);
+    // Rows of 3, 3 and 1; the last cell is centered under the middle column.
+    assert_eq!((go.layout.cols, go.layout.rows), (3, 3));
+
+    go.focus = (2, 0);
+    go.navigate(GridDirection::Up, |_| 1);
+    // It used to go to the first column, by index.
+    assert_eq!(go.focus, (1, 1));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
