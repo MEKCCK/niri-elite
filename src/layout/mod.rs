@@ -3538,6 +3538,11 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {
+        // In the grid overview, these act on the grid focus, which is the grabbed window while it
+        // is being moved; it isn't in any workspace then.
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -3603,6 +3608,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_full_width(&mut self) {
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -3610,10 +3618,17 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
         workspace.set_column_width(change);
+    }
+
+    fn interactive_move_is_moving(&self) -> bool {
+        matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_)))
     }
 
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {

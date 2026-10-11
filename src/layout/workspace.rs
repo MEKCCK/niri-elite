@@ -2349,15 +2349,24 @@ impl<W: LayoutElement> Workspace<W> {
 
     fn implicit_grid_window(&self, window: Option<&W::Id>) -> Option<W::Id> {
         if window.is_none() && self.is_grid_overview_open() {
-            self.grid_focused_window_id()
+            self.grid_action_window()
         } else {
             None
         }
     }
 
+    /// The grid-focused window that grid actions apply to.
+    ///
+    /// This differs from [`Self::grid_focused_window_id`] while a window is being dragged: the
+    /// dragged window is the grid focus then, but it has left the workspace.
+    fn grid_action_window(&self) -> Option<W::Id> {
+        self.grid_focused_window_id()
+            .filter(|id| self.has_window(id))
+    }
+
     pub fn toggle_width(&mut self, forwards: bool) {
         if self.is_grid_overview_open() {
-            if let Some(id) = self.grid_focused_window_id() {
+            if let Some(id) = self.grid_action_window() {
                 if self.floating.has_window(&id) {
                     self.floating.toggle_window_width(Some(&id), forwards);
                 } else {
@@ -2376,7 +2385,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn toggle_full_width(&mut self) {
         if self.is_grid_overview_open() {
-            if let Some(id) = self.grid_focused_window_id() {
+            if let Some(id) = self.grid_action_window() {
                 if !self.floating.has_window(&id) {
                     self.scrolling.toggle_full_width_for_window(&id);
                 }
@@ -2394,7 +2403,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn set_column_width(&mut self, change: SizeChange) {
         if self.is_grid_overview_open() {
-            if let Some(id) = self.grid_focused_window_id() {
+            if let Some(id) = self.grid_action_window() {
                 if self.floating.has_window(&id) {
                     self.floating.set_window_width(Some(&id), change, true);
                 } else {
