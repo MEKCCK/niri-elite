@@ -1,7 +1,9 @@
 use client::ClientId;
-use niri_config::Action;
+use niri_config::input::FocusFollowsMouse;
+use niri_config::{Action, Config};
 use niri_ipc::SizeChange;
 use smithay::desktop::Window;
+use smithay::utils::Point;
 
 use super::*;
 
@@ -115,4 +117,61 @@ fn by_id_actions_in_grid_leave_the_grid_alone() {
     let layout = &f.niri().layout;
     assert!(layout.is_grid_overview_open());
     assert_eq!(layout.grid_focused_window_id(), Some(first));
+}
+
+#[test]
+fn hovering_grid_cells_does_not_focus_them() {
+    let mut config = Config::default();
+    config.input.focus_follows_mouse = Some(FocusFollowsMouse {
+        max_scroll_amount: None,
+    });
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    add_window(&mut f, id);
+    add_window(&mut f, id);
+
+    let client = f.client(id);
+    let manager = client.state.virtual_pointer_manager.as_ref().unwrap();
+    let pointer = manager.create_virtual_pointer(None, &client.qh, ());
+    f.roundtrip(id);
+
+    let niri = f.niri();
+    let windows: Vec<_> = niri
+        .layout
+        .windows()
+        .map(|(_, m)| m.window.clone())
+        .collect();
+    niri.layout.activate_window(&windows[0]);
+    assert!(niri.layout.open_grid_overview());
+    niri.clock.set_complete_instantly(true);
+    niri.advance_animations();
+    niri.clock.set_complete_instantly(false);
+
+    // Move from the empty space above the other window's cell into its middle.
+    let ws = niri.layout.active_workspace().unwrap();
+    let info = *ws
+        .grid_overview()
+        .unwrap()
+        .find_grid_info(&windows[1])
+        .unwrap();
+    let center = info.target_pos + Point::from((info.target_size.w / 2., info.target_size.h / 2.));
+    let start = Point::from((center.x, 1.));
+    f.niri_state().move_cursor(start);
+    assert!(f.niri().window_under(start).is_none());
+    pointer.motion(0, 0., center.y - start.y);
+    pointer.frame();
+    f.roundtrip(id);
+
+    let layout = &f.niri().layout;
+    assert!(layout.is_grid_overview_open());
+    assert_eq!(layout.grid_focused_window_id(), Some(windows[0].clone()));
+    assert_eq!(
+        layout
+            .active_workspace()
+            .unwrap()
+            .active_window()
+            .map(|m| m.window.clone()),
+        Some(windows[0].clone())
+    );
 }

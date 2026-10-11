@@ -3991,6 +3991,11 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn activate_window_without_raising(&mut self, window: &W::Id) -> bool {
+        // A minimized window can't be activated without restoring it, and this must not restore.
+        if self.has_minimized_window(window) {
+            return false;
+        }
+
         if self.floating.activate_window_without_raising(window) {
             self.floating_is_active = FloatingActive::Yes;
             true

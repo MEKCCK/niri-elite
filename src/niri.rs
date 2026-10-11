@@ -8623,7 +8623,12 @@ impl Niri {
         }
 
         if let Some(window) = &new_focus.window {
-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
+            // Like in the overview, hovering grid cells doesn't focus them: that would activate
+            // windows behind the grid without the grid focus following.
+            if !self.layout.is_overview_open()
+                && !self.layout.window_is_in_open_grid_overview(&window.0)
+                && current_focus.window.as_ref() != Some(window)
+            {
                 let (window, hit) = window;
 
                 // Don't trigger focus-follows-mouse over the tab indicator.
