@@ -1258,7 +1258,9 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     fn tile_ignores_grid_overview(tile: &Tile<W>) -> bool {
-        tile.window().rules().ignore_grid_overview == Some(true)
+        // A minimized window has nowhere else to be seen and restored than the grid, so it gets
+        // a cell like any other minimized window.
+        tile.window().rules().ignore_grid_overview == Some(true) && !tile.window().is_minimized()
     }
 
     fn grid_item_normal_render_pos(

@@ -5160,6 +5160,46 @@ fn grid_reopened_while_closing_starts_from_the_current_state() {
 }
 
 #[test]
+fn grid_shows_minimized_ignored_window_as_a_minimized_cell() {
+    let mut ignored_floating = TestWindowParams::new(2);
+    ignored_floating.is_floating = true;
+    ignored_floating.rules = Some(ResolvedWindowRules {
+        ignore_grid_overview: Some(true),
+        ..ResolvedWindowRules::default()
+    });
+
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: ignored_floating,
+        },
+        Op::MinimizeWindow(2),
+        Op::ToggleGridOverview,
+    ]);
+
+    // It used to fade in at its floating position over the grid, with no cell, and stay
+    // clickable there.
+    assert!(layout.window_is_in_open_grid_overview(&2));
+    let ws = layout.active_workspace().unwrap();
+    let (tile, tile_pos, _) = ws
+        .tiles_with_render_positions()
+        .find(|(tile, _, _)| tile.window().id() == &2)
+        .unwrap();
+    let center = tile_pos + tile.tile_size().downscale(2.).to_point();
+    assert!(ws.ignored_floating_window_under(center).is_none());
+
+    // Restoring it from its cell makes it an ignored window again.
+    assert!(layout.confirm_grid_selection_for_window(&2));
+    layout.verify_invariants();
+    assert!(!layout.is_window_minimized(&2));
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    assert!(!layout.window_is_in_open_grid_overview(&2));
+}
+
+#[test]
 fn grid_stays_open_on_workspace_switch() {
     let mut layout = three_column_grid_layout(1);
     check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
