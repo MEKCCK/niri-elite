@@ -2870,6 +2870,16 @@ impl State {
             }
         }
 
+        if let Some(output) = self.niri.fullscreen_output_confining_pointer(pos) {
+            let geom = self.niri.global_space.output_geometry(&output).unwrap();
+            new_pos.x = new_pos
+                .x
+                .clamp(geom.loc.x as f64, (geom.loc.x + geom.size.w - 1) as f64);
+            new_pos.y = new_pos
+                .y
+                .clamp(geom.loc.y as f64, (geom.loc.y + geom.size.h - 1) as f64);
+        }
+
         if self
             .niri
             .global_space
