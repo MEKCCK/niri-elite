@@ -5199,6 +5199,102 @@ fn grid_shows_minimized_ignored_window_as_a_minimized_cell() {
     assert!(!layout.window_is_in_open_grid_overview(&2));
 }
 
+fn grid_with_minimized_ignored_floating() -> Layout<TestWindow> {
+    let mut ignored_floating = TestWindowParams::new(2);
+    ignored_floating.is_floating = true;
+    ignored_floating.bbox = Rectangle::from_size(Size::from((1000, 700)));
+    ignored_floating.rules = Some(ResolvedWindowRules {
+        ignore_grid_overview: Some(true),
+        ..ResolvedWindowRules::default()
+    });
+
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: ignored_floating,
+        },
+        Op::MinimizeWindow(2),
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+    ]);
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&2));
+    layout
+}
+
+fn grid_entry_render_scale(layout: &Layout<TestWindow>, window: usize) -> Option<f64> {
+    let ws = layout.active_workspace().unwrap();
+    let go = ws.grid_overview()?;
+    let (item, info) = go
+        .layout
+        .entries
+        .iter()
+        .find(|(item, _)| item.window_id() == &window)?;
+    Some(ws.grid_item_render_visual_transform(go, item, info).1)
+}
+
+#[test]
+fn grid_restoring_ignored_window_in_place_keeps_its_cell() {
+    let mut layout = grid_with_minimized_ignored_floating();
+
+    // What minimize-window does on a minimized cell. The window used to drop out of the grid
+    // straight away: it popped up over the grid at its floating position, and the grid focus
+    // jumped to another cell.
+    layout.unminimize_window(&2, false);
+    layout.verify_invariants();
+    assert!(!layout.is_window_minimized(&2));
+    assert!(layout.is_grid_overview_open());
+    assert!(layout.window_is_in_open_grid_overview(&2));
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+
+    // Minimizing and restoring it again keeps working from the same cell.
+    check_ops_on_layout(&mut layout, [Op::MinimizeWindow(2)]);
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+    layout.unminimize_window(&2, false);
+    layout.verify_invariants();
+    assert_eq!(layout.grid_focused_window_id(), Some(2));
+
+    // It is ignored again in the next grid session.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+            Op::ToggleGridOverview,
+        ],
+    );
+    assert!(!layout.window_is_in_open_grid_overview(&2));
+    assert!(layout.window_is_in_open_grid_overview(&1));
+}
+
+#[test]
+fn grid_activating_minimized_ignored_window_flies_it_back() {
+    let mut layout = grid_with_minimized_ignored_floating();
+    let cell_scale = grid_entry_render_scale(&layout, 2).unwrap();
+    assert!(cell_scale < 0.99, "{cell_scale}");
+
+    // Like clicking its cell. Restored, it used to lose its cell right away and appear at its
+    // floating position without any animation.
+    assert!(layout.confirm_grid_selection_for_window(&2));
+    layout.verify_invariants();
+    assert!(!layout.is_grid_overview_open());
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(2));
+
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 50 }]);
+    let ws = layout.active_workspace().unwrap();
+    assert!(ws.is_grid_overview_animation());
+    let scale = grid_entry_render_scale(&layout, 2).expect("the closing grid carries the window");
+    assert!(
+        cell_scale < scale && scale < 1.,
+        "{cell_scale} < {scale} < 1"
+    );
+}
+
 #[test]
 fn grid_column_focus_actions_move_the_grid_focus() {
     let mut layout = check_ops([
