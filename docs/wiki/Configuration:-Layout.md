@@ -10,6 +10,7 @@ layout {
     center-focused-column "never"
     always-center-single-column
     empty-workspace-above-first
+    focused-window-above-floating
     default-column-display "tabbed"
     background-color "#003300"
 
@@ -151,6 +152,24 @@ If set, niri will always add an empty workspace at the very start, in addition t
 ```kdl
 layout {
     empty-workspace-above-first
+}
+```
+
+### `focused-window-above-floating`
+
+<sup>Since: next release</sup>
+
+If set, focusing a tiled window raises it above the floating windows.
+Otherwise, floating windows always render on top of tiled windows.
+
+Only the focused tiled window is raised, the other tiled windows stay below the floating windows, so a floating window placed next to the focused window stays visible.
+Focusing a floating window (for example, by clicking it, or with `focus-floating` or `switch-focus-between-floating-and-tiling`) brings the floating windows back on top.
+
+A tiled window focused by `focus-follows-mouse` does not get raised, so moving the mouse across a tiled window doesn't cover the floating windows.
+
+```kdl
+layout {
+    focused-window-above-floating
 }
 ```
 
