@@ -8,6 +8,7 @@ use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options,
 use niri::render_helpers::{
     copy_framebuffer, create_texture, resources, shaders, RenderCtx, RenderIntent, RenderTarget,
 };
+use niri::utils::transaction::{Transaction, TransactionBlocker};
 use niri_config::{Color, OutputName, PresetSize};
 use niri_visual_tests::test_window::TestWindow;
 use smithay::backend::egl::ffi::make_sure_egl_is_loaded;
@@ -243,12 +244,31 @@ fn main() -> anyhow::Result<()> {
         (2800, "11_grid_closing", None),
         (3000, "12_grid_closing", None),
         (5000, "13_grid_closed", None),
+        // Close the focused floating window: focus goes back to the green tiled window, which
+        // must not cover the closing animation.
+        (5100, "14_focus_floating", Some(|l| l.focus_floating())),
+        (5200, "15_close_floating", None),
+        (5230, "16_floating_closing", None),
+        (5300, "17_floating_closing", None),
+        (6500, "18_floating_closed", None),
     ];
+    let mut closed_floating = false;
 
     for (t_ms, name, step) in steps {
         clock.set_unadjusted(Duration::from_millis(*t_ms));
         if let Some(step) = step {
             step(&mut layout);
+        }
+        if !closed_floating && *t_ms >= 5200 {
+            closed_floating = true;
+            layout.update_render_elements(Some(&output));
+            layout.store_unmap_snapshot(&mut renderer, None, false, &2);
+            layout.start_close_animation_for_window(
+                &mut renderer,
+                &2,
+                TransactionBlocker::completed(),
+            );
+            layout.remove_window(&2, Transaction::new());
         }
         layout.advance_animations();
         layout.update_render_elements(Some(&output));
