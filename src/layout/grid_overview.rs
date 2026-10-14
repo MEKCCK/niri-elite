@@ -1316,14 +1316,13 @@ impl<W: LayoutElement> GridOverview<W> {
         self.tab_indicators.iter().map(|(id, _)| id)
     }
 
-    /// Renders the tab indicator next to the cell of this tab, if it has one.
-    pub(super) fn render_tab_indicator(
+    /// Renders the tab indicators next to the cells of tabs.
+    pub(super) fn render_tab_indicators(
         &self,
         renderer: &mut impl NiriRenderer,
-        window: &W::Id,
         push: &mut dyn FnMut(TabIndicatorRenderElement),
     ) {
-        if let Some((_, indicator)) = self.tab_indicators.iter().find(|(id, _)| id == window) {
+        for (_, indicator) in &self.tab_indicators {
             indicator.render(renderer, Point::default(), push);
         }
     }

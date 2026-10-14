@@ -1704,12 +1704,26 @@ impl<W: LayoutElement> Workspace<W> {
             // As the grid closes, the tabs merge back under the column's own indicator, which
             // the closing grid draws; two sets of indicators on the way would be a mess.
             if go.open {
-                // Sized in screen space like the focus ring, and drawn inside the thumbnail's edge:
-                // the gap between cells is too narrow for it next to a focus ring, and a focused
-                // neighbor's ring would cover it there.
-                let mut config = self.options.layout.tab_indicator;
+                // Sized in screen space like the focus ring, and right outside where the focus
+                // ring goes, as far past it as outside the grid. The ring widens to its grid width
+                // as the grid opens, and the indicator moves out with it.
+                let layout = &self.options.layout;
+                let progress = go.progress_value().clamp(0., 1.);
+                let (ring_width, past_ring) = if layout.focus_ring.off {
+                    (0., layout.tab_indicator.gap)
+                } else {
+                    let normal = layout.focus_ring.width;
+                    let grid = self
+                        .options
+                        .grid_overview
+                        .focus_ring_width
+                        .unwrap_or(normal);
+                    let width = normal + (grid - normal) * progress;
+                    (width, (layout.tab_indicator.gap - normal).max(0.))
+                };
+                let mut config = layout.tab_indicator;
                 config.place_within_column = false;
-                config.gap = -(config.width + 6.);
+                config.gap = ring_width + past_ring;
                 config.gaps_between_tabs = config.gaps_between_tabs.max(2.);
 
                 for (item, _) in &go.layout.entries {
@@ -3451,6 +3465,12 @@ impl<W: LayoutElement> Workspace<W> {
         // The focus rings go above every cell: a sliding ring passes over other cells and over
         // the one it slides to. They are hollow, so they never cover their own window.
         if matches!(render_pass, GridRenderPass::All | GridRenderPass::Focused) {
+            // The tab indicators sit right outside the focus rings, and above them: the gap
+            // between cells is narrow, so a focused neighbor's ring can reach under one.
+            go.render_tab_indicators(ctx.renderer, &mut |elem| {
+                let elem: ScrollingSpaceRenderElement<R> = elem.into();
+                push(elem.into())
+            });
             go.render_focus_rings(ctx.renderer, &mut |elem| push(elem.into()));
         }
 
@@ -3602,13 +3622,6 @@ impl<W: LayoutElement> Workspace<W> {
                 go.render_minimized_dim(ctx.renderer, item.window_id(), &mut |elem| {
                     push(elem.into())
                 });
-
-                if let GridItem::Tab { window_id, .. } = item {
-                    go.render_tab_indicator(ctx.renderer, window_id, &mut |elem| {
-                        let elem: ScrollingSpaceRenderElement<R> = elem.into();
-                        push(elem.into())
-                    });
-                }
 
                 match item {
                     GridItem::Column { col_idx, .. } => {
