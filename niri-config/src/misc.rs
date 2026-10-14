@@ -488,10 +488,25 @@ pub struct GridOverview {
     /// `None` keeps the width of the window's own focus ring. Either way, the width doesn't shrink
     /// with the cells.
     pub focus_ring_width: Option<f64>,
+    pub focus_ring_transition: GridFocusRingTransition,
     pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     pub grid_all_monitors: bool,
     pub default_mod_action: bool,
     pub minimized_highlight: GridMinimizedHighlight,
+}
+
+/// How the focus ring goes from one grid cell to another.
+///
+/// Timing comes from `animations { grid-focus-ring }`.
+#[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum GridFocusRingTransition {
+    /// The ring appears on the new cell right away.
+    None,
+    /// The new cell's ring grows out from its edge while the old one shrinks back and fades.
+    #[default]
+    Grow,
+    /// One ring slides from the old cell to the new one.
+    Slide,
 }
 
 /// Moving the mouse moves the grid focus to the cell under the pointer.
@@ -604,6 +619,7 @@ impl Default for GridOverview {
             // size next to the others.
             focused_column_scale: 1.,
             focus_ring_width: None,
+            focus_ring_transition: GridFocusRingTransition::default(),
             focus_follows_mouse: None,
             grid_all_monitors: true,
             default_mod_action: true,
@@ -743,6 +759,8 @@ pub struct GridOverviewPart {
     pub focused_column_scale: Option<FloatOrInt<1, 2>>,
     #[knuffel(child, unwrap(argument))]
     pub focus_ring_width: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child, unwrap(argument))]
+    pub focus_ring_transition: Option<GridFocusRingTransition>,
     #[knuffel(child)]
     pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     #[knuffel(child, unwrap(argument))]
@@ -769,6 +787,9 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         }
         if let Some(focus_ring_width) = &part.focus_ring_width {
             self.focus_ring_width = Some(focus_ring_width.0);
+        }
+        if let Some(focus_ring_transition) = part.focus_ring_transition {
+            self.focus_ring_transition = focus_ring_transition;
         }
         if let Some(focus_follows_mouse) = part.focus_follows_mouse {
             self.focus_follows_mouse = Some(focus_follows_mouse);

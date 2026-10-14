@@ -720,6 +720,46 @@ mod tests {
     }
 
     #[test]
+    fn grid_overview_focus_ring_transition_parses() {
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(
+            config.grid_overview.focus_ring_transition,
+            GridFocusRingTransition::Grow
+        );
+
+        for (name, expected) in [
+            ("none", GridFocusRingTransition::None),
+            ("grow", GridFocusRingTransition::Grow),
+            ("slide", GridFocusRingTransition::Slide),
+        ] {
+            let config = Config::parse_mem(&format!(
+                "grid-overview {{ focus-ring-transition \"{name}\"; }}"
+            ))
+            .unwrap();
+            assert_eq!(config.grid_overview.focus_ring_transition, expected);
+        }
+
+        let config = Config::parse_mem(
+            r#"
+            animations {
+                grid-focus-ring {
+                    duration-ms 300
+                    curve "linear"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.animations.grid_focus_ring.0.kind,
+            animations::Kind::Easing(animations::EasingParams {
+                duration_ms: 300,
+                curve: animations::Curve::Linear,
+            })
+        );
+    }
+
+    #[test]
     fn grid_overview_minimized_highlight_parses() {
         let config = Config::parse_mem(
             r##"
@@ -1982,6 +2022,17 @@ mod tests {
                         ),
                     },
                 ),
+                grid_focus_ring: GridFocusRingAnim(
+                    Animation {
+                        off: false,
+                        kind: Easing(
+                            EasingParams {
+                                duration_ms: 150,
+                                curve: EaseOutCubic,
+                            },
+                        ),
+                    },
+                ),
                 magnifier: MagnifierAnim(
                     Animation {
                         off: false,
@@ -2084,6 +2135,7 @@ mod tests {
                 min_scale: 0.08,
                 focused_column_scale: 1.0,
                 focus_ring_width: None,
+                focus_ring_transition: Grow,
                 focus_follows_mouse: None,
                 grid_all_monitors: true,
                 default_mod_action: true,
@@ -2927,6 +2979,11 @@ mod tests {
 
         -                0.6666666666666666,
         +                0.66667,
+
+        -        focus_ring_width: None,
+        +        focus_ring_width: Some(
+        +            8.0,
+        +        ),
 
         -        track_cursor: true,
         +        track_cursor: false,

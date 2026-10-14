@@ -395,6 +395,7 @@ grid-overview {
 The focused cell is marked by the focus ring of its window, drawn at a fixed on-screen width rather than scaled down with the cell.
 By default, that is the width of the window's own focus ring; this setting picks another width for the grid, in logical pixels.
 The ring changes between the two widths as the grid opens and closes.
+The ring is always drawn around the window rather than as a background behind it, so it doesn't show through semitransparent windows in the grid.
 
 The colors are the focus ring's, so there is no separate setting for them.
 If the focus ring is off, nothing marks the focused cell other than `focused-column-scale`.
@@ -402,6 +403,24 @@ If the focus ring is off, nothing marks the focused cell other than `focused-col
 ```kdl
 grid-overview {
     focus-ring-width 8
+}
+```
+
+#### `focus-ring-transition`
+
+<sup>Since: 26.04 (fork)</sup>
+
+How the focus ring goes from one cell to another when the focus moves.
+
+- `"grow"` (the default): the new cell's ring grows out from its edge, while the old one shrinks back and fades out. Each ring stays on its own cell.
+- `"slide"`: one ring slides and resizes from the old cell to the new one, over the cells in between.
+- `"none"`: the ring appears on the new cell right away.
+
+The timing is the [`grid-focus-ring`](./Configuration:-Animations.md#grid-focus-ring) animation; turning it off works like `"none"`.
+
+```kdl
+grid-overview {
+    focus-ring-transition "slide"
 }
 ```
 

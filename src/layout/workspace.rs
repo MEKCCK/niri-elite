@@ -22,7 +22,7 @@ use tracing::debug;
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::focus_ring::FocusRingRenderElement;
 use super::grid_overview::{
-    GridDirection, GridEntryInfo, GridItem, GridOverview, MinimizedHighlightEntry,
+    GridDirection, GridEntryInfo, GridItem, GridOverview, GridRingTarget, MinimizedHighlightEntry,
 };
 use super::scrolling::{
     Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingPart, ScrollingSpace,
@@ -1571,39 +1571,6 @@ impl<W: LayoutElement> Workspace<W> {
                         .then_some(())
                         .and_then(|_| grid_focused_window_id.as_ref());
 
-                    if is_grid_focused {
-                        if let Some(window_id) = focused_window {
-                            // The focus ring is what marks the focused cell, so keep it at the same
-                            // on-screen width however far the cell is scaled down. The ring is
-                            // drawn in tile coordinates and scaled with the tile, so divide by the
-                            // scale the tile is drawn at right now: following it through the open
-                            // and close animations keeps the ring as wide as outside the grid.
-                            let (_, item_scale) =
-                                self.grid_item_render_visual_transform(go, item, info);
-                            let (_, tile_scale) =
-                                go.window_visual_transform(window_id, Point::default(), item_scale);
-                            let grid_width = self.options.grid_overview.focus_ring_width;
-                            let progress = go.progress_value().clamp(0., 1.);
-
-                            for tile in self.scrolling.tiles_mut().chain(self.floating.tiles_mut())
-                            {
-                                if tile.window().id() == window_id {
-                                    let normal_width = tile.focus_ring().config().width;
-                                    // A grid width set in the config still has to start out from
-                                    // the normal width as the grid opens.
-                                    let width = grid_width.map_or(normal_width, |grid_width| {
-                                        normal_width + (grid_width - normal_width) * progress
-                                    });
-                                    if width > 0. {
-                                        tile.focus_ring_mut()
-                                            .set_width_override(width / tile_scale.max(0.0001));
-                                    }
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
                     self.scrolling.update_grid_item_render_elements(
                         item,
                         focused_window,
@@ -1620,6 +1587,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.update_grid_minimized_highlights();
+        self.update_grid_focus_rings(is_active);
 
         if layer.is_normal() {
             self.shadow.update_render_elements(
@@ -1630,6 +1598,105 @@ impl<W: LayoutElement> Workspace<W> {
                 1.,
             );
         }
+    }
+
+    /// Lays out the focus rings the grid draws around its cells.
+    fn update_grid_focus_rings(&mut self, is_active: bool) {
+        let scale = self.scale.fractional_scale();
+        let view_size = self.view_size;
+
+        let mut focus = None;
+        let mut targets = Vec::new();
+        if let Some(go) = &self.grid_overview {
+            if go.open || go.progress.is_some() {
+                // While a window is grabbed, the focus is on that window rather than on a cell.
+                focus = self
+                    .grid_focused_window_id()
+                    .filter(|_| go.grabbed_window.is_none());
+                let progress = go.progress_value().clamp(0., 1.);
+
+                let ids = focus.iter().chain(go.focus_ring_windows());
+                for id in ids {
+                    if targets.iter().any(|t: &GridRingTarget<W>| &t.window == id) {
+                        continue;
+                    }
+                    let Some(tile) = self.tiles().find(|tile| tile.window().id() == id) else {
+                        continue;
+                    };
+                    let config = *tile.focus_ring().config();
+                    if config.off {
+                        continue;
+                    }
+                    let Some((rect, tile_scale)) = self.grid_tile_visual_rect(go, id) else {
+                        continue;
+                    };
+
+                    // Outside the grid, a maximized or fullscreen window has no focus ring, so
+                    // fade it in and out with the grid.
+                    let expanded = tile.expanded_progress();
+                    let alpha = 1. - expanded * (1. - progress);
+
+                    targets.push(GridRingTarget {
+                        window: id.clone(),
+                        rect,
+                        radius: tile.outline_corner_radius().scaled_by(tile_scale as f32),
+                        config,
+                        is_urgent: tile.window().is_urgent(),
+                        alpha,
+                    });
+                }
+            }
+        }
+
+        let focus = focus.filter(|id| targets.iter().any(|t| &t.window == id));
+        if let Some(go) = &mut self.grid_overview {
+            go.update_focus_rings(focus.as_ref(), &targets, is_active, view_size, scale);
+        }
+    }
+
+    /// Where a window's tile is drawn in the grid right now, and at what scale.
+    ///
+    /// This matches the positions in render_grid_overview().
+    fn grid_tile_visual_rect(
+        &self,
+        go: &GridOverview<W>,
+        id: &W::Id,
+    ) -> Option<(Rectangle<f64, Logical>, f64)> {
+        let item = self.grid_item_for_window(id)?;
+        let (item, info) = go.layout.entries.iter().find(|(it, _)| *it == item)?;
+        if !go.open && !self.grid_item_visible_when_closing(item) {
+            return None;
+        }
+        let (visual_pos, visual_scale) = self.grid_item_render_visual_transform(go, item, info);
+
+        let (tile, pos, scale) = match item {
+            GridItem::Column { .. } | GridItem::Tab { .. } => {
+                let preview = self.scrolling.grid_preview_with_stable_origin(item)?;
+                let preview_tile = preview
+                    .tiles
+                    .into_iter()
+                    .find(|t| t.tile.window().id() == id)?;
+                let target_tile_pos = visual_pos + preview_tile.pos.upscale(visual_scale);
+                let (pos, scale) = go.window_visual_transform(id, target_tile_pos, visual_scale);
+                (preview_tile.tile, pos, scale)
+            }
+            GridItem::Floating { .. } => {
+                let tile = self
+                    .floating
+                    .tiles()
+                    .find(|tile| tile.window().id() == id)?;
+                let (pos, scale) = go.window_visual_transform(id, visual_pos, visual_scale);
+                (tile, pos, scale)
+            }
+        };
+
+        if tile.window().is_minimized() && !go.open {
+            // Minimized windows fade out in place as the grid closes; no ring for them.
+            return None;
+        }
+
+        let size = tile.animated_tile_size().upscale(scale);
+        Some((Rectangle::new(pos, size), scale))
     }
 
     /// Sizes the highlights drawn behind the cells of minimized windows.
@@ -3299,6 +3366,12 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
 
+        // The focus rings go above every cell: a sliding ring passes over other cells and over
+        // the one it slides to. They are hollow, so they never cover their own window.
+        if matches!(render_pass, GridRenderPass::All | GridRenderPass::Focused) {
+            go.render_focus_rings(ctx.renderer, &mut |elem| push(elem.into()));
+        }
+
         {
             let render_tile = |ctx: &mut RenderCtx<R>,
                                push: &mut dyn FnMut(WorkspaceRenderElement<R>),
@@ -3306,7 +3379,6 @@ impl<W: LayoutElement> Workspace<W> {
                                tile_rel_pos: Point<f64, Logical>,
                                item_visual_pos: Point<f64, Logical>,
                                item_visual_scale: f64,
-                               render_focus_ring: bool,
                                suppress_decorations: bool,
                                suppress_shadow: bool,
                                ignore_alpha_animation: bool| {
@@ -3339,22 +3411,17 @@ impl<W: LayoutElement> Workspace<W> {
                     push(elem.into());
                 };
 
+                // The grid draws the focus rings itself, see GridOverview::update_focus_rings().
                 if ignore_alpha_animation {
                     tile.render_ignoring_alpha_animation(
                         ctx.r(),
                         tile_rel_pos,
                         xray_pos,
-                        render_focus_ring,
+                        false,
                         &mut push_grid_elem,
                     );
                 } else {
-                    tile.render(
-                        ctx.r(),
-                        tile_rel_pos,
-                        xray_pos,
-                        render_focus_ring,
-                        &mut push_grid_elem,
-                    );
+                    tile.render(ctx.r(), tile_rel_pos, xray_pos, false, &mut push_grid_elem);
                 }
             };
 
@@ -3454,14 +3521,12 @@ impl<W: LayoutElement> Workspace<W> {
                         else {
                             return;
                         };
-                        let grid_tile_idx = go.get_column_tile_focus(*col_idx);
                         // Render lower tiles on top of upper ones. Tiles are anchored at their
                         // top edge, so any transient overflow (e.g. a freshly merged-in window
                         // still at its full pre-resize height) extends downwards; drawing the
                         // lower neighbor above it hides the overflow, and the neighbor's top
                         // edge cleanly reveals the new window as the sizes settle.
                         for preview_tile in preview.tiles.into_iter().rev() {
-                            let is_grid_focused = preview_tile.tile_idx == grid_tile_idx;
                             let target_tile_pos =
                                 visual_pos + preview_tile.pos.upscale(visual_scale);
                             let (tile_visual_pos, tile_visual_scale) = go.window_visual_transform(
@@ -3519,14 +3584,13 @@ impl<W: LayoutElement> Workspace<W> {
                                 preview_tile.pos,
                                 item_visual_pos,
                                 tile_visual_scale,
-                                is_focused && is_grid_focused,
                                 false,
                                 false,
                                 !preview_tile.tile.window().is_minimized(),
                             );
                         }
                     }
-                    GridItem::Tab { window_id, .. } => {
+                    GridItem::Tab { .. } => {
                         let Some(preview) = self.scrolling.grid_preview_with_stable_origin(item)
                         else {
                             return;
@@ -3549,7 +3613,6 @@ impl<W: LayoutElement> Workspace<W> {
                                 preview_tile.pos,
                                 item_visual_pos,
                                 tile_visual_scale,
-                                is_focused && preview_tile.tile.window().id() == window_id,
                                 suppress_decorations,
                                 suppress_shadow,
                                 !preview_tile.tile.window().is_minimized(),
@@ -3590,7 +3653,6 @@ impl<W: LayoutElement> Workspace<W> {
                             Point::from((0., 0.)),
                             tile_visual_pos,
                             tile_visual_scale,
-                            is_focused,
                             false,
                             false,
                             !tile.window().is_minimized(),

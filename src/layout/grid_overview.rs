@@ -2,7 +2,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use niri_config::animations::Kind;
-use niri_config::CornerRadius;
+use niri_config::{CornerRadius, GridFocusRingTransition};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
@@ -151,6 +151,16 @@ pub struct GridOverview<W: LayoutElement> {
     /// They live here rather than on the tiles because they are sized in screen space: a marker
     /// that scaled with the cell would get thinner the more windows the grid shows.
     minimized_highlights: Vec<MinimizedHighlight<W>>,
+    /// Focus rings drawn around the windows of grid cells.
+    ///
+    /// The grid draws these instead of the windows' own focus rings, which would scale down with
+    /// the cells. One ring per window: the focused one, plus, with the grow transition, the ones
+    /// still shrinking back on cells that lost the focus.
+    focus_rings: Vec<GridFocusRing<W>>,
+    /// The window the focus ring was on as of the last update, to tell when the focus moves.
+    ring_focus: Option<W::Id>,
+    /// With the slide transition, where the ring slides from.
+    ring_slide: Option<GridRingSlide>,
     /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
     /// tile, so that the choice can follow its column when column indices shift.
     pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
@@ -182,6 +192,9 @@ impl<W: LayoutElement> GridOverview<W> {
             added_window_ids: Vec::new(),
             restored_window_ids: Vec::new(),
             minimized_highlights: Vec::new(),
+            focus_rings: Vec::new(),
+            ring_focus: None,
+            ring_slide: None,
             column_tile_focus: Vec::new(),
             clock,
             options,
@@ -1013,6 +1026,184 @@ impl<W: LayoutElement> GridOverview<W> {
         highlight.ring.render(renderer, location, push);
     }
 
+    /// Windows that have a focus ring in the grid.
+    pub(super) fn focus_ring_windows(&self) -> impl Iterator<Item = &W::Id> {
+        self.focus_rings.iter().map(|ring| &ring.window)
+    }
+
+    /// Updates the focus rings drawn around grid cells.
+    ///
+    /// `focus` is the focused window, if it has a ring, and `targets` has the current geometry of
+    /// it and of every window from [`Self::focus_ring_windows`] still in the grid.
+    pub(super) fn update_focus_rings(
+        &mut self,
+        focus: Option<&W::Id>,
+        targets: &[GridRingTarget<W>],
+        is_active: bool,
+        view_size: Size<f64, Logical>,
+        scale: f64,
+    ) {
+        let transition = self.options.grid_overview.focus_ring_transition;
+        let anim_config = self.options.animations.grid_focus_ring.0;
+        let grid_width = self.options.grid_overview.focus_ring_width;
+        let progress = self.progress_value().clamp(0., 1.);
+        let target_of = |id: &W::Id| targets.iter().find(|t| &t.window == id);
+
+        // Rings only animate when the focus moves from one cell to another, not when a ring first
+        // shows up as the grid opens.
+        let focus_moved =
+            self.ring_focus.is_some() && focus.is_some() && self.ring_focus.as_ref() != focus;
+        self.ring_focus = focus.cloned();
+
+        let clock = self.clock.clone();
+        let new_ring = |window: &W::Id| GridFocusRing {
+            window: window.clone(),
+            ring: FocusRing::new(niri_config::FocusRing::default()),
+            shown: 1.,
+            fade: None,
+            rect: None,
+        };
+
+        match transition {
+            GridFocusRingTransition::None | GridFocusRingTransition::Slide => {
+                // One ring, on the focused window. Keep its buffers when it moves.
+                self.focus_rings.truncate(1);
+                match (focus, self.focus_rings.first_mut()) {
+                    (Some(focus), Some(ring)) => {
+                        ring.window = focus.clone();
+                        ring.shown = 1.;
+                        ring.fade = None;
+                    }
+                    (Some(focus), None) => self.focus_rings.push(new_ring(focus)),
+                    (None, _) => self.focus_rings.clear(),
+                }
+
+                if transition == GridFocusRingTransition::Slide && focus_moved {
+                    // Slide from where the ring is drawn right now, which is somewhere along the
+                    // way if a slide is ongoing.
+                    let from = self.focus_rings.first().and_then(|ring| ring.rect);
+                    self.ring_slide = from.map(|(rect, radius)| GridRingSlide {
+                        from: rect,
+                        from_radius: radius,
+                        anim: Animation::new(clock.clone(), 0., 1., 0., anim_config),
+                    });
+                } else if transition == GridFocusRingTransition::None {
+                    self.ring_slide = None;
+                }
+            }
+            GridFocusRingTransition::Grow => {
+                self.ring_slide = None;
+
+                for ring in &mut self.focus_rings {
+                    let target = if Some(&ring.window) == focus { 1. } else { 0. };
+                    if ring.shown != target {
+                        // Start from wherever an ongoing fade has got to.
+                        let from = ring.shown_value();
+                        ring.shown = target;
+                        ring.fade =
+                            Some(Animation::new(clock.clone(), from, target, 0., anim_config));
+                    }
+                }
+                if let Some(focus) = focus {
+                    if !self.focus_rings.iter().any(|ring| &ring.window == focus) {
+                        let mut ring = new_ring(focus);
+                        if focus_moved {
+                            ring.fade =
+                                Some(Animation::new(clock.clone(), 0., 1., 0., anim_config));
+                        }
+                        self.focus_rings.push(ring);
+                    }
+                }
+                self.drop_hidden_focus_rings();
+            }
+        }
+
+        let slide = self.ring_slide.as_ref().map(|slide| {
+            let t = slide.anim.value();
+            (slide, t)
+        });
+
+        for ring in &mut self.focus_rings {
+            let Some(target) = target_of(&ring.window) else {
+                ring.rect = None;
+                continue;
+            };
+
+            let shown = ring.shown_value().clamp(0., 1.);
+            let normal_width = target.config.width;
+            let full_width = grid_width.map_or(normal_width, |grid_width| {
+                normal_width + (grid_width - normal_width) * progress
+            });
+            let width = full_width * shown;
+
+            let (rect, radius) = match slide {
+                Some((slide, t)) => (
+                    lerp_rect(slide.from, target.rect, t),
+                    lerp_radius(slide.from_radius, target.radius, t as f32),
+                ),
+                None => (target.rect, target.radius),
+            };
+
+            let mut config = target.config;
+            config.off = false;
+            config.width = width;
+            ring.ring.update_config(config);
+            // Relative to the ring, for gradients relative to the workspace view.
+            let view_rect = Rectangle::new(Point::from((-rect.loc.x, -rect.loc.y)), view_size);
+            ring.ring.update_render_elements(
+                rect.size,
+                is_active,
+                true,
+                target.is_urgent,
+                view_rect,
+                radius.expanded_by(width as f32),
+                scale,
+                (shown * target.alpha) as f32,
+            );
+            ring.rect = Some((rect, radius));
+        }
+    }
+
+    fn focus_rings_animating(&self) -> bool {
+        self.ring_slide.is_some() || self.focus_rings.iter().any(|ring| ring.fade.is_some())
+    }
+
+    fn advance_focus_rings(&mut self) {
+        for ring in &mut self.focus_rings {
+            if ring.fade.as_ref().is_some_and(|fade| fade.is_done()) {
+                ring.fade = None;
+            }
+        }
+        self.drop_hidden_focus_rings();
+
+        if self
+            .ring_slide
+            .as_ref()
+            .is_some_and(|slide| slide.anim.is_done())
+        {
+            self.ring_slide = None;
+        }
+    }
+
+    /// Drops the rings that shrank all the way back.
+    fn drop_hidden_focus_rings(&mut self) {
+        self.focus_rings
+            .retain(|ring| ring.shown > 0. || ring.fade.is_some());
+    }
+
+    /// Renders the focus rings of the grid cells.
+    pub(super) fn render_focus_rings(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        for ring in &self.focus_rings {
+            if let Some((rect, _)) = ring.rect {
+                ring.ring.render(renderer, rect.loc, push);
+            }
+        }
+    }
+
     pub(super) fn record_added_window(&mut self, id: W::Id) {
         if !self.added_window_ids.contains(&id) {
             self.added_window_ids.push(id);
@@ -1085,6 +1276,7 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     pub fn advance_animations(&mut self) {
+        self.advance_focus_rings();
         if let Some(OverviewProgress::Animation(anim)) = &mut self.progress {
             if anim.is_done() {
                 self.progress = if self.open {
@@ -1142,6 +1334,7 @@ impl<W: LayoutElement> GridOverview<W> {
             || self.rearrange_anim.is_some()
             || self.focus_boost_anim.is_some()
             || self.minimized_highlights_animating()
+            || self.focus_rings_animating()
     }
 }
 
@@ -1389,6 +1582,72 @@ pub(super) struct MinimizedHighlightEntry<W: LayoutElement> {
     pub size: Size<f64, Logical>,
     pub is_urgent: bool,
     pub is_minimized: bool,
+}
+
+/// Where and how to draw the focus ring of a window in the grid, as input to
+/// [`GridOverview::update_focus_rings`].
+pub(super) struct GridRingTarget<W: LayoutElement> {
+    pub window: W::Id,
+    /// The window's tile as drawn in the grid right now.
+    pub rect: Rectangle<f64, Logical>,
+    /// The tile's corner radius, scaled down with it.
+    pub radius: CornerRadius,
+    /// The window's own focus ring settings.
+    pub config: niri_config::FocusRing,
+    pub is_urgent: bool,
+    /// Opacity of the ring, for windows whose own ring is hidden outside the grid.
+    pub alpha: f64,
+}
+
+/// A focus ring the grid draws around a cell's window.
+#[derive(Debug)]
+struct GridFocusRing<W: LayoutElement> {
+    window: W::Id,
+    ring: FocusRing,
+    /// How far the ring is grown in: 1 on the focused window, 0 once it lost the focus.
+    shown: f64,
+    /// The ongoing change of `shown`, with the grow transition.
+    fade: Option<Animation>,
+    /// Where the ring was last laid out: the tile's rectangle and corner radius.
+    rect: Option<(Rectangle<f64, Logical>, CornerRadius)>,
+}
+
+impl<W: LayoutElement> GridFocusRing<W> {
+    fn shown_value(&self) -> f64 {
+        self.fade
+            .as_ref()
+            .map_or(self.shown, |fade| fade.clamped_value())
+    }
+}
+
+/// The focus ring sliding to a new cell.
+#[derive(Debug)]
+struct GridRingSlide {
+    from: Rectangle<f64, Logical>,
+    from_radius: CornerRadius,
+    anim: Animation,
+}
+
+fn lerp_rect(
+    from: Rectangle<f64, Logical>,
+    to: Rectangle<f64, Logical>,
+    t: f64,
+) -> Rectangle<f64, Logical> {
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    Rectangle::new(
+        Point::from((lerp(from.loc.x, to.loc.x), lerp(from.loc.y, to.loc.y))),
+        Size::from((lerp(from.size.w, to.size.w), lerp(from.size.h, to.size.h))),
+    )
+}
+
+fn lerp_radius(from: CornerRadius, to: CornerRadius, t: f32) -> CornerRadius {
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    CornerRadius {
+        top_left: lerp(from.top_left, to.top_left),
+        top_right: lerp(from.top_right, to.top_right),
+        bottom_right: lerp(from.bottom_right, to.bottom_right),
+        bottom_left: lerp(from.bottom_left, to.bottom_left),
+    }
 }
 
 /// A highlight drawn behind the cell of a minimized window, with its own fade.

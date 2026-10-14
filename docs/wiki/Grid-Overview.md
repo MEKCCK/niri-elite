@@ -77,6 +77,15 @@ grid-overview {
 }
 ```
 
+When the focus moves, the new cell's ring grows in while the old one shrinks back.
+`focus-ring-transition` picks another way, `"slide"` or `"none"`, and the `grid-focus-ring` animation sets the timing:
+
+```kdl
+grid-overview {
+    focus-ring-transition "slide"
+}
+```
+
 The focused column can also be scaled up with the `focused-column-scale` setting.
 This is off by default, since a larger cell no longer shows the window's size next to the others:
 

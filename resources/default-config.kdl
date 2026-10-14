@@ -371,8 +371,11 @@ grid-overview {
     min-scale 0.08
 
     // The focus ring marks the focused cell and keeps its on-screen width in the grid.
-    // Uncomment to make it thicker there.
-    // focus-ring-width 8
+    // Make it twice as thick as the normal focus ring there, so it stands out on small cells.
+    focus-ring-width 8
+
+    // How the focus ring moves between cells: "grow" (the default), "slide" or "none".
+    // focus-ring-transition "slide"
 
     // Scale the focused column relative to its cell. Ranges from 1 to 2.
     // focused-column-scale 1.04

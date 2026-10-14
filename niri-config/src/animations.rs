@@ -25,6 +25,7 @@ pub struct Animations {
     pub screen_cast_picker_open_close: ScreenCastPickerOpenCloseAnim,
     pub overview_open_close: OverviewOpenCloseAnim,
     pub grid_overview_open_close: GridOverviewOpenCloseAnim,
+    pub grid_focus_ring: GridFocusRingAnim,
     pub magnifier: MagnifierAnim,
     pub recent_windows_close: RecentWindowsCloseAnim,
     pub cursor_enlarge: CursorEnlargeAnim,
@@ -47,6 +48,7 @@ impl Default for Animations {
             screen_cast_picker_open_close: Default::default(),
             overview_open_close: Default::default(),
             grid_overview_open_close: Default::default(),
+            grid_focus_ring: Default::default(),
             magnifier: Default::default(),
             recent_windows_close: Default::default(),
             cursor_enlarge: Default::default(),
@@ -87,6 +89,8 @@ pub struct AnimationsPart {
     #[knuffel(child)]
     pub grid_overview_open_close: Option<GridOverviewOpenCloseAnim>,
     #[knuffel(child)]
+    pub grid_focus_ring: Option<GridFocusRingAnim>,
+    #[knuffel(child)]
     pub magnifier: Option<MagnifierAnim>,
     #[knuffel(child)]
     pub recent_windows_close: Option<RecentWindowsCloseAnim>,
@@ -119,6 +123,7 @@ impl MergeWith<AnimationsPart> for Animations {
             screen_cast_picker_open_close,
             overview_open_close,
             grid_overview_open_close,
+            grid_focus_ring,
             magnifier,
             recent_windows_close,
             cursor_enlarge,
@@ -417,6 +422,24 @@ impl Default for GridOverviewOpenCloseAnim {
     }
 }
 
+/// The focus ring moving to another grid cell, as set by `grid-overview { focus-ring-transition }`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridFocusRingAnim(pub Animation);
+
+impl Default for GridFocusRingAnim {
+    fn default() -> Self {
+        // Short and easing out: with grid focus-follows-mouse the ring chases the pointer, and a
+        // spring would lag behind it.
+        Self(Animation {
+            off: false,
+            kind: Kind::Easing(EasingParams {
+                duration_ms: 150,
+                curve: Curve::EaseOutCubic,
+            }),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RecentWindowsCloseAnim(pub Animation);
 
@@ -706,6 +729,21 @@ where
 }
 
 impl<S> knuffel::Decode<S> for CursorEnlargeAnim
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        let default = Self::default().0;
+        Ok(Self(Animation::decode_node(node, ctx, default, |_, _| {
+            Ok(false)
+        })?))
+    }
+}
+
+impl<S> knuffel::Decode<S> for GridFocusRingAnim
 where
     S: knuffel::traits::ErrorSpan,
 {

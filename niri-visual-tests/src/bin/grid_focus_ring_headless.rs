@@ -98,7 +98,13 @@ fn main() -> anyhow::Result<()> {
     shaders::init(&mut renderer);
 
     // Optional grid focus-ring-width override, in logical pixels.
-    let grid_width: Option<f64> = std::env::args().nth(2).and_then(|w| w.parse().ok());
+    // Usage: grid-focus-ring-headless OUT_DIR [none|grow|slide] [GRID_RING_WIDTH]
+    let transition = match std::env::args().nth(2).as_deref() {
+        Some("none") => niri_config::GridFocusRingTransition::None,
+        Some("slide") => niri_config::GridFocusRingTransition::Slide,
+        _ => niri_config::GridFocusRingTransition::Grow,
+    };
+    let grid_width: Option<f64> = std::env::args().nth(3).and_then(|w| w.parse().ok());
 
     let mut clock = Clock::with_time(Duration::ZERO);
     let size: Size<i32, Logical> = Size::from((1280, 720));
@@ -152,6 +158,7 @@ fn main() -> anyhow::Result<()> {
         },
         grid_overview: niri_config::GridOverview {
             focus_ring_width: grid_width,
+            focus_ring_transition: transition,
             ..Default::default()
         },
         ..Default::default()
@@ -214,16 +221,26 @@ fn main() -> anyhow::Result<()> {
     let steps: &[(u64, &str, Option<Step>)] = &[
         (100, "01_normal", None),
         (200, "02_open_start", Some(|l| l.toggle_grid_overview())),
-        (250, "03_opening", None),
-        (350, "04_opening", None),
-        (500, "05_opening", None),
-        (2500, "06_open", None),
-        (2600, "07_focus_right", Some(|l| l.focus_right())),
-        (4000, "08_moved", None),
-        (4100, "09_close_start", Some(|l| l.toggle_grid_overview())),
-        (4200, "10_closing", None),
-        (4400, "11_closing", None),
-        (6000, "12_closed", None),
+        (300, "03_opening", None),
+        (2000, "04_open", None),
+        // One focus move, frame by frame (the default animation is 150 ms).
+        (2100, "05_move", Some(|l| l.focus_right())),
+        (2120, "06_move", None),
+        (2140, "07_move", None),
+        (2170, "08_move", None),
+        (2200, "09_move", None),
+        (2250, "10_move", None),
+        (2400, "11_moved", None),
+        // Two quick moves back, the second one interrupting the first.
+        (2500, "12_back", Some(|l| l.focus_left())),
+        (2540, "13_back", None),
+        (2560, "14_forth", Some(|l| l.focus_right())),
+        (2600, "15_forth", None),
+        (2650, "16_forth", None),
+        (2900, "17_settled", None),
+        (3000, "18_close_start", Some(|l| l.toggle_grid_overview())),
+        (3100, "19_closing", None),
+        (5000, "20_closed", None),
     ];
     for (t_ms, name, step) in steps {
         clock.set_unadjusted(Duration::from_millis(*t_ms));
@@ -249,32 +266,50 @@ fn main() -> anyhow::Result<()> {
 
         let bytes = render_frame(&mut renderer, size.to_physical(1), elements)?;
 
-        // Measure the focus ring: the orange pixels on the row through the focused thumbnail.
+        // Measure the rings: orange pixels on the row through the middle of the first row of
+        // cells, counted per cell (both sides of a ring, so twice its width), and where the
+        // orange starts and ends on that row.
         let orange = |x: i32, y: i32| {
             let i = ((y * size.w + x) * 4) as usize;
             let (b, g, r) = (bytes[i], bytes[i + 1], bytes[i + 2]);
             r > 200 && (130..200).contains(&g) && b < 110
         };
-        let mut best = (0, 0);
-        for y in (0..size.h).step_by(4) {
-            let n = (0..size.w).filter(|&x| orange(x, y)).count();
-            // Rows crossing the ring's vertical sides have exactly two runs; take the narrowest
-            // full-height side row, which is the ring width twice.
-            if n > 0 && (best.0 == 0 || n < best.0) {
-                let runs = (1..size.w)
-                    .filter(|&x| orange(x, y) && !orange(x - 1, y))
-                    .count();
-                if runs == 2 {
-                    best = (n, y);
+        // The cells of windows 0 (green) and 1 (red), found by their colors.
+        let bbox = |rgb: (u8, u8, u8)| {
+            let mut bb: Option<(i32, i32, i32, i32)> = None;
+            for y in (0..size.h).step_by(2) {
+                for x in (0..size.w).step_by(2) {
+                    let i = ((y * size.w + x) * 4) as usize;
+                    let (b, g, r) = (bytes[i], bytes[i + 1], bytes[i + 2]);
+                    let close = |a: u8, b: u8| (a as i32 - b as i32).abs() < 12;
+                    if close(r, rgb.0) && close(g, rgb.1) && close(b, rgb.2) {
+                        bb = Some(match bb {
+                            None => (x, y, x, y),
+                            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                        });
+                    }
                 }
+            }
+            bb
+        };
+        let mut line = String::new();
+        let cells = [bbox((38, 163, 105)), bbox((224, 28, 36))];
+        if let [Some(c0), Some(_)] = cells {
+            let y = (c0.1 + c0.3) / 2;
+            for (id, cell) in cells.iter().enumerate() {
+                let (x0, _, x1, _) = cell.unwrap();
+                let n = ((x0 - 14).max(0)..(x1 + 14).min(size.w))
+                    .filter(|&x| orange(x, y))
+                    .count();
+                line += &format!(" cell{id}={:>4.1}px", n as f64 / 2.);
+            }
+            let xs: Vec<i32> = (0..size.w).filter(|&x| orange(x, y)).collect();
+            if let (Some(a), Some(b)) = (xs.first(), xs.last()) {
+                line += &format!("  orange x {a}..{b}");
             }
         }
         let focus = layout.focus().map(|w| *w.id());
-        eprintln!(
-            "{name}: focus={focus:?} ring width on screen ~= {:.1}px (row {})",
-            best.0 as f64 / 2.,
-            best.1
-        );
+        eprintln!("{name}: focus={focus:?}{line}");
 
         let path = format!("{out_dir}/{name}.png");
         save_png(&path, size.w as u32, size.h as u32, &bytes)?;

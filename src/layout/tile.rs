@@ -746,7 +746,7 @@ impl<W: LayoutElement> Tile<W> {
         }
     }
 
-    fn expanded_progress(&self) -> f64 {
+    pub fn expanded_progress(&self) -> f64 {
         if let Some(resize) = &self.resize_animation {
             if let Some(anim) = &resize.expanded_progress {
                 return anim.clamped_value().clamp(0., 1.);
@@ -888,6 +888,14 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         size
+    }
+
+    /// Corner radius of the tile's outline, which its focus ring goes around.
+    pub fn outline_corner_radius(&self) -> CornerRadius {
+        let border_width = self.visual_border_width().unwrap_or(0.);
+        self.window
+            .geometry_corner_radius()
+            .expanded_by(border_width as f32)
     }
 
     pub fn animated_tile_size(&self) -> Size<f64, Logical> {
