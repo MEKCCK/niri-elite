@@ -22,6 +22,8 @@ pub struct TabIndicator {
     config: niri_config::TabIndicator,
     /// Opacity of the whole indicator.
     alpha: f32,
+    /// The rectangle the tabs cover, as of the last update, in the coordinates of the area.
+    bounds: Option<Rectangle<f64, Logical>>,
 }
 
 #[derive(Debug)]
@@ -46,7 +48,13 @@ impl TabIndicator {
             open_anim: None,
             config,
             alpha: 1.,
+            bounds: None,
         }
+    }
+
+    /// The rectangle the tabs cover, as of the last update.
+    pub fn bounds(&self) -> Option<Rectangle<f64, Logical>> {
+        self.bounds
     }
 
     pub fn update_config(&mut self, config: niri_config::TabIndicator) {
@@ -176,6 +184,7 @@ impl TabIndicator {
         is_active: bool,
         scale: f64,
     ) {
+        self.bounds = None;
         if !enabled || self.config.off {
             self.shader_locs.clear();
             self.shaders.clear();
@@ -197,7 +206,8 @@ impl TabIndicator {
         let shared_rounded_corners = self.config.gaps_between_tabs == 0.;
         let mut tabs_left = tab_count;
 
-        let rects = self.tab_rects(area, count, scale);
+        let rects: Vec<_> = self.tab_rects(area, count, scale).collect();
+        self.bounds = rects.iter().copied().reduce(|a, b| a.merge(b));
         for ((shader, loc), (tab, rect)) in zip(
             zip(&mut self.shaders, &mut self.shader_locs),
             zip(tabs, rects),

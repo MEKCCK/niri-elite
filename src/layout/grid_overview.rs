@@ -164,7 +164,7 @@ pub struct GridOverview<W: LayoutElement> {
     ring_slide: Option<GridRingSlide>,
     /// Tab indicators next to the cells of tabs, which tell the tabs of one column apart from
     /// other windows.
-    tab_indicators: Vec<(W::Id, TabIndicator)>,
+    tab_indicators: Vec<GridTabIndicator<W>>,
     /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
     /// tile, so that the choice can follow its column when column indices shift.
     pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
@@ -1285,10 +1285,22 @@ impl<W: LayoutElement> GridOverview<W> {
 
         let mut old = std::mem::take(&mut self.tab_indicators);
         for target in targets {
-            let mut indicator = match old.iter().position(|(id, _)| id == &target.window) {
-                Some(idx) => old.swap_remove(idx).1,
-                None => TabIndicator::new(target.config),
+            let mut tab = match old.iter().position(|t| t.window == target.window) {
+                Some(idx) => old.swap_remove(idx),
+                None => GridTabIndicator {
+                    window: target.window.clone(),
+                    indicator: TabIndicator::new(target.config),
+                    slot: FocusRing::new(niri_config::FocusRing {
+                        off: false,
+                        width: 0.,
+                        active_gradient: None,
+                        urgent_gradient: None,
+                        ..Default::default()
+                    }),
+                    slot_loc: None,
+                },
             };
+            let indicator = &mut tab.indicator;
             indicator.update_config(target.config);
             indicator.set_alpha(alpha);
             // Relative to the tabs area, for gradients relative to the workspace view.
@@ -1306,14 +1318,37 @@ impl<W: LayoutElement> GridOverview<W> {
                 is_active,
                 scale,
             );
-            self.tab_indicators.push((target.window, indicator));
+
+            // A slot in the background color around the indicator, a pixel wider on every side.
+            // On a focused cell it cuts into the focus ring, so that the lit tab, which has the
+            // ring's colors, doesn't run into it.
+            tab.slot_loc = None;
+            if let Some(bounds) = tab.indicator.bounds() {
+                let mut slot_config = *tab.slot.config();
+                slot_config.active_color = target.slot_color;
+                tab.slot.update_config(slot_config);
+                let size = bounds.size + Size::from((2., 2.));
+                tab.slot.update_render_elements(
+                    size,
+                    true,
+                    false,
+                    false,
+                    Rectangle::default(),
+                    CornerRadius::from(target.config.corner_radius as f32 + 1.),
+                    scale,
+                    alpha,
+                );
+                tab.slot_loc = Some(bounds.loc - Point::from((1., 1.)));
+            }
+
+            self.tab_indicators.push(tab);
         }
     }
 
     /// Windows whose tab cell has a tab indicator.
     #[cfg(test)]
     pub(super) fn tab_indicator_windows(&self) -> impl Iterator<Item = &W::Id> {
-        self.tab_indicators.iter().map(|(id, _)| id)
+        self.tab_indicators.iter().map(|t| &t.window)
     }
 
     /// Renders the tab indicators next to the cells of tabs.
@@ -1322,8 +1357,21 @@ impl<W: LayoutElement> GridOverview<W> {
         renderer: &mut impl NiriRenderer,
         push: &mut dyn FnMut(TabIndicatorRenderElement),
     ) {
-        for (_, indicator) in &self.tab_indicators {
-            indicator.render(renderer, Point::default(), push);
+        for tab in &self.tab_indicators {
+            tab.indicator.render(renderer, Point::default(), push);
+        }
+    }
+
+    /// Renders the slots under the tab indicators, see [`Self::update_tab_indicators`].
+    pub(super) fn render_tab_indicator_slots(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        for tab in &self.tab_indicators {
+            if let Some(loc) = tab.slot_loc {
+                tab.slot.render(renderer, loc, push);
+            }
         }
     }
 
@@ -1735,6 +1783,17 @@ pub(super) struct GridTabTarget<W: LayoutElement> {
     pub config: niri_config::TabIndicator,
     /// Every tab of the column, this one active.
     pub tabs: Vec<TabInfo>,
+    /// Color of the slot around the indicator: the background behind the cells.
+    pub slot_color: niri_config::Color,
+}
+
+/// The tab indicator next to the cell of a tab.
+#[derive(Debug)]
+struct GridTabIndicator<W: LayoutElement> {
+    window: W::Id,
+    indicator: TabIndicator,
+    slot: FocusRing,
+    slot_loc: Option<Point<f64, Logical>>,
 }
 
 /// A focus ring the grid draws around a cell's window.

@@ -8,7 +8,7 @@ Open it with the `toggle-grid-overview` bind, or by tapping the `Mod` key (press
 While in the grid overview, all keyboard shortcuts keep working, and the focus actions (like `focus-column-left` or `focus-window-down`) move between cells.
 On top of that, <kbd>H</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> without modifiers navigate between windows; bare arrow keys are not built in, they still go to the window.
 If a column contains multiple windows, use <kbd>J</kbd>/<kbd>K</kbd> to switch between them within the same cell.
-The tabs of a tabbed column get a cell each; a small tab indicator next to each of those cells, right outside its focus ring, shows that they belong to one column and which tab each one is. It follows the `tab-indicator` settings.
+The tabs of a tabbed column get a cell each; a small tab indicator along the left edge of each of those cells, in the band where the focus ring goes, shows that they belong to one column and which tab each one is. On a focused cell it sits in a slot cut into the ring, so that the lit tab stands out from the ring. It follows the `tab-indicator` settings.
 <kbd>Return</kbd> activates the selected window, and <kbd>Escape</kbd> closes the grid.
 
 Click a window to activate it and close the grid overview.

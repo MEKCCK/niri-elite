@@ -1704,13 +1704,15 @@ impl<W: LayoutElement> Workspace<W> {
             // As the grid closes, the tabs merge back under the column's own indicator, which
             // the closing grid draws; two sets of indicators on the way would be a mess.
             if go.open {
-                // Sized in screen space like the focus ring, and right outside where the focus
-                // ring goes, as far past it as outside the grid. The ring widens to its grid width
-                // as the grid opens, and the indicator moves out with it.
+                // Sized in screen space like the focus ring, and centered in the band where the
+                // focus ring goes: inside the thumbnail it covers the window, and past the ring,
+                // which is thicker in the grid, it ends up far from its cell. The ring widens to
+                // its grid width as the grid opens, and the indicator stays centered in it.
                 let layout = &self.options.layout;
                 let progress = go.progress_value().clamp(0., 1.);
-                let (ring_width, past_ring) = if layout.focus_ring.off {
-                    (0., layout.tab_indicator.gap)
+                let mut config = layout.tab_indicator;
+                let gap = if layout.focus_ring.off {
+                    config.gap
                 } else {
                     let normal = layout.focus_ring.width;
                     let grid = self
@@ -1718,12 +1720,17 @@ impl<W: LayoutElement> Workspace<W> {
                         .grid_overview
                         .focus_ring_width
                         .unwrap_or(normal);
-                    let width = normal + (grid - normal) * progress;
-                    (width, (layout.tab_indicator.gap - normal).max(0.))
+                    let ring_width = normal + (grid - normal) * progress;
+                    ((ring_width - config.width) / 2.).max(1.)
                 };
-                let mut config = layout.tab_indicator;
                 config.place_within_column = false;
-                config.gap = ring_width + past_ring;
+                config.gap = gap;
+
+                // A transparent background would make the slot invisible; fall back to a dark one.
+                let mut slot_color = layout.background_color;
+                if slot_color.a < 1. {
+                    slot_color = niri_config::Color::new_unpremul(0., 0., 0., 0.6);
+                }
                 config.gaps_between_tabs = config.gaps_between_tabs.max(2.);
 
                 for (item, _) in &go.layout.entries {
@@ -1753,6 +1760,7 @@ impl<W: LayoutElement> Workspace<W> {
                         area,
                         config,
                         tabs,
+                        slot_color,
                     });
                 }
             }
@@ -3465,12 +3473,12 @@ impl<W: LayoutElement> Workspace<W> {
         // The focus rings go above every cell: a sliding ring passes over other cells and over
         // the one it slides to. They are hollow, so they never cover their own window.
         if matches!(render_pass, GridRenderPass::All | GridRenderPass::Focused) {
-            // The tab indicators sit right outside the focus rings, and above them: the gap
-            // between cells is narrow, so a focused neighbor's ring can reach under one.
+            // The tab indicators sit in the band of the focus rings, so they go above them.
             go.render_tab_indicators(ctx.renderer, &mut |elem| {
                 let elem: ScrollingSpaceRenderElement<R> = elem.into();
                 push(elem.into())
             });
+            go.render_tab_indicator_slots(ctx.renderer, &mut |elem| push(elem.into()));
             go.render_focus_rings(ctx.renderer, &mut |elem| push(elem.into()));
         }
 
