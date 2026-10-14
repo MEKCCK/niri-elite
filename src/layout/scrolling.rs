@@ -333,6 +333,30 @@ pub enum MoveTargets {
     AllColumns,
 }
 
+/// Which tiles of the scrolling space to render or hit-test.
+///
+/// With `focused-window-above-floating`, the active tile goes above the floating space while the
+/// rest of the scrolling space stays below it, so the two parts are handled separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollingPart {
+    /// Every tile.
+    All,
+    /// Only the active tile, together with the tab indicator of its column.
+    ActiveTile,
+    /// Every tile except the active one.
+    AllButActiveTile,
+}
+
+impl ScrollingPart {
+    fn includes(self, is_active: bool) -> bool {
+        match self {
+            ScrollingPart::All => true,
+            ScrollingPart::ActiveTile => is_active,
+            ScrollingPart::AllButActiveTile => !is_active,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct MoveAnimation {
     anim: Animation,
@@ -3828,12 +3852,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
+        part: ScrollingPart,
         push: &mut dyn FnMut(ScrollingSpaceRenderElement<R>),
     ) {
         let scale = Scale::from(self.scale);
 
         // Draw the closing windows on top of the other windows.
-        if layer.is_normal() {
+        if layer.is_normal() && part != ScrollingPart::ActiveTile {
             let view_rect = Rectangle::new(Point::from((self.view_pos(), 0.)), self.view_size);
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
@@ -3845,33 +3870,38 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return;
         }
 
-        let mut first = true;
-
         // This matches self.tiles_with_render_positions().
-        for (col, col_pos) in self.columns_with_render_positions() {
+        for (col_idx, (col, col_pos)) in self.columns_with_render_positions().enumerate() {
             // Skip columns belonging to a different render layer.
             if layer.is_normal() == col.is_moving_between_workspaces() {
-                first = false;
                 continue;
             }
 
+            // The active column comes first.
+            let is_active_col = col_idx == 0;
+
             // Draw the tab indicator on top.
-            {
+            if part.includes(is_active_col) {
                 let pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
                 col.tab_indicator
                     .render(ctx.renderer, pos, &mut |elem| push(elem.into()));
             }
 
-            for (tile, tile_off, visible) in col.tiles_in_render_order() {
+            for (tile_idx, (tile, tile_off, visible)) in col.tiles_in_render_order().enumerate() {
+                // The active tile comes first.
+                let is_active_tile = is_active_col && tile_idx == 0;
+                if !part.includes(is_active_tile) {
+                    continue;
+                }
+
                 let tile_pos = col_pos + tile_off + tile.render_offset();
                 // Round to physical pixels.
                 let tile_pos = tile_pos.to_physical_precise_round(scale).to_logical(scale);
 
                 // And now the drawing logic.
 
-                // For the active tile (which comes first), draw the focus ring.
-                let focus_ring = focus_ring && first;
-                first = false;
+                // For the active tile, draw the focus ring.
+                let focus_ring = focus_ring && is_active_tile;
 
                 // In the scrolling layout, we currently use visible only for hidden tabs in the
                 // tabbed mode. We want to animate their opacity when going in and out of tabbed
@@ -3891,12 +3921,22 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
     }
 
-    pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
+    pub fn window_under(
+        &self,
+        pos: Point<f64, Logical>,
+        part: ScrollingPart,
+    ) -> Option<(&W, HitType)> {
         // This matches self.tiles_with_render_positions().
         let scale = self.scale;
-        for (col, col_pos) in self.columns_with_render_positions() {
+        for (col_idx, (col, col_pos)) in self.columns_with_render_positions().enumerate() {
+            // The active column comes first.
+            let is_active_col = col_idx == 0;
+
             // Hit the tab indicator.
-            if col.display_mode == ColumnDisplay::Tabbed && col.sizing_mode().is_normal() {
+            if part.includes(is_active_col)
+                && col.display_mode == ColumnDisplay::Tabbed
+                && col.sizing_mode().is_normal()
+            {
                 let col_pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
 
                 if let Some(idx) = col.tab_indicator.hit(
@@ -3912,8 +3952,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 }
             }
 
-            for (tile, tile_off, visible) in col.tiles_in_render_order() {
-                if !visible {
+            for (tile_idx, (tile, tile_off, visible)) in col.tiles_in_render_order().enumerate() {
+                // The active tile comes first.
+                let is_active_tile = is_active_col && tile_idx == 0;
+                if !visible || !part.includes(is_active_tile) {
                     continue;
                 }
 

@@ -4544,6 +4544,119 @@ fn grid_includes_floating_windows_without_ignore_rule() {
     assert!(ws.ignored_floating_window_under(hit_pos).is_none());
 }
 
+fn focused_window_above_floating_layout(enabled: bool) -> Layout<TestWindow> {
+    let options = Options {
+        layout: niri_config::Layout {
+            focused_window_above_floating: enabled,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut floating = TestWindowParams::new(2);
+    floating.is_floating = true;
+
+    check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow { params: floating },
+            Op::Communicate(1),
+            Op::Communicate(2),
+            // Put the floating window over the corner of the tiled window.
+            Op::MoveFloatingWindow {
+                id: Some(2),
+                x: PositionChange::SetFixed(0.),
+                y: PositionChange::SetFixed(0.),
+                animate: false,
+            },
+        ],
+    )
+}
+
+/// A point where the tiled window 1 and the floating window 2 overlap.
+fn tiled_and_floating_overlap(layout: &Layout<TestWindow>) -> Point<f64, Logical> {
+    let ws = layout.active_workspace().unwrap();
+    let rect_of = |id: usize| {
+        ws.tiles_with_render_positions()
+            .find_map(|(tile, pos, _)| {
+                (*tile.window().id() == id).then(|| Rectangle::new(pos, tile.tile_size()))
+            })
+            .unwrap()
+    };
+    let overlap = rect_of(1).intersection(rect_of(2)).unwrap();
+    overlap.loc + overlap.size.downscale(2.).to_point()
+}
+
+fn window_id_under(layout: &Layout<TestWindow>, pos: Point<f64, Logical>) -> Option<usize> {
+    let ws = layout.active_workspace().unwrap();
+    ws.window_under(pos).map(|(win, _)| *win.id())
+}
+
+#[test]
+fn focused_tiled_window_goes_above_floating() {
+    let mut layout = focused_window_above_floating_layout(true);
+    let pos = tiled_and_floating_overlap(&layout);
+
+    // The new floating window is focused and on top.
+    assert!(!layout
+        .active_workspace()
+        .unwrap()
+        .active_tile_above_floating());
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+
+    check_ops_on_layout(&mut layout, [Op::FocusTiling]);
+    let ws = layout.active_workspace().unwrap();
+    assert!(ws.active_tile_above_floating());
+    assert_eq!(window_id_under(&layout, pos), Some(1));
+    // The render order matches the hit-test order.
+    let order: Vec<_> = ws
+        .tiles_with_render_positions()
+        .map(|(tile, _, _)| *tile.window().id())
+        .collect();
+    assert_eq!(order, [1, 2]);
+
+    check_ops_on_layout(&mut layout, [Op::FocusFloating]);
+    assert!(!layout
+        .active_workspace()
+        .unwrap()
+        .active_tile_above_floating());
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+
+    // Clicking the tiled window raises it.
+    layout.activate_window(&1);
+    assert_eq!(window_id_under(&layout, pos), Some(1));
+}
+
+#[test]
+fn focus_follows_mouse_does_not_raise_tiled_window_above_floating() {
+    let mut layout = focused_window_above_floating_layout(true);
+    let pos = tiled_and_floating_overlap(&layout);
+
+    layout.activate_window_without_raising(&1);
+    layout.verify_invariants();
+    let ws = layout.active_workspace().unwrap();
+    assert_eq!(ws.active_window().map(|win| *win.id()), Some(1));
+    assert!(!ws.active_tile_above_floating());
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+}
+
+#[test]
+fn floating_stays_above_focused_tiled_window_by_default() {
+    let mut layout = focused_window_above_floating_layout(false);
+    let pos = tiled_and_floating_overlap(&layout);
+
+    check_ops_on_layout(&mut layout, [Op::FocusTiling]);
+    assert!(!layout
+        .active_workspace()
+        .unwrap()
+        .active_tile_above_floating());
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+}
+
 #[test]
 fn grid_closing_focused_first_column_focuses_right() {
     let mut layout = three_column_grid_layout(1);
@@ -10030,6 +10143,7 @@ prop_compose! {
         center_focused_column in prop::option::of(arbitrary_center_focused_column()),
         always_center_single_column in prop::option::of(any::<bool>().prop_map(Flag)),
         empty_workspace_above_first in prop::option::of(any::<bool>().prop_map(Flag)),
+        focused_window_above_floating in prop::option::of(any::<bool>().prop_map(Flag)),
     ) -> niri_config::LayoutPart {
         niri_config::LayoutPart {
             gaps,
@@ -10037,6 +10151,7 @@ prop_compose! {
             center_focused_column,
             always_center_single_column,
             empty_workspace_above_first,
+            focused_window_above_floating,
             focus_ring,
             border,
             shadow,

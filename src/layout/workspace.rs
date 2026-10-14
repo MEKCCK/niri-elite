@@ -25,7 +25,8 @@ use super::grid_overview::{
     GridDirection, GridEntryInfo, GridItem, GridOverview, MinimizedHighlightEntry,
 };
 use super::scrolling::{
-    Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingSpace, ScrollingSpaceRenderElement,
+    Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingPart, ScrollingSpace,
+    ScrollingSpaceRenderElement,
 };
 use super::shadow::Shadow;
 use super::tab_indicator::TabIndicator;
@@ -3064,13 +3065,19 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
-        let scrolling = self.scrolling.tiles_with_render_positions();
+        let mut scrolling = self.scrolling.tiles_with_render_positions();
+        // The active tile comes first.
+        let active = if self.active_tile_above_floating() {
+            scrolling.next()
+        } else {
+            None
+        };
 
         let floating = self.floating.tiles_with_render_positions();
         let visible = self.is_floating_visible();
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
 
-        floating.chain(scrolling)
+        active.into_iter().chain(floating).chain(scrolling)
     }
 
     pub fn tiles_with_render_positions_mut(
@@ -3123,11 +3130,44 @@ impl<W: LayoutElement> Workspace<W> {
         layer: RenderLayer,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
+        // The active tile may have rendered above the floating windows already.
+        let part = if layer.is_normal() && self.active_tile_above_floating() {
+            ScrollingPart::AllButActiveTile
+        } else {
+            ScrollingPart::All
+        };
+
         let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.scrolling
-            .render(ctx, xray_pos, scrolling_focus_ring, layer, &mut |elem| {
-                push(elem.into())
-            });
+        self.scrolling.render(
+            ctx,
+            xray_pos,
+            scrolling_focus_ring,
+            layer,
+            part,
+            &mut |elem| push(elem.into()),
+        );
+    }
+
+    /// Renders the active scrolling tile when it goes above the floating windows.
+    pub fn render_scrolling_above_floating<R: NiriRenderer>(
+        &self,
+        ctx: RenderCtx<R>,
+        xray_pos: XrayPos,
+        focus_ring: bool,
+        push: &mut dyn FnMut(WorkspaceRenderElement<R>),
+    ) {
+        if !self.active_tile_above_floating() {
+            return;
+        }
+
+        self.scrolling.render(
+            ctx,
+            xray_pos,
+            focus_ring,
+            RenderLayer::Normal,
+            ScrollingPart::ActiveTile,
+            &mut |elem| push(elem.into()),
+        );
     }
 
     pub fn render_floating<R: NiriRenderer>(
@@ -3548,15 +3588,28 @@ impl<W: LayoutElement> Workspace<W> {
             }
 
             // Render elements are queued top-to-bottom. Keep floating grid items above tiling grid
-            // items while preserving the existing within-layer focus and tab ordering.
-            for render_floating_layer in [true, false] {
+            // items while preserving the existing within-layer focus and tab ordering. A focused
+            // tiling item that is above the floating windows outside the grid stays above them
+            // here too, so it doesn't change layers as the grid opens or closes.
+            let focused_tiling_on_top = self.active_tile_above_floating();
+            // The first pass renders only that focused tiling item.
+            for (render_floating_layer, only_focused) in
+                [(false, true), (true, false), (false, false)]
+            {
+                if only_focused && !focused_tiling_on_top {
+                    continue;
+                }
+
                 let is_item_in_layer = |item: &GridItem<W>| {
                     matches!(item, GridItem::Floating { .. }) == render_floating_layer
                 };
+                let render_focused =
+                    only_focused || render_floating_layer || !focused_tiling_on_top;
 
                 for (item, info) in &layout.entries {
                     let is_focused = info.row == focus.0 && info.col == focus.1;
                     if is_focused
+                        && render_focused
                         && should_render_grid_item(item)
                         && is_item_in_layer(item)
                         && !renders_on_top_when_closing(item)
@@ -3566,6 +3619,10 @@ impl<W: LayoutElement> Workspace<W> {
                     {
                         render_grid_item(&mut ctx, item, info, true);
                     }
+                }
+
+                if only_focused {
+                    continue;
                 }
 
                 // Keep the real active tab above its inactive tabs while they split out of or
@@ -3882,6 +3939,13 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
         // This logic is consistent with tiles_with_render_positions().
+        let active_above_floating = self.active_tile_above_floating();
+        if active_above_floating {
+            if let Some(rv) = self.scrolling.window_under(pos, ScrollingPart::ActiveTile) {
+                return Some(rv);
+            }
+        }
+
         if self.is_floating_visible() {
             if let Some(rv) = self
                 .floating
@@ -3893,7 +3957,12 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
 
-        self.scrolling.window_under(pos)
+        let part = if active_above_floating {
+            ScrollingPart::AllButActiveTile
+        } else {
+            ScrollingPart::All
+        };
+        self.scrolling.window_under(pos, part)
     }
 
     pub fn resize_edges_under(&self, pos: Point<f64, Logical>) -> Option<ResizeEdge> {
@@ -4616,6 +4685,17 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn floating_is_active(&self) -> bool {
         self.floating_is_active.get()
+    }
+
+    /// Whether the active scrolling tile renders above the floating windows.
+    ///
+    /// This is the case with `focused-window-above-floating` when the scrolling space is active.
+    /// A scrolling window activated without raising (by focus-follows-mouse) leaves the floating
+    /// windows on top.
+    pub fn active_tile_above_floating(&self) -> bool {
+        self.options.layout.focused_window_above_floating
+            && matches!(self.floating_is_active, FloatingActive::No)
+            && self.scrolling.active_window().is_some()
     }
 
     pub fn floating_logical_to_size_frac(
