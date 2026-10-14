@@ -448,15 +448,19 @@ grid-overview {
 <sup>Since: 26.04 (fork)</sup>
 
 Minimized windows are only visible in the Grid Overview, where they otherwise look like any other window.
-This setting controls the frame drawn around their cells so you can tell them apart.
+This setting controls how their cells are marked so you can tell them apart: a frame around the cell, and a dark layer over the window.
 
-The highlight is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
+The frame is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
 Its thickness does not change with the grid scale.
-While a minimized cell is focused, its focus ring marks it instead, and the frame fades out.
 The knobs mirror the [recent-windows highlight](./Configuration:-Recent-Windows.md), and so do the colors; only `padding` is smaller, since it has to fit inside the `gap` between cells.
 
 Colors may carry an alpha channel, which blends the frame into the backdrop; the default is 70% opaque.
 Alpha here only affects the frame — the window's own opacity and background effects are untouched.
+
+`dim` sets how dark the layer over the window is, from 0 (no layer) to 1 (black); the default is 0.4.
+The layer covers the window rather than making it see-through, so background effects like blur keep working, and since it sits inside the cell, it stays visible under the focus ring, which covers most of the frame of a focused cell.
+Both the frame and the layer fade in and out as a window is minimized or restored in the grid.
+To mark minimized windows with the layer alone, set `padding 0`.
 
 ```kdl
 grid-overview {
@@ -465,6 +469,7 @@ grid-overview {
         urgent-color "#ff9999"
         padding 6
         corner-radius 0
+        dim 0.4
     }
 }
 ```

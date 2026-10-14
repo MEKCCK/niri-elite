@@ -965,6 +965,15 @@ impl<W: LayoutElement> GridOverview<W> {
                         urgent_gradient: None,
                         ..Default::default()
                     }),
+                    dim: FocusRing::new(niri_config::FocusRing {
+                        off: false,
+                        width: 0.,
+                        active_color: niri_config::Color::new_unpremul(0., 0., 0., 1.),
+                        active_gradient: None,
+                        urgent_gradient: None,
+                        ..Default::default()
+                    }),
+                    dim_loc: None,
                     fade: Animation::new(self.clock.clone(), 0., 1., 0., fade_config),
                 },
             };
@@ -998,6 +1007,23 @@ impl<W: LayoutElement> GridOverview<W> {
                 (grid_alpha * fade) as f32,
             );
 
+            highlight.dim_loc = None;
+            if config.dim > 0. {
+                if let Some((rect, radius)) = entry.tile_rect {
+                    highlight.dim.update_render_elements(
+                        rect.size,
+                        true,
+                        false,
+                        false,
+                        Rectangle::default(),
+                        radius,
+                        scale,
+                        (config.dim * grid_alpha * fade) as f32,
+                    );
+                    highlight.dim_loc = Some(rect.loc);
+                }
+            }
+
             self.minimized_highlights.push(highlight);
         }
     }
@@ -1024,6 +1050,26 @@ impl<W: LayoutElement> GridOverview<W> {
         };
 
         highlight.ring.render(renderer, location, push);
+    }
+
+    /// Renders the dark layer over a minimized window's thumbnail.
+    pub(super) fn render_minimized_dim(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        window: &W::Id,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        let Some(highlight) = self
+            .minimized_highlights
+            .iter()
+            .find(|h| &h.window == window)
+        else {
+            return;
+        };
+
+        if let Some(loc) = highlight.dim_loc {
+            highlight.dim.render(renderer, loc, push);
+        }
     }
 
     /// Windows that have a focus ring in the grid.
@@ -1589,6 +1635,9 @@ pub(super) struct MinimizedHighlightEntry<W: LayoutElement> {
     pub size: Size<f64, Logical>,
     pub is_urgent: bool,
     pub is_minimized: bool,
+    /// The window's tile as drawn in the grid right now, with its corner radius, for the dim
+    /// layer.
+    pub tile_rect: Option<(Rectangle<f64, Logical>, CornerRadius)>,
 }
 
 /// Where and how to draw the focus ring of a window in the grid, as input to
@@ -1703,6 +1752,10 @@ fn lerp_radius(from: CornerRadius, to: CornerRadius, t: f32) -> CornerRadius {
 struct MinimizedHighlight<W: LayoutElement> {
     window: W::Id,
     ring: FocusRing,
+    /// The dark layer over the thumbnail, a filled rectangle like `ring`.
+    dim: FocusRing,
+    /// Where `dim` goes, if it shows.
+    dim_loc: Option<Point<f64, Logical>>,
     /// 0 while absent, 1 while fully shown; a fade-out is dropped once it reaches 0.
     fade: Animation,
 }

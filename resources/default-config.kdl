@@ -397,6 +397,8 @@ grid-overview {
         urgent-color "#ff9999"
         padding 6
         corner-radius 0
+        // How dark minimized windows are drawn, from 0 (not at all) to 1 (black).
+        dim 0.4
     }
 }
 

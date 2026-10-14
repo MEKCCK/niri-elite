@@ -540,6 +540,12 @@ pub struct GridMinimizedHighlight {
     /// How far the highlight extends past the cell, in logical pixels.
     pub padding: f64,
     pub corner_radius: f64,
+    /// Opacity of the dark layer over minimized thumbnails, from 0 (none) to 1.
+    ///
+    /// Unlike the frame, it sits on the thumbnail itself, so it stays visible under the focus
+    /// ring, and it doesn't make the window see-through, which background effects like blur
+    /// couldn't follow.
+    pub dim: f64,
 }
 
 impl Default for GridMinimizedHighlight {
@@ -553,6 +559,7 @@ impl Default for GridMinimizedHighlight {
             // `gap` apart (16 by default), so the frame has to stay inside half of that.
             padding: 6.,
             corner_radius: 0.,
+            dim: 0.4,
         }
     }
 }
@@ -571,6 +578,8 @@ pub struct GridMinimizedHighlightPart {
     pub padding: Option<FloatOrInt<0, 65535>>,
     #[knuffel(child, unwrap(argument))]
     pub corner_radius: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child, unwrap(argument))]
+    pub dim: Option<FloatOrInt<0, 1>>,
 }
 
 impl MergeWith<GridMinimizedHighlightPart> for GridMinimizedHighlight {
@@ -580,7 +589,7 @@ impl MergeWith<GridMinimizedHighlightPart> for GridMinimizedHighlight {
             self.off = false;
         }
         merge_clone!((self, part), color, urgent_color);
-        merge!((self, part), padding, corner_radius);
+        merge!((self, part), padding, corner_radius, dim);
     }
 }
 

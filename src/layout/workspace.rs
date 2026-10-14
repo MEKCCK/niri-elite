@@ -1646,6 +1646,10 @@ impl<W: LayoutElement> Workspace<W> {
                     if config.off {
                         continue;
                     }
+                    // Minimized windows fade out in place as the grid closes; no ring for them.
+                    if tile.window().is_minimized() && !go.open {
+                        continue;
+                    }
                     let Some((rect, tile_scale)) = self.grid_tile_visual_rect(go, id) else {
                         continue;
                     };
@@ -1709,11 +1713,6 @@ impl<W: LayoutElement> Workspace<W> {
             }
         };
 
-        if tile.window().is_minimized() && !go.open {
-            // Minimized windows fade out in place as the grid closes; no ring for them.
-            return None;
-        }
-
         let size = tile.animated_tile_size().upscale(scale);
         Some((Rectangle::new(pos, size), scale))
     }
@@ -1739,15 +1738,11 @@ impl<W: LayoutElement> Workspace<W> {
                             continue;
                         };
                         let is_urgent = win.is_urgent();
-                        // The focus ring alone marks the focused cell, minimized or not: the two
-                        // frames on one cell would read as one muddled marker.
-                        let is_grid_focused = info.row == go.focus.0 && info.col == go.focus.1;
-                        let ring_marks_focus = is_grid_focused
-                            && self
-                                .tiles()
-                                .find(|tile| tile.window().id() == id)
-                                .is_some_and(|tile| !tile.focus_ring().is_off());
-                        let is_minimized = win.is_minimized() && !ring_marks_focus;
+                        let is_minimized = win.is_minimized();
+                        let tile_rect = self.grid_tile_visual_rect(go, id).and_then(|(rect, s)| {
+                            let tile = self.tiles().find(|tile| tile.window().id() == id)?;
+                            Some((rect, tile.outline_corner_radius().scaled_by(s as f32)))
+                        });
 
                         let (_, visual_scale) = self.grid_item_visual_transform(go, item, info);
                         let source_size = info.target_size.downscale(info.target_scale.max(0.0001));
@@ -1759,6 +1754,7 @@ impl<W: LayoutElement> Workspace<W> {
                             size,
                             is_urgent,
                             is_minimized,
+                            tile_rect,
                         });
                     }
                 }
@@ -3528,6 +3524,12 @@ impl<W: LayoutElement> Workspace<W> {
                 let is_active_tab = is_active_tab_item(item);
                 let suppress_decorations = is_closing && is_tab && !is_focused;
                 let suppress_shadow = suppress_decorations && !is_active_tab;
+
+                // Darken minimized thumbnails. Elements are queued front-to-back, so pushing the
+                // layer before the cell's windows puts it over them.
+                go.render_minimized_dim(ctx.renderer, item.window_id(), &mut |elem| {
+                    push(elem.into())
+                });
 
                 match item {
                     GridItem::Column { col_idx, .. } => {

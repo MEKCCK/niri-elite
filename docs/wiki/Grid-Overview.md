@@ -25,14 +25,14 @@ grid-overview {
 
 ### Minimized windows
 
-The grid overview is where [minimized windows](./Configuration:-Key-Bindings.md#minimize-window) live: a minimized window keeps its place in the layout and only shows up here, as a cell marked with a colored frame.
+The grid overview is where [minimized windows](./Configuration:-Key-Bindings.md#minimize-window) live: a minimized window keeps its place in the layout and only shows up here, as a darkened cell marked with a colored frame.
 Activating that cell restores the window, and so does closing the grid while that cell is selected.
 
 Minimized cells count as normal cells for navigation *and* for moving:
 moving a window with `move-column-left`/`move-column-right` steps onto the minimized cell instead of jumping over it, and moving a minimized cell itself reorders it without restoring it.
 Outside the grid overview minimized windows are invisible, so moves there jump over them as before.
 
-Pressing [`minimize-window`](./Configuration:-Key-Bindings.md#minimize-window) on a minimized cell restores the window in place: it goes back into the layout, loses its frame, and the grid stays open on it.
+Pressing [`minimize-window`](./Configuration:-Key-Bindings.md#minimize-window) on a minimized cell restores the window in place: it goes back into the layout, loses its frame and its dark layer, and the grid stays open on it.
 Minimizing works the same way round, so the grid focus stays on the cell you acted on either way, and the two are each other's undo.
 Activating the cell (`Return`, or a click) restores it too, but also focuses it and closes the grid.
 

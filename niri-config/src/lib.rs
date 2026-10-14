@@ -769,6 +769,7 @@ mod tests {
                     urgent-color "#00ff00"
                     padding 12
                     corner-radius 4
+                    dim 0.6
                 }
             }
             "##,
@@ -777,6 +778,7 @@ mod tests {
 
         let highlight = config.grid_overview.minimized_highlight;
         assert!(!highlight.off);
+        assert_eq!(highlight.dim, 0.6);
         assert_eq!(highlight.color, Color::from_rgba8_unpremul(255, 0, 0, 255));
         assert_eq!(
             highlight.urgent_color,
@@ -784,6 +786,9 @@ mod tests {
         );
         assert_eq!(highlight.padding, 12.);
         assert_eq!(highlight.corner_radius, 4.);
+
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(config.grid_overview.minimized_highlight.dim, 0.4);
     }
 
     #[test]
@@ -2155,6 +2160,7 @@ mod tests {
                     },
                     padding: 6.0,
                     corner_radius: 0.0,
+                    dim: 0.4,
                 },
             },
             magnifier: Magnifier {
