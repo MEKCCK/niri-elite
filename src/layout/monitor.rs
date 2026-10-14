@@ -840,8 +840,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
         } else if self.active_workspace_ref().is_grid_overview_animation() {
             let moved = self.active_workspace().focus_down();
-            self.active_workspace()
-                .sync_grid_focus_to_active_window_without_animation();
+            self.active_workspace().sync_grid_focus_to_active_window();
             if !moved {
                 self.switch_workspace_down();
             }
@@ -857,8 +856,7 @@ impl<W: LayoutElement> Monitor<W> {
             }
         } else if self.active_workspace_ref().is_grid_overview_animation() {
             let moved = self.active_workspace().focus_up();
-            self.active_workspace()
-                .sync_grid_focus_to_active_window_without_animation();
+            self.active_workspace().sync_grid_focus_to_active_window();
             if !moved {
                 self.switch_workspace_up();
             }

@@ -690,7 +690,6 @@ mod tests {
     #[test]
     fn grid_overview_focus_settings_parse() {
         let config = Config::parse_mem("").unwrap();
-        assert_eq!(config.grid_overview.focused_column_scale, 1.);
         assert_eq!(config.grid_overview.focus_ring_width, None);
         assert_eq!(config.grid_overview.focus_follows_mouse, None);
 
@@ -2139,7 +2138,6 @@ mod tests {
                     bottom: 80.0,
                 },
                 min_scale: 0.08,
-                focused_column_scale: 1.0,
                 focus_ring_width: None,
                 focus_ring_transition: Grow,
                 focus_follows_mouse: None,

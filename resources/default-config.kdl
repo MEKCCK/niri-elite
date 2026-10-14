@@ -367,7 +367,9 @@ grid-overview {
     // separately with: padding { left 80; right 80; top 80; bottom 80; }
     padding 80
 
-    // Minimum scale for grid cells.
+    // The grid shows every window at one scale, so their sizes compare like on the
+    // workspace. This is the smallest scale it goes down to; with more windows than fit
+    // at it, they overlap instead.
     min-scale 0.08
 
     // The focus ring marks the focused cell and keeps its on-screen width in the grid.
@@ -376,9 +378,6 @@ grid-overview {
 
     // How the focus ring moves between cells: "grow" (the default), "slide" or "none".
     // focus-ring-transition "slide"
-
-    // Scale the focused column relative to its cell. Ranges from 1 to 2.
-    // focused-column-scale 1.04
 
     // Uncomment to move the focus to the cell under the pointer as the mouse moves.
     // focus-follows-mouse min-distance=8

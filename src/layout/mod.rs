@@ -2270,7 +2270,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         if workspace.is_grid_overview_animation() {
             workspace.focus_left();
-            workspace.sync_grid_focus_to_active_window_without_animation();
+            workspace.sync_grid_focus_to_active_window();
             return;
         }
         workspace.focus_left();
@@ -2286,7 +2286,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         if workspace.is_grid_overview_animation() {
             workspace.focus_right();
-            workspace.sync_grid_focus_to_active_window_without_animation();
+            workspace.sync_grid_focus_to_active_window();
             return;
         }
         workspace.focus_right();
@@ -2364,7 +2364,7 @@ impl<W: LayoutElement> Layout<W> {
             }
             if workspace.is_grid_overview_animation() {
                 let moved = workspace.focus_up();
-                workspace.sync_grid_focus_to_active_window_without_animation();
+                workspace.sync_grid_focus_to_active_window();
                 if moved {
                     return false;
                 }
@@ -2391,7 +2391,7 @@ impl<W: LayoutElement> Layout<W> {
             }
             if workspace.is_grid_overview_animation() {
                 let moved = workspace.focus_down();
-                workspace.sync_grid_focus_to_active_window_without_animation();
+                workspace.sync_grid_focus_to_active_window();
                 if moved {
                     return false;
                 }
@@ -2460,7 +2460,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         if workspace.is_grid_overview_animation() {
             workspace.focus_down();
-            workspace.sync_grid_focus_to_active_window_without_animation();
+            workspace.sync_grid_focus_to_active_window();
             return;
         }
         workspace.focus_down();
@@ -2476,7 +2476,7 @@ impl<W: LayoutElement> Layout<W> {
         }
         if workspace.is_grid_overview_animation() {
             workspace.focus_up();
-            workspace.sync_grid_focus_to_active_window_without_animation();
+            workspace.sync_grid_focus_to_active_window();
             return;
         }
         workspace.focus_up();
@@ -4958,9 +4958,9 @@ impl<W: LayoutElement> Layout<W> {
                 // in the middle of interactive_move_update() and the confusion that causes.
                 self.interactive_move = None;
 
-                // While the grab is ongoing, the grid focus follows the grabbed window itself:
-                // no grid cell shows the focus boost. Otherwise the focus would jump to some
-                // other cell on grab and back on drop, triggering spurious boost animations.
+                // While the grab is ongoing, the grid focus follows the grabbed window itself.
+                // Otherwise the focus ring would jump to some other cell on grab and back on
+                // drop.
                 if self.is_grid_overview_open() {
                     let grabbed = window_id.clone();
                     for ws in self.workspaces_mut() {
@@ -6363,7 +6363,6 @@ impl<W: LayoutElement> Layout<W> {
             preferred_focus.as_ref(),
             stop_move_animations,
             window_visual_snapshots,
-            false,
         );
     }
 

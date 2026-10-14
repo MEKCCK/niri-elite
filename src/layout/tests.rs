@@ -3985,7 +3985,7 @@ fn grid_overview_fill_scale_makes_padding_visual() {
 }
 
 #[test]
-fn grid_overview_floating_uses_blended_tiling_scale_when_mixed() {
+fn grid_overview_shows_every_window_at_one_scale() {
     let mut floating = TestWindowParams::new(2);
     floating.is_floating = true;
 
@@ -4018,13 +4018,9 @@ fn grid_overview_floating_uses_blended_tiling_scale_when_mixed() {
 
     let fullscreen = info_for(1);
     let floating = info_for(2);
-    let fullscreen_scale = fullscreen.target_scale;
-    let floating_scale = floating.target_scale;
 
-    assert!(
-        floating_scale > fullscreen_scale,
-        "mixed floating grid preview should be allowed to grow above the tiling scale: fullscreen={fullscreen_scale}, floating={floating_scale}"
-    );
+    // One scale for all, so that window sizes compare like they do on the workspace.
+    approx::assert_abs_diff_eq!(fullscreen.target_scale, floating.target_scale);
     assert!(
         floating.target_size.w * floating.target_size.h
             < fullscreen.target_size.w * fullscreen.target_size.h,
@@ -4040,7 +4036,7 @@ fn grid_overview_does_not_upscale_single_floating_window() {
     floating.is_floating = true;
 
     let layout = check_ops_with_options(
-        grid_focus_boost_options(),
+        Options::default(),
         [
             Op::AddOutput(1),
             Op::AddWindow { params: floating },
@@ -4052,10 +4048,9 @@ fn grid_overview_does_not_upscale_single_floating_window() {
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
         .unwrap();
-    let (item, info) = go.layout.entries.first().unwrap();
+    let (_, info) = go.layout.entries.first().unwrap();
 
     approx::assert_abs_diff_eq!(info.target_scale, 1., epsilon = 0.001);
-    assert!(go.entry_focus_boost(item, info) > 1.);
 }
 
 #[test]
@@ -4064,7 +4059,7 @@ fn grid_overview_does_not_upscale_mixed_floating_window() {
     floating.is_floating = true;
 
     let layout = check_ops_with_options(
-        grid_focus_boost_options(),
+        Options::default(),
         [
             Op::AddOutput(1),
             Op::AddWindow {
@@ -4080,7 +4075,7 @@ fn grid_overview_does_not_upscale_mixed_floating_window() {
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
         .unwrap();
-    let (item, info) = go
+    let (_, info) = go
         .layout
         .entries
         .iter()
@@ -4088,7 +4083,6 @@ fn grid_overview_does_not_upscale_mixed_floating_window() {
         .unwrap();
 
     assert!(info.target_scale <= 1.);
-    assert!(go.entry_focus_boost(item, info) > 1.);
 }
 
 #[test]
@@ -4787,8 +4781,7 @@ fn grid_closing_column_left_of_focus_keeps_grid_focus() {
 
     let ws = layout.active_workspace().unwrap();
     let go = ws.grid_overview().unwrap();
-    let (row, col) = go.focus;
-    let (item, _) = &go.layout.entries[row * go.layout.cols + col];
+    let (item, _) = &go.layout.entries[go.focus];
     assert_eq!(item.window_id(), &2);
 }
 
@@ -4892,28 +4885,28 @@ fn grid_focus_follows_its_window_when_the_grid_reflows() {
     ops.extend([Op::FocusWindow(5), Op::ToggleGridOverview]);
     let mut layout = check_ops(ops);
     assert_eq!(layout.grid_focused_window_id(), Some(5));
-    let cols_before = layout
-        .active_workspace()
-        .unwrap()
-        .grid_overview()
-        .unwrap()
-        .layout
-        .cols;
+    let cell_of_5 = |layout: &Layout<TestWindow>| {
+        let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+        let (_, info) = go
+            .layout
+            .entries
+            .iter()
+            .find(|(item, _)| item.window_id() == &5)
+            .unwrap();
+        info.rect()
+    };
+    let cell_before = cell_of_5(&layout);
 
-    // Rotate the output, so the grid reflows to a different column count.
+    // Rotate the output, so the grid reflows.
     let output = layout.outputs().next().unwrap().clone();
     output.change_current_state(None, Some(Transform::_90), None, None);
     smithay::desktop::layer_map_for_output(&output).arrange();
     layout.update_output_size(&output);
     layout.verify_invariants();
 
+    assert_ne!(cell_of_5(&layout), cell_before);
     let go = layout.active_workspace().unwrap().grid_overview().unwrap();
-    assert_ne!(go.layout.cols, cols_before);
-    let (row, col) = go.focus;
-    assert_eq!(
-        go.layout.entries[row * go.layout.cols + col].0.window_id(),
-        &5
-    );
+    assert_eq!(go.layout.entries[go.focus].0.window_id(), &5);
     assert_eq!(layout.grid_focused_window_id(), Some(5));
 }
 
@@ -5666,36 +5659,311 @@ fn grid_with_a_gap_too_large_keeps_positive_sizes() {
     }
 }
 
+type GridLayoutItems = Vec<(
+    super::grid_overview::GridItem<TestWindow>,
+    super::grid_overview::GridSource,
+)>;
+
+/// A tiled window for [`grid_layout_items`]: column index and tile size.
+type GridTiledSpec = (usize, (f64, f64));
+/// A floating window for [`grid_layout_items`]: position and size.
+type GridFloatingSpec = ((f64, f64), (f64, f64));
+
+/// Grid layout items: tiled windows, with the tabs of one column sharing its index, then floating
+/// windows. Window ids count up from 1 in that order.
+fn grid_layout_items(tiled: &[GridTiledSpec], floating: &[GridFloatingSpec]) -> GridLayoutItems {
+    use super::grid_overview::{GridItem, GridSource};
+
+    let tab_counts = |col_idx: usize| tiled.iter().filter(|(c, _)| *c == col_idx).count();
+    let mut items = Vec::new();
+    let mut id = 0;
+    for (i, &(col_idx, (w, h))) in tiled.iter().enumerate() {
+        id += 1;
+        let item = if tab_counts(col_idx) > 1 {
+            let tile_idx = tiled[..i].iter().filter(|(c, _)| *c == col_idx).count();
+            GridItem::Tab {
+                col_idx,
+                tile_idx,
+                window_id: id,
+            }
+        } else {
+            GridItem::Column {
+                col_idx,
+                window_id: id,
+            }
+        };
+        let source = GridSource {
+            size: Size::from((w, h)),
+            pos: None,
+        };
+        items.push((item, source));
+    }
+    for &((x, y), (w, h)) in floating {
+        id += 1;
+        let source = GridSource {
+            size: Size::from((w, h)),
+            pos: Some(Point::from((x, y))),
+        };
+        items.push((GridItem::Floating { window_id: id }, source));
+    }
+    items
+}
+
+fn assert_grid_layout_is_sound(
+    layout: &super::grid_overview::GridLayout<TestWindow>,
+    area: Rectangle<f64, Logical>,
+    config: &niri_config::GridOverview,
+) {
+    let padding = config.padding;
+    let min_x = area.loc.x + padding.left - 0.001;
+    let min_y = area.loc.y + padding.top - 0.001;
+    let max_x = area.loc.x + area.size.w - padding.right + 0.001;
+    let max_y = area.loc.y + area.size.h - padding.bottom + 0.001;
+    for (item, info) in &layout.entries {
+        let r = info.rect();
+        assert!(
+            r.loc.x >= min_x
+                && r.loc.y >= min_y
+                && r.loc.x + r.size.w <= max_x
+                && r.loc.y + r.size.h <= max_y,
+            "{:?} at {r:?} leaves the grid",
+            item.window_id(),
+        );
+        approx::assert_abs_diff_eq!(info.target_scale, layout.scale);
+    }
+    for (i, (a, info_a)) in layout.entries.iter().enumerate() {
+        for (b, info_b) in &layout.entries[i + 1..] {
+            let (ra, rb) = (info_a.rect(), info_b.rect());
+            let gap = layout.gap - 0.001;
+            let apart = ra.loc.x + ra.size.w + gap <= rb.loc.x
+                || rb.loc.x + rb.size.w + gap <= ra.loc.x
+                || ra.loc.y + ra.size.h + gap <= rb.loc.y
+                || rb.loc.y + rb.size.h + gap <= ra.loc.y;
+            assert!(
+                apart,
+                "{:?} at {ra:?} and {:?} at {rb:?} overlap",
+                a.window_id(),
+                b.window_id()
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_layout_keeps_strip_order_and_tabs_together() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    // Columns 0 and 1, a tabbed column 2 with three tabs, and columns 3 to 5.
+    let tiled = [
+        (0, (960., 1040.)),
+        (1, (640., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (3, (1280., 1040.)),
+        (4, (640., 1040.)),
+        (5, (960., 1040.)),
+    ];
+    let items = grid_layout_items(&tiled, &[]);
+    let layout = GridLayout::compute(&items, area, &config, None);
+    assert_grid_layout_is_sound(&layout, area, &config);
+
+    // Reading order (rows top to bottom, then left to right) is strip order.
+    let mut reading: Vec<_> = layout
+        .entries
+        .iter()
+        .map(|(item, info)| (info.row.unwrap(), info.target_pos.x, *item.window_id()))
+        .collect();
+    reading.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let ids: Vec<_> = reading.iter().map(|(_, _, id)| *id).collect();
+    assert_eq!(ids, (1..=tiled.len()).collect::<Vec<_>>());
+
+    // The three tabs share a row.
+    let row_of = |id: usize| layout.entries[id - 1].1.row;
+    assert_eq!(row_of(3), row_of(4));
+    assert_eq!(row_of(4), row_of(5));
+}
+
+#[test]
+fn grid_layout_is_sound_for_many_shapes() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::new(Point::from((0., 30.)), Size::from((1920., 1050.)));
+
+    // A small deterministic generator, so that the shapes vary without a dependency.
+    let mut seed = 0x2545_f491_u64;
+    let mut next = |max: f64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % 10_000) as f64 / 10_000. * max
+    };
+
+    for _ in 0..200 {
+        let tiled_count = next(9.) as usize;
+        let floating_count = next(6.) as usize;
+        let mut tiled = Vec::new();
+        let mut col_idx = 0;
+        for _ in 0..tiled_count {
+            // Now and then, a tab in the same column as the previous window.
+            if tiled.is_empty() || next(1.) > 0.2 {
+                col_idx = tiled.len();
+            }
+            tiled.push((col_idx, (300. + next(1500.), 400. + next(640.))));
+        }
+        let floating: Vec<_> = (0..floating_count)
+            .map(|_| {
+                let size = (150. + next(1200.), 120. + next(700.));
+                ((next(1920.) - 100., 30. + next(1050.) - 100.), size)
+            })
+            .collect();
+        if tiled.is_empty() && floating.is_empty() {
+            continue;
+        }
+
+        let items = grid_layout_items(&tiled, &floating);
+        let layout = GridLayout::compute(&items, area, &config, None);
+        assert_grid_layout_is_sound(&layout, area, &config);
+
+        // Recomputing from itself, as while the grid stays open, keeps it sound.
+        let again = GridLayout::compute(&items, area, &config, Some(&layout));
+        assert_grid_layout_is_sound(&again, area, &config);
+    }
+}
+
+#[test]
+fn grid_layout_puts_floating_windows_into_the_gap_of_a_short_row() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    // A wide first row and a last row with one window, centered, leaving room on both sides.
+    let tiled = [
+        (0, (960., 1040.)),
+        (1, (640., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (3, (1280., 1040.)),
+    ];
+    // Down in the bottom left corner, where the short row leaves room.
+    let floating = [((40., 700.), (700., 340.))];
+    let items = grid_layout_items(&tiled, &floating);
+    let layout = GridLayout::compute(&items, area, &config, None);
+    assert_grid_layout_is_sound(&layout, area, &config);
+
+    let tiled_bounds = layout
+        .entries
+        .iter()
+        .filter(|(_, info)| info.row.is_some())
+        .map(|(_, info)| info.rect())
+        .reduce(|a, b| a.merge(b))
+        .unwrap();
+    let (_, floating) = layout.entries.last().unwrap();
+    assert!(
+        tiled_bounds.overlaps(floating.rect()),
+        "the floating window at {:?} should sit in the gap within the tiled windows at {tiled_bounds:?}",
+        floating.rect()
+    );
+}
+
+#[test]
+fn grid_layout_keeps_its_scale_for_small_changes_while_open() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let tiled = [(0, (900., 1040.)), (1, (900., 1040.)), (2, (900., 1040.))];
+    let items = grid_layout_items(&tiled, &[]);
+    let area = |grow: f64| Rectangle::from_size(Size::from((1920. * grow, 1080. * grow)));
+    let open = GridLayout::compute(&items, area(1.), &config, None);
+
+    // A little more room: fresh, the windows would grow a bit, but the open grid keeps them.
+    let fresh = GridLayout::compute(&items, area(1.03), &config, None);
+    let kept = GridLayout::compute(&items, area(1.03), &config, Some(&open));
+    assert!(fresh.scale > open.scale && fresh.scale < open.scale * 1.08);
+    approx::assert_abs_diff_eq!(kept.scale, open.scale);
+    assert_grid_layout_is_sound(&kept, area(1.03), &config);
+
+    // A lot more room, and they grow.
+    let kept = GridLayout::compute(&items, area(1.25), &config, Some(&open));
+    assert!(
+        kept.scale > open.scale * 1.08,
+        "{} {}",
+        kept.scale,
+        open.scale
+    );
+}
+
+#[test]
+fn grid_layout_keeps_floating_spots_while_open() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    // Window 1 sits a bit over the right edge of the larger window 2, so the grid moves it off to
+    // the right of window 2.
+    let small = ((1250., 350.), (400., 300.));
+    let large = ((500., 200.), (800., 600.));
+    let open = GridLayout::compute(
+        &grid_layout_items(&[], &[small, large]),
+        area,
+        &config,
+        None,
+    );
+    let spot = |layout: &GridLayout<TestWindow>| layout.entries[0].1.rect();
+    let real = Rectangle::new(Point::from(small.0), Size::from(small.1));
+    approx::assert_abs_diff_eq!(open.scale, 1.);
+    assert_ne!(spot(&open), real);
+
+    // Window 2 closes. Fresh, window 1 would go back to where it is on the workspace; while the
+    // grid stays open, it stays where it was, close by.
+    let after = grid_layout_items(&[], &[small]);
+    let fresh = GridLayout::compute(&after, area, &config, None);
+    let kept = GridLayout::compute(&after, area, &config, Some(&open));
+    assert_eq!(spot(&fresh), real);
+    assert_eq!(spot(&kept), spot(&open));
+}
+
 #[test]
 fn grid_up_from_a_centered_last_row_goes_to_the_cell_above_it() {
-    use super::grid_overview::{GridDirection, GridItem, GridLayout, GridOverview};
+    use super::grid_overview::{GridDirection, GridItem, GridLayout, GridOverview, GridSource};
 
     let options = Rc::new(Options::default());
     let items: Vec<_> = (1..=7)
         .map(|id| {
-            (
-                GridItem::Floating { window_id: id },
-                Size::from((400., 400.)),
-            )
+            let item = GridItem::Column {
+                col_idx: id - 1,
+                window_id: id,
+            };
+            let source = GridSource {
+                size: Size::from((400., 400.)),
+                pos: None,
+            };
+            (item, source)
         })
         .collect();
     let area = Rectangle::from_size(Size::from((1000., 1000.)));
     let mut go = GridOverview::<TestWindow>::new(Clock::with_time(Duration::ZERO), options.clone());
-    go.layout = GridLayout::compute(&items, area, &options.grid_overview);
-    // Rows of 3, 3 and 1; the last cell is centered under the middle column.
-    assert_eq!((go.layout.cols, go.layout.rows), (3, 3));
+    go.layout = GridLayout::compute(&items, area, &options.grid_overview, None);
+    // Rows of 3, 3 and 1; the last cell is centered under the middle one of the row above.
+    let rows: Vec<_> = go.layout.entries.iter().map(|(_, info)| info.row).collect();
+    let r = |row| Some(row);
+    assert_eq!(rows, [r(0), r(0), r(0), r(1), r(1), r(1), r(2)]);
 
-    go.focus = (2, 0);
+    go.focus = 6;
     go.navigate(GridDirection::Up, |_| 1);
     // It used to go to the first column, by index.
-    assert_eq!(go.focus, (1, 1));
+    assert_eq!(go.focus, 4);
 }
 
 #[test]
 fn grid_retarget_during_spring_overshoot_doesnt_jump() {
     use niri_config::animations::{Kind, SpringParams};
 
-    use super::grid_overview::{GridItem, GridOverview};
+    use super::grid_overview::{GridItem, GridOverview, GridSource};
     use super::OverviewProgress;
 
     let mut options = Options::default();
@@ -5719,10 +5987,11 @@ fn grid_retarget_during_spring_overshoot_doesnt_jump() {
             .iter()
             .enumerate()
             .map(|(id, w)| {
-                (
-                    GridItem::Floating { window_id: id + 1 },
-                    Size::from((*w, 300.)),
-                )
+                let source = GridSource {
+                    size: Size::from((*w, 300.)),
+                    pos: None,
+                };
+                (GridItem::Floating { window_id: id + 1 }, source)
             })
             .collect::<Vec<_>>()
     };
@@ -5756,7 +6025,7 @@ fn grid_retarget_during_spring_overshoot_doesnt_jump() {
 
 #[test]
 fn grid_column_inserted_in_the_middle_doesnt_take_over_its_neighbours_cell() {
-    use super::grid_overview::{GridItem, GridOverview};
+    use super::grid_overview::{GridItem, GridOverview, GridSource};
     use super::OverviewProgress;
 
     let options = Rc::new(Options::default());
@@ -5769,13 +6038,15 @@ fn grid_column_inserted_in_the_middle_doesnt_take_over_its_neighbours_cell() {
         ids.iter()
             .enumerate()
             .map(|(col_idx, id)| {
-                (
-                    GridItem::Column {
-                        col_idx,
-                        window_id: *id,
-                    },
-                    Size::from((400., 300.)),
-                )
+                let item = GridItem::Column {
+                    col_idx,
+                    window_id: *id,
+                };
+                let source = GridSource {
+                    size: Size::from((400., 300.)),
+                    pos: None,
+                };
+                (item, source)
             })
             .collect::<Vec<_>>()
     };
@@ -5857,13 +6128,6 @@ fn two_column_grid_focused_on_second() -> Layout<TestWindow> {
     );
 
     layout
-}
-
-/// Options that scale up the focused grid cell, which is off by default.
-fn grid_focus_boost_options() -> Options {
-    let mut options = Options::default();
-    options.grid_overview.focused_column_scale = 1.04;
-    options
 }
 
 fn tabbed_column_and_column_grid() -> Layout<TestWindow> {
@@ -6220,41 +6484,6 @@ fn grid_move_column_moves_tabbed_column_as_group() {
     assert_eq!(scrolling_column_ids(&layout), vec![vec![3], vec![1, 2]]);
     assert!(layout.is_grid_overview_open());
     assert_eq!(layout.grid_focused_window_id(), Some(1));
-}
-
-#[test]
-fn grid_move_column_keeps_focus_boost_stationary() {
-    let mut layout = tabbed_column_and_column_grid_with_options(grid_focus_boost_options());
-    assert!(layout
-        .active_workspace_mut()
-        .unwrap()
-        .set_grid_focus_for_window(&1));
-    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
-
-    layout.move_right();
-    layout.verify_invariants();
-
-    let go = layout
-        .active_workspace()
-        .and_then(|ws| ws.grid_overview())
-        .unwrap();
-    let (focused_item, focused_info) = go
-        .layout
-        .entries
-        .iter()
-        .find(|(item, _)| item.window_id() == &1)
-        .unwrap();
-    let (swapped_item, swapped_info) = go
-        .layout
-        .entries
-        .iter()
-        .find(|(item, _)| item.window_id() == &3)
-        .unwrap();
-
-    assert_eq!(go.focused_id(), Some(1));
-    assert!(go.focus_boost_anim.is_none());
-    assert!(go.entry_focus_boost(focused_item, focused_info) > 1.);
-    approx::assert_abs_diff_eq!(go.entry_focus_boost(swapped_item, swapped_info), 1.);
 }
 
 #[test]
@@ -7387,48 +7616,6 @@ fn grid_focus_navigation_works_during_close_animation() {
 }
 
 #[test]
-fn grid_noop_action_preserves_ongoing_focus_boost() {
-    let mut layout = check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow {
-            params: TestWindowParams::new(1),
-        },
-        Op::AddWindow {
-            params: TestWindowParams::new(2),
-        },
-        Op::FocusWindow(1),
-        Op::ToggleGridOverview,
-        Op::CompleteAnimations,
-    ]);
-
-    // Start a focus-boost animation to window 2.
-    layout
-        .active_workspace_mut()
-        .unwrap()
-        .set_grid_focus_for_window(&2);
-    assert!(layout
-        .active_workspace()
-        .unwrap()
-        .grid_overview()
-        .unwrap()
-        .focus_boost_anim
-        .is_some());
-
-    // A no-op action refreshes the grid; it must not cancel the in-progress focus boost.
-    layout.move_right();
-
-    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
-    assert!(
-        go.focus_boost_anim.is_some(),
-        "focus {:?} previous {:?} boosts {:?}",
-        go.focus,
-        go.previous_focus,
-        go.focus_boosts
-    );
-    assert!(!go.focus_boosts.is_empty());
-}
-
-#[test]
 fn grid_noop_action_preserves_ongoing_window_transitions() {
     let mut layout = check_ops([
         Op::AddOutput(1),
@@ -7694,69 +7881,6 @@ fn grid_move_window_down_twice_midflight_keeps_visual_continuity() {
     let go = ws.grid_overview().unwrap();
     assert!(go.rearrange_anim.is_some());
     assert!(go.flying_in_windows.contains(&2));
-}
-
-#[test]
-fn grid_focus_switch_preserves_shrink_velocity() {
-    use niri_config::animations::{Kind, SpringParams};
-
-    let mut options = grid_focus_boost_options();
-    options.animations.window_resize.anim.kind = Kind::Spring(SpringParams {
-        damping_ratio: 0.9,
-        stiffness: 500,
-        epsilon: 0.0001,
-    });
-    let mut layout = check_ops_with_options(
-        options,
-        [
-            Op::AddOutput(1),
-            Op::AddWindow {
-                params: TestWindowParams::new(1),
-            },
-            Op::AddWindow {
-                params: TestWindowParams::new(2),
-            },
-            Op::AddWindow {
-                params: TestWindowParams::new(3),
-            },
-            Op::FocusWindow(1),
-            Op::ToggleGridOverview,
-            Op::CompleteAnimations,
-        ],
-    );
-
-    layout
-        .active_workspace_mut()
-        .unwrap()
-        .set_grid_focus_for_window(&2);
-    // Match the user config's `slowdown 5` so the velocity conversion is exercised.
-    layout.clock.set_rate(0.2);
-
-    let scale_at = |layout: &mut Layout<TestWindow>, t: u64| {
-        layout.clock.set_unadjusted(Duration::from_millis(t));
-        layout.advance_animations();
-        layout
-            .active_workspace()
-            .unwrap()
-            .grid_window_visual_transform(&1)
-            .unwrap()
-            .1
-    };
-
-    let s49 = scale_at(&mut layout, 49);
-    let s50 = scale_at(&mut layout, 50);
-    layout
-        .active_workspace_mut()
-        .unwrap()
-        .set_grid_focus_for_window(&3);
-    let s51 = scale_at(&mut layout, 51);
-
-    let before = (s50 - s49) * 1000.;
-    let after = (s51 - s50) * 1000.;
-    assert!(before < -0.01);
-    // The shrinking window must keep a meaningful portion of its velocity across the focus
-    // switch instead of restarting from zero and hitching.
-    assert!(after < before * 0.1, "before {before} after {after}");
 }
 
 fn grid_layout_with_occupied_workspace_below() -> Layout<TestWindow> {
@@ -8091,8 +8215,8 @@ fn grid_interactive_move_keeps_visual_scale_and_can_merge() {
     approx::assert_abs_diff_eq!(move_.visual_scale, visual_scale, epsilon = 0.001);
     approx::assert_abs_diff_eq!(move_.total_scale(1.), visual_scale, epsilon = 0.001);
 
-    // While the grab is ongoing, the focus belongs to the grabbed window itself, so that no
-    // other cell gets a spurious focus boost that would animate away on drop.
+    // While the grab is ongoing, the focus belongs to the grabbed window itself, so that the
+    // focus ring doesn't move to some other cell and back on drop.
     assert_eq!(
         layout
             .active_workspace()
@@ -10097,7 +10221,8 @@ fn grid_drop_onto_minimized_cell_never_merges_into_it() {
     let go = ws.grid_overview().unwrap();
     let info = *go.find_grid_info(&2).unwrap();
 
-    for frac in [0.1, 0.3, 0.5, 0.7, 0.9] {
+    // Not right at the middle, where the side comes down to rounding.
+    for frac in [0.1, 0.3, 0.45, 0.55, 0.7, 0.9] {
         let pos =
             info.target_pos + Point::from((info.target_size.w * frac, info.target_size.h / 2.));
         let position = ws.grid_insert_position(pos).unwrap();

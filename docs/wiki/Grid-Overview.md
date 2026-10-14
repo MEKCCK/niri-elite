@@ -7,6 +7,7 @@ Open it with the `toggle-grid-overview` bind, or by tapping the `Mod` key (press
 
 While in the grid overview, all keyboard shortcuts keep working, and the focus actions (like `focus-column-left` or `focus-window-down`) move between cells.
 On top of that, <kbd>H</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> without modifiers navigate between windows; bare arrow keys are not built in, they still go to the window.
+Navigation goes by where the cells are on screen: to the next cell in that direction, preferring one that lines up with the current cell, so it reaches floating windows as well as tiled ones.
 If a column contains multiple windows, use <kbd>J</kbd>/<kbd>K</kbd> to switch between them within the same cell.
 The tabs of a tabbed column get a cell each; a small tab indicator along the left edge of each of those cells, in the band where the focus ring goes, shows that they belong to one column and which tab each one is. On a focused cell it sits in a slot cut into the ring, so that the lit tab stands out from the ring. It follows the `tab-indicator` settings.
 <kbd>Return</kbd> activates the selected window, and <kbd>Escape</kbd> closes the grid.
@@ -23,6 +24,27 @@ grid-overview {
     focus-follows-mouse min-distance=8
 }
 ```
+
+### Layout
+
+The grid shows every window at one scale, the largest at which they all fit, so windows keep their sizes relative to each other: a small dialog stays small next to a big editor.
+
+Tiled windows form a block in the order of the scrolling layout, left to right, wrapped into rows like text.
+The tabs of a tabbed column stay together in one row.
+How wide the rows get is picked to show the windows as large as possible.
+
+Floating windows each take the free spot closest to where they are on the screen, so a window in the top right corner shows up towards the top right of the grid.
+That spot can be in the room that a short row of tiled windows leaves beside it.
+When that shows everything larger, the block of tiled windows moves to one side of the grid, leaving the floating windows one large stretch of room instead of two narrow ones.
+Among layouts that show the windows about as large, the grid takes the one that keeps floating windows closest to where they are.
+On a workspace with only floating windows, the grid works like the window overviews of other desktops.
+
+While the grid stays open, it keeps what it can when windows come and go: the scale only grows once it can grow noticeably, the rows keep wrapping where they did, and floating windows keep their spots unless a much better one opens up.
+Closing and opening the grid lays everything out afresh.
+
+Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
+Dragging a floating window moves it on the screen.
+As outside the grid, clicking the right mouse button during the drag switches the window between floating and tiling.
 
 ### Minimized windows
 
@@ -84,15 +106,6 @@ When the focus moves, the new cell's ring grows in while the old one shrinks bac
 ```kdl
 grid-overview {
     focus-ring-transition "slide"
-}
-```
-
-The focused column can also be scaled up with the `focused-column-scale` setting.
-This is off by default, since a larger cell no longer shows the window's size next to the others:
-
-```kdl
-grid-overview {
-    focused-column-scale 1.08
 }
 ```
 
