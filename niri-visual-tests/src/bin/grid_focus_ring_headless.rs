@@ -246,11 +246,36 @@ fn main() -> anyhow::Result<()> {
         (5150, "22_layout", None),
         (5250, "23_layout", None),
         (5600, "24_layout_settled", None),
+        // A window opening while the grid shows: its ring comes in with it.
+        (5700, "25_grid_again", Some(|l| l.toggle_grid_overview())),
+        (7500, "26_new_window", None),
+        (7540, "27_opening", None),
+        (7600, "28_opening", None),
+        (7700, "29_opening", None),
+        (8500, "30_opened", None),
     ];
+    let mut opened_window = None;
     for (t_ms, name, step) in steps {
         clock.set_unadjusted(Duration::from_millis(*t_ms));
         if let Some(step) = step {
             step(&mut layout);
+        }
+        if opened_window.is_none() && *t_ms >= 7500 {
+            let mut window = TestWindow::freeform(6);
+            window.set_color([0.95, 0.95, 0.95, 1.]);
+            window.request_size(Size::from((400, 600)), SizingMode::Normal, false, None);
+            window.communicate();
+            layout.add_window(
+                window.clone(),
+                AddWindowTarget::Auto,
+                Some(PresetSize::Proportion(0.3)),
+                None,
+                false,
+                false,
+                ActivateWindow::Yes,
+            );
+            layout.start_open_animation_for_window(&6);
+            opened_window = Some(window);
         }
         layout.advance_animations();
         layout.update_render_elements(Some(&output));
@@ -321,6 +346,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     drop(windows);
+    drop(opened_window);
 
     Ok(())
 }

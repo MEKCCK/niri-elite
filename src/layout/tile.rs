@@ -528,6 +528,13 @@ impl<W: LayoutElement> Tile<W> {
         self.focus_ring_shown == Some(true) || self.focus_ring_anim.is_some()
     }
 
+    /// The scale and the opacity of the window opening animation, if one is ongoing.
+    pub fn open_animation_scale_and_alpha(&self) -> Option<(f64, f64)> {
+        self.open_animation
+            .as_ref()
+            .map(|open| open.scale_and_alpha())
+    }
+
     pub fn has_open_animation(&self) -> bool {
         self.open_animation.is_some()
     }

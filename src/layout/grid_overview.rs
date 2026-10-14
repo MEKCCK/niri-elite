@@ -992,6 +992,16 @@ impl<W: LayoutElement> GridOverview<W> {
                 continue;
             }
 
+            // Concentric with the window's rounded corners unless the config sets a radius, so
+            // that the frame's corners follow the focus ring's.
+            let frame_radius = match config.corner_radius {
+                Some(radius) => CornerRadius::from(radius as f32),
+                None => entry
+                    .tile_rect
+                    .map_or(CornerRadius::default(), |(_, radius)| {
+                        radius.expanded_by(config.padding as f32)
+                    }),
+            };
             let mut ring_config = *highlight.ring.config();
             ring_config.active_color = config.color;
             ring_config.urgent_color = config.urgent_color;
@@ -1002,7 +1012,7 @@ impl<W: LayoutElement> GridOverview<W> {
                 false,
                 entry.is_urgent,
                 Rectangle::default(),
-                CornerRadius::from(config.corner_radius as f32),
+                frame_radius,
                 scale,
                 (grid_alpha * fade) as f32,
             );

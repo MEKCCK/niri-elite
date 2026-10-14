@@ -1657,7 +1657,19 @@ impl<W: LayoutElement> Workspace<W> {
                     // Outside the grid, a maximized or fullscreen window has no focus ring, so
                     // fade it in and out with the grid.
                     let expanded = tile.expanded_progress();
-                    let alpha = 1. - expanded * (1. - progress);
+                    let mut alpha = 1. - expanded * (1. - progress);
+
+                    // A window opening in the grid scales up and fades in, and so does its ring.
+                    // The window's own ring does that by being part of the window.
+                    let mut rect = rect;
+                    let mut tile_scale = tile_scale;
+                    if let Some((open_scale, open_alpha)) = tile.open_animation_scale_and_alpha() {
+                        let center = rect.loc + rect.size.downscale(2.).to_point();
+                        let size = rect.size.upscale(open_scale);
+                        rect = Rectangle::new(center - size.downscale(2.).to_point(), size);
+                        tile_scale *= open_scale;
+                        alpha *= open_alpha;
+                    }
 
                     targets.push(GridRingTarget {
                         window: id.clone(),

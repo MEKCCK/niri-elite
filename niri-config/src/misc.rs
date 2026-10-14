@@ -539,7 +539,10 @@ pub struct GridMinimizedHighlight {
     pub urgent_color: Color,
     /// How far the highlight extends past the cell, in logical pixels.
     pub padding: f64,
-    pub corner_radius: f64,
+    /// Corner radius of the frame.
+    ///
+    /// `None` keeps the frame concentric with the window's rounded corners, like the focus ring.
+    pub corner_radius: Option<f64>,
     /// Opacity of the dark layer over minimized thumbnails, from 0 (none) to 1.
     ///
     /// Unlike the frame, it sits on the thumbnail itself, so it stays visible under the focus
@@ -558,7 +561,7 @@ impl Default for GridMinimizedHighlight {
             // Recent-windows uses 30, which is sized for full-screen previews. Grid cells sit a
             // `gap` apart (16 by default), so the frame has to stay inside half of that.
             padding: 6.,
-            corner_radius: 0.,
+            corner_radius: None,
             dim: 0.4,
         }
     }
@@ -589,7 +592,10 @@ impl MergeWith<GridMinimizedHighlightPart> for GridMinimizedHighlight {
             self.off = false;
         }
         merge_clone!((self, part), color, urgent_color);
-        merge!((self, part), padding, corner_radius, dim);
+        merge!((self, part), padding, dim);
+        if let Some(corner_radius) = part.corner_radius {
+            self.corner_radius = Some(corner_radius.0);
+        }
     }
 }
 

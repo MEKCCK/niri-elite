@@ -396,7 +396,8 @@ grid-overview {
         color "#999999b3"
         urgent-color "#ff9999"
         padding 6
-        corner-radius 0
+        // The frame's corners follow the window's rounded corners; set a radius to override.
+        // corner-radius 0
         // How dark minimized windows are drawn, from 0 (not at all) to 1 (black).
         dim 0.4
     }

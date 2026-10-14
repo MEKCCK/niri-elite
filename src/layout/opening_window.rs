@@ -44,6 +44,13 @@ impl OpenAnimation {
         self.anim.is_done()
     }
 
+    /// The scale and the opacity the window is drawn at right now, without a custom shader.
+    pub fn scale_and_alpha(&self) -> (f64, f64) {
+        let progress = self.anim.value();
+        let clamped_progress = self.anim.clamped_value().clamp(0., 1.);
+        ((progress / 2. + 0.5).max(0.), clamped_progress)
+    }
+
     // We can't depend on view_rect here, because the result of window opening can be snapshot and
     // then rendered elsewhere.
     pub fn render(
@@ -122,6 +129,7 @@ impl OpenAnimation {
             return Ok((elem.into(), data));
         }
 
+        // Keep in sync with scale_and_alpha().
         let elem = elem.with_alpha(clamped_progress as f32 * alpha);
 
         let center = geo_size.to_point().downscale(2.);

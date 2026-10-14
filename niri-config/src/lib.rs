@@ -785,10 +785,11 @@ mod tests {
             Color::from_rgba8_unpremul(0, 255, 0, 255)
         );
         assert_eq!(highlight.padding, 12.);
-        assert_eq!(highlight.corner_radius, 4.);
+        assert_eq!(highlight.corner_radius, Some(4.));
 
         let config = Config::parse_mem("").unwrap();
         assert_eq!(config.grid_overview.minimized_highlight.dim, 0.4);
+        assert_eq!(config.grid_overview.minimized_highlight.corner_radius, None);
     }
 
     #[test]
@@ -2159,7 +2160,7 @@ mod tests {
                         a: 1.0,
                     },
                     padding: 6.0,
-                    corner_radius: 0.0,
+                    corner_radius: None,
                     dim: 0.4,
                 },
             },

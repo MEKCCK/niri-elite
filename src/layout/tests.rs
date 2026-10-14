@@ -10017,7 +10017,7 @@ fn grid_overview_picks_up_config_reloads() {
         color: niri_config::Color::from_rgba8_unpremul(1, 2, 3, 255),
         urgent_color: niri_config::Color::from_rgba8_unpremul(4, 5, 6, 255),
         padding: 12.,
-        corner_radius: 4.,
+        corner_radius: Some(4.),
         dim: 0.5,
     };
     let options = Options {

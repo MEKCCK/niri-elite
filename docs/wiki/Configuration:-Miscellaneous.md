@@ -452,6 +452,7 @@ This setting controls how their cells are marked so you can tell them apart: a f
 
 The frame is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
 Its thickness does not change with the grid scale.
+Its corners follow the window's rounded corners (as set by `geometry-corner-radius`), the way the focus ring's do; `corner-radius` sets a fixed radius instead.
 The knobs mirror the [recent-windows highlight](./Configuration:-Recent-Windows.md), and so do the colors; only `padding` is smaller, since it has to fit inside the `gap` between cells.
 
 Colors may carry an alpha channel, which blends the frame into the backdrop; the default is 70% opaque.
@@ -468,7 +469,6 @@ grid-overview {
         color "#999999b3"
         urgent-color "#ff9999"
         padding 6
-        corner-radius 0
         dim 0.4
     }
 }
