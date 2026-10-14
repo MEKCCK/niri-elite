@@ -12,6 +12,7 @@ mod floating;
 mod fullscreen;
 mod grid_actions;
 mod grid_activation;
+mod grid_focus_follows_mouse;
 mod grid_input;
 mod grid_scroll;
 mod layer_shell;

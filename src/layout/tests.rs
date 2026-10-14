@@ -4039,12 +4039,15 @@ fn grid_overview_does_not_upscale_single_floating_window() {
     let mut floating = TestWindowParams::new(1);
     floating.is_floating = true;
 
-    let layout = check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow { params: floating },
-        Op::ToggleGridOverview,
-        Op::CompleteAnimations,
-    ]);
+    let layout = check_ops_with_options(
+        grid_focus_boost_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow { params: floating },
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
     let go = layout
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
@@ -4060,16 +4063,19 @@ fn grid_overview_does_not_upscale_mixed_floating_window() {
     let mut floating = TestWindowParams::new(2);
     floating.is_floating = true;
 
-    let layout = check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow {
-            params: TestWindowParams::new(1),
-        },
-        Op::AddWindow { params: floating },
-        Op::FocusWindow(2),
-        Op::ToggleGridOverview,
-        Op::CompleteAnimations,
-    ]);
+    let layout = check_ops_with_options(
+        grid_focus_boost_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow { params: floating },
+            Op::FocusWindow(2),
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
     let go = layout
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
@@ -5853,22 +5859,36 @@ fn two_column_grid_focused_on_second() -> Layout<TestWindow> {
     layout
 }
 
+/// Options that scale up the focused grid cell, which is off by default.
+fn grid_focus_boost_options() -> Options {
+    let mut options = Options::default();
+    options.grid_overview.focused_column_scale = 1.04;
+    options
+}
+
 fn tabbed_column_and_column_grid() -> Layout<TestWindow> {
-    check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow {
-            params: TestWindowParams::new(1),
-        },
-        Op::AddWindow {
-            params: TestWindowParams::new(2),
-        },
-        Op::ConsumeOrExpelWindowLeft { id: None },
-        Op::ToggleColumnTabbedDisplay,
-        Op::AddWindow {
-            params: TestWindowParams::new(3),
-        },
-        Op::ToggleGridOverview,
-    ])
+    tabbed_column_and_column_grid_with_options(Options::default())
+}
+
+fn tabbed_column_and_column_grid_with_options(options: Options) -> Layout<TestWindow> {
+    check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::ConsumeOrExpelWindowLeft { id: None },
+            Op::ToggleColumnTabbedDisplay,
+            Op::AddWindow {
+                params: TestWindowParams::new(3),
+            },
+            Op::ToggleGridOverview,
+        ],
+    )
 }
 
 fn large_grid_layout() -> Layout<TestWindow> {
@@ -5881,6 +5901,195 @@ fn large_grid_layout() -> Layout<TestWindow> {
     ops.push(Op::FocusWindow(1));
     ops.push(Op::ToggleGridOverview);
     check_ops(ops)
+}
+
+fn grid_focus_ring_layout(transition: niri_config::GridFocusRingTransition) -> Layout<TestWindow> {
+    let mut options = Options::default();
+    options.grid_overview.focus_ring_transition = transition;
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=3 {
+        ops.push(Op::AddWindow {
+            params: TestWindowParams::new(id),
+        });
+    }
+    ops.push(Op::FocusWindow(1));
+    ops.push(Op::ToggleGridOverview);
+    ops.push(Op::CompleteAnimations);
+    let mut layout = check_ops_with_options(options, ops);
+    layout.update_render_elements(None);
+    layout
+}
+
+fn grid_focus_ring_windows(layout: &Layout<TestWindow>) -> Vec<usize> {
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    let mut ids: Vec<usize> = go.focus_ring_windows().copied().collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn grid_focus_ring_grow_shrinks_the_old_ring() {
+    let mut layout = grid_focus_ring_layout(niri_config::GridFocusRingTransition::Grow);
+    assert_eq!(grid_focus_ring_windows(&layout), [1]);
+
+    layout.focus_right();
+    layout.update_render_elements(None);
+    // The old ring shrinks back while the new one grows.
+    assert_eq!(grid_focus_ring_windows(&layout), [1, 2]);
+    assert!(layout.are_animations_ongoing(None));
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    assert_eq!(grid_focus_ring_windows(&layout), [2]);
+}
+
+#[test]
+fn grid_focus_ring_slide_and_none_keep_one_ring() {
+    for transition in [
+        niri_config::GridFocusRingTransition::Slide,
+        niri_config::GridFocusRingTransition::None,
+    ] {
+        let mut layout = grid_focus_ring_layout(transition);
+        assert_eq!(grid_focus_ring_windows(&layout), [1]);
+
+        layout.focus_right();
+        layout.update_render_elements(None);
+        assert_eq!(grid_focus_ring_windows(&layout), [2]);
+        if transition == niri_config::GridFocusRingTransition::Slide {
+            assert!(layout.are_animations_ongoing(None));
+        }
+
+        check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+        layout.update_render_elements(None);
+        assert_eq!(grid_focus_ring_windows(&layout), [2]);
+    }
+}
+
+#[test]
+fn grid_focus_ring_follows_window_focus_ring_off() {
+    let mut options = Options::default();
+    options.layout.focus_ring.off = true;
+    let mut layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
+    layout.update_render_elements(None);
+    assert!(grid_focus_ring_windows(&layout).is_empty());
+}
+
+fn windows_with_visible_focus_ring(layout: &Layout<TestWindow>) -> Vec<usize> {
+    let ws = layout.active_workspace().unwrap();
+    let mut ids: Vec<usize> = ws
+        .tiles()
+        .filter(|tile| tile.focus_ring_visible())
+        .map(|tile| *tile.window().id())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn focus_ring_shrinks_back_on_the_window_that_lost_focus() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWindow(2),
+        Op::CompleteAnimations,
+    ]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [2]);
+
+    layout.activate_window(&1);
+    layout.update_render_elements(None);
+    // Window 2 keeps its ring while it shrinks back.
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1, 2]);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1]);
+}
+
+#[test]
+fn focus_ring_moves_to_floating_and_back() {
+    let mut floating = TestWindowParams::new(2);
+    floating.is_floating = true;
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow { params: floating },
+        Op::CompleteAnimations,
+    ]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [2]);
+
+    check_ops_on_layout(&mut layout, [Op::FocusTiling]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1, 2]);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1]);
+}
+
+#[test]
+fn grid_tab_cells_get_tab_indicators() {
+    let mut layout = tabbed_column_and_column_grid();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    let mut ids: Vec<usize> = go.tab_indicator_windows().copied().collect();
+    ids.sort();
+    // The two tabs of the tabbed column, not the window in its own column.
+    assert_eq!(ids, [1, 2]);
+
+    // Closing the grid hands over to the column's own indicator right away.
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    layout.update_render_elements(None);
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert_eq!(go.tab_indicator_windows().count(), 0);
+}
+
+#[test]
+fn grid_tab_indicator_folds_away_when_tab_leaves() {
+    let mut layout = tabbed_column_and_column_grid();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+
+    // Window 2 leaves the tabbed column into a column of its own.
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&2));
+    layout.consume_or_expel_window_left(None);
+    layout.verify_invariants();
+    layout.update_render_elements(None);
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    let mut ids: Vec<usize> = go.tab_indicator_windows().copied().collect();
+    ids.sort();
+    // Window 2 keeps its indicator while it folds away.
+    assert!(ids.contains(&2), "{ids:?}");
+    assert!(layout.are_animations_ongoing(None));
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert!(!go.tab_indicator_windows().any(|id| *id == 2));
 }
 
 fn scrolling_column_ids(layout: &Layout<TestWindow>) -> Vec<Vec<usize>> {
@@ -6015,7 +6224,7 @@ fn grid_move_column_moves_tabbed_column_as_group() {
 
 #[test]
 fn grid_move_column_keeps_focus_boost_stationary() {
-    let mut layout = tabbed_column_and_column_grid();
+    let mut layout = tabbed_column_and_column_grid_with_options(grid_focus_boost_options());
     assert!(layout
         .active_workspace_mut()
         .unwrap()
@@ -7491,7 +7700,7 @@ fn grid_move_window_down_twice_midflight_keeps_visual_continuity() {
 fn grid_focus_switch_preserves_shrink_velocity() {
     use niri_config::animations::{Kind, SpringParams};
 
-    let mut options = Options::default();
+    let mut options = grid_focus_boost_options();
     options.animations.window_resize.anim.kind = Kind::Spring(SpringParams {
         damping_ratio: 0.9,
         stiffness: 500,
@@ -9855,7 +10064,8 @@ fn grid_overview_picks_up_config_reloads() {
         color: niri_config::Color::from_rgba8_unpremul(1, 2, 3, 255),
         urgent_color: niri_config::Color::from_rgba8_unpremul(4, 5, 6, 255),
         padding: 12.,
-        corner_radius: 4.,
+        corner_radius: Some(4.),
+        dim: 0.5,
     };
     let options = Options {
         grid_overview: niri_config::GridOverview {

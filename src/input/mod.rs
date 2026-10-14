@@ -2971,6 +2971,7 @@ impl State {
         }
 
         self.niri.handle_focus_follows_mouse(&under);
+        self.niri.handle_grid_focus_follows_mouse(new_pos, &under);
 
         self.niri.pointer_contents.clone_from(&under);
 
@@ -3091,6 +3092,7 @@ impl State {
         let under = self.niri.contents_under(pos);
 
         self.niri.handle_focus_follows_mouse(&under);
+        self.niri.handle_grid_focus_follows_mouse(pos, &under);
 
         self.niri.pointer_contents.clone_from(&under);
 

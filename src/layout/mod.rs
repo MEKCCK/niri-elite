@@ -385,6 +385,9 @@ pub struct Layout<W: LayoutElement> {
     /// This is a boolean flag that controls things like where input goes to. The actual animation
     /// is controlled by overview_progress.
     overview_open: bool,
+    /// Counts the times the grid overview was opened, so that input state tied to one grid
+    /// session can tell a new one apart.
+    grid_overview_open_count: u64,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
     /// Configurable properties of the layout.
@@ -759,6 +762,7 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
+            grid_overview_open_count: 0,
             overview_progress: None,
             options: Rc::new(options),
         }
@@ -784,6 +788,7 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
+            grid_overview_open_count: 0,
             overview_progress: None,
             options: opts,
         }
@@ -6123,7 +6128,43 @@ impl<W: LayoutElement> Layout<W> {
             changed = mon.is_grid_overview_open() != open;
             mon.set_grid_overview_open(open);
         }
+        if open && changed {
+            self.grid_overview_open_count += 1;
+        }
         changed
+    }
+
+    /// The number of times the grid overview was opened.
+    pub fn grid_overview_open_count(&self) -> u64 {
+        self.grid_overview_open_count
+    }
+
+    /// Moves the grid focus to the cell of this window, like keyboard navigation does.
+    ///
+    /// The window can be in the grid of any monitor; that monitor becomes the active one, since
+    /// closing the grid confirms the focused cell of the active monitor.
+    pub fn focus_grid_cell_for_window(&mut self, id: &W::Id) -> bool {
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &mut self.monitor_set
+        else {
+            return false;
+        };
+
+        for (idx, mon) in monitors.iter_mut().enumerate() {
+            let ws = mon.active_workspace();
+            if !ws.is_grid_overview_open() {
+                continue;
+            }
+            if ws.set_grid_focus_for_window(id) {
+                *active_monitor_idx = idx;
+                return true;
+            }
+        }
+
+        false
     }
 
     fn close_grid_overview_for_monitor(&mut self, monitor_idx: usize) {

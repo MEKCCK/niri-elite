@@ -1104,7 +1104,6 @@ impl<W: LayoutElement> FloatingSpace<W> {
         layer: RenderLayer,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
-        let active = self.active_window_id.clone();
         for (tile, tile_pos) in self.tiles_with_render_positions() {
             // Skip tiles belonging to a different render layer, and minimized tiles.
             if layer.is_normal() == tile.is_moving_between_workspaces()
@@ -1114,7 +1113,9 @@ impl<W: LayoutElement> FloatingSpace<W> {
             }
 
             // For the active tile, draw the focus ring.
-            let focus_ring = focus_ring && Some(tile.window().id()) == active.as_ref();
+            // The active tile shows its focus ring, and a tile that lost the focus shows it while
+            // it shrinks back.
+            let focus_ring = focus_ring && tile.focus_ring_visible();
 
             let xray_pos = xray_pos.offset(tile_pos);
             tile.render(ctx.r(), tile_pos, xray_pos, focus_ring, &mut |elem| {

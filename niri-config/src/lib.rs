@@ -688,6 +688,78 @@ mod tests {
     }
 
     #[test]
+    fn grid_overview_focus_settings_parse() {
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(config.grid_overview.focused_column_scale, 1.);
+        assert_eq!(config.grid_overview.focus_ring_width, None);
+        assert_eq!(config.grid_overview.focus_follows_mouse, None);
+
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                focus-ring-width 6
+                focus-follows-mouse
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.grid_overview.focus_ring_width, Some(6.));
+        let ffm = config.grid_overview.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.min_distance(), 8.);
+
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                focus-follows-mouse min-distance=20
+            }
+            "#,
+        )
+        .unwrap();
+        let ffm = config.grid_overview.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.min_distance(), 20.);
+    }
+
+    #[test]
+    fn grid_overview_focus_ring_transition_parses() {
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(
+            config.grid_overview.focus_ring_transition,
+            GridFocusRingTransition::Grow
+        );
+
+        for (name, expected) in [
+            ("none", GridFocusRingTransition::None),
+            ("grow", GridFocusRingTransition::Grow),
+            ("slide", GridFocusRingTransition::Slide),
+        ] {
+            let config = Config::parse_mem(&format!(
+                "grid-overview {{ focus-ring-transition \"{name}\"; }}"
+            ))
+            .unwrap();
+            assert_eq!(config.grid_overview.focus_ring_transition, expected);
+        }
+
+        let config = Config::parse_mem(
+            r#"
+            animations {
+                focus-ring {
+                    duration-ms 100
+                    curve "linear"
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.animations.focus_ring.0.kind,
+            animations::Kind::Easing(animations::EasingParams {
+                duration_ms: 100,
+                curve: animations::Curve::Linear,
+            })
+        );
+    }
+
+    #[test]
     fn grid_overview_minimized_highlight_parses() {
         let config = Config::parse_mem(
             r##"
@@ -697,6 +769,7 @@ mod tests {
                     urgent-color "#00ff00"
                     padding 12
                     corner-radius 4
+                    dim 0.6
                 }
             }
             "##,
@@ -705,13 +778,18 @@ mod tests {
 
         let highlight = config.grid_overview.minimized_highlight;
         assert!(!highlight.off);
+        assert_eq!(highlight.dim, 0.6);
         assert_eq!(highlight.color, Color::from_rgba8_unpremul(255, 0, 0, 255));
         assert_eq!(
             highlight.urgent_color,
             Color::from_rgba8_unpremul(0, 255, 0, 255)
         );
         assert_eq!(highlight.padding, 12.);
-        assert_eq!(highlight.corner_radius, 4.);
+        assert_eq!(highlight.corner_radius, Some(4.));
+
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(config.grid_overview.minimized_highlight.dim, 0.4);
+        assert_eq!(config.grid_overview.minimized_highlight.corner_radius, None);
     }
 
     #[test]
@@ -1950,6 +2028,17 @@ mod tests {
                         ),
                     },
                 ),
+                focus_ring: FocusRingAnim(
+                    Animation {
+                        off: false,
+                        kind: Easing(
+                            EasingParams {
+                                duration_ms: 300,
+                                curve: EaseOutCubic,
+                            },
+                        ),
+                    },
+                ),
                 magnifier: MagnifierAnim(
                     Animation {
                         off: false,
@@ -2050,7 +2139,10 @@ mod tests {
                     bottom: 80.0,
                 },
                 min_scale: 0.08,
-                focused_column_scale: 1.04,
+                focused_column_scale: 1.0,
+                focus_ring_width: None,
+                focus_ring_transition: Grow,
+                focus_follows_mouse: None,
                 grid_all_monitors: true,
                 default_mod_action: true,
                 minimized_highlight: GridMinimizedHighlight {
@@ -2068,7 +2160,8 @@ mod tests {
                         a: 1.0,
                     },
                     padding: 6.0,
-                    corner_radius: 0.0,
+                    corner_radius: None,
+                    dim: 0.4,
                 },
             },
             magnifier: Magnifier {
@@ -2893,6 +2986,11 @@ mod tests {
 
         -                0.6666666666666666,
         +                0.66667,
+
+        -        focus_ring_width: None,
+        +        focus_ring_width: Some(
+        +            8.0,
+        +        ),
 
         -        track_cursor: true,
         +        track_cursor: false,

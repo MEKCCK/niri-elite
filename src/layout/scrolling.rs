@@ -3902,8 +3902,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
                 // And now the drawing logic.
 
-                // For the active tile, draw the focus ring.
-                let focus_ring = focus_ring && is_active_tile;
+                // The active tile shows its focus ring, and a tile that lost the focus shows it
+                // while it shrinks back.
+                let focus_ring = focus_ring && tile.focus_ring_visible();
 
                 // In the scrolling layout, we currently use visible only for hidden tabs in the
                 // tabbed mode. We want to animate their opacity when going in and out of tabbed
@@ -5207,6 +5208,11 @@ impl<W: LayoutElement> Column<W> {
             .iter()
             .filter(|tile| !tile.window().is_minimized())
             .count();
+        // Tabs coming and going slide the others over, like the windows themselves.
+        self.tab_indicator.set_count_animation(
+            self.clock.clone(),
+            self.options.animations.window_movement.0,
+        );
         self.tab_indicator.update_render_elements(
             enabled,
             self.tab_indicator_area(),

@@ -380,10 +380,66 @@ grid-overview {
 
 Scale the focused column relative to its cell.
 Ranges from 1 to 2, where higher values make the focused column larger.
+Defaults to 1 (no scaling): the focus ring already marks the focused cell, and a scaled-up cell misrepresents the window's size next to the others.
 
 ```kdl
 grid-overview {
     focused-column-scale 1.08
+}
+```
+
+#### `focus-ring-width`
+
+<sup>Since: 26.04 (fork)</sup>
+
+The focused cell is marked by the focus ring of its window, drawn at a fixed on-screen width rather than scaled down with the cell.
+By default, that is the width of the window's own focus ring; this setting picks another width for the grid, in logical pixels.
+The ring changes between the two widths as the grid opens and closes.
+The ring is always drawn around the window rather than as a background behind it, so it doesn't show through semitransparent windows in the grid.
+
+The colors are the focus ring's, so there is no separate setting for them.
+If the focus ring is off, nothing marks the focused cell other than `focused-column-scale`.
+
+```kdl
+grid-overview {
+    focus-ring-width 8
+}
+```
+
+#### `focus-ring-transition`
+
+<sup>Since: 26.04 (fork)</sup>
+
+How the focus ring goes from one cell to another when the focus moves.
+
+- `"grow"` (the default): the new cell's ring grows out from its edge, while the old one shrinks back and fades out. Each ring stays on its own cell.
+- `"slide"`: one ring slides and resizes from the old cell to the new one, over the cells in between. Its leading edges set off slightly ahead of the trailing ones, so the ring stretches a little on the way.
+- `"none"`: the ring appears on the new cell right away.
+
+The timing is the [`focus-ring`](./Configuration:-Animations.md#focus-ring) animation; turning it off works like `"none"`.
+
+```kdl
+grid-overview {
+    focus-ring-transition "slide"
+}
+```
+
+#### `focus-follows-mouse`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Moving the mouse moves the grid focus to the cell under the pointer.
+Off by default.
+
+The pointer takes the focus over once it moved more than `min-distance` logical pixels (8 by default) from where it was when the focus was last set some other way: when the grid opened, by keyboard navigation, or when the grid rearranged.
+From then on the focus follows every motion, until the keyboard moves it again.
+Over the gaps between cells, the focus stays where it is.
+
+This is separate from `focus-follows-mouse` in the `input` section, which doesn't act on grid cells.
+
+```kdl
+grid-overview {
+    focus-follows-mouse min-distance=8
 }
 ```
 
@@ -392,14 +448,20 @@ grid-overview {
 <sup>Since: 26.04 (fork)</sup>
 
 Minimized windows are only visible in the Grid Overview, where they otherwise look like any other window.
-This setting controls the frame drawn around their cells so you can tell them apart.
+This setting controls how their cells are marked so you can tell them apart: a frame around the cell, and a dark layer over the window.
 
-The highlight is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
+The frame is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
 Its thickness does not change with the grid scale.
+Its corners follow the window's rounded corners (as set by `geometry-corner-radius`), the way the focus ring's do; `corner-radius` sets a fixed radius instead.
 The knobs mirror the [recent-windows highlight](./Configuration:-Recent-Windows.md), and so do the colors; only `padding` is smaller, since it has to fit inside the `gap` between cells.
 
 Colors may carry an alpha channel, which blends the frame into the backdrop; the default is 70% opaque.
 Alpha here only affects the frame — the window's own opacity and background effects are untouched.
+
+`dim` sets how dark the layer over the window is, from 0 (no layer) to 1 (black); the default is 0.4.
+The layer covers the window rather than making it see-through, so background effects like blur keep working, and since it sits inside the cell, it stays visible under the focus ring, which covers most of the frame of a focused cell.
+Both the frame and the layer fade in and out as a window is minimized or restored in the grid.
+To mark minimized windows with the layer alone, set `padding 0`.
 
 ```kdl
 grid-overview {
@@ -407,7 +469,7 @@ grid-overview {
         color "#999999b3"
         urgent-color "#ff9999"
         padding 6
-        corner-radius 0
+        dim 0.4
     }
 }
 ```

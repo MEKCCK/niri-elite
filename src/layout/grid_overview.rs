@@ -2,10 +2,11 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use niri_config::animations::Kind;
-use niri_config::CornerRadius;
+use niri_config::{CornerRadius, GridFocusRingTransition};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
+use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::{Animation, Clock, LayoutElement, Options, OverviewProgress};
 use crate::render_helpers::renderer::NiriRenderer;
 
@@ -151,6 +152,22 @@ pub struct GridOverview<W: LayoutElement> {
     /// They live here rather than on the tiles because they are sized in screen space: a marker
     /// that scaled with the cell would get thinner the more windows the grid shows.
     minimized_highlights: Vec<MinimizedHighlight<W>>,
+    /// Focus rings drawn around the windows of grid cells.
+    ///
+    /// The grid draws these instead of the windows' own focus rings, which would scale down with
+    /// the cells. One ring per window: the focused one, plus, with the grow transition, the ones
+    /// still shrinking back on cells that lost the focus.
+    focus_rings: Vec<GridFocusRing<W>>,
+    /// The window the focus ring was on as of the last update, to tell when the focus moves.
+    ring_focus: Option<W::Id>,
+    /// With the slide transition, where the ring slides from.
+    ring_slide: Option<GridRingSlide>,
+    /// Tab indicators next to the cells of tabs, which tell the tabs of one column apart from
+    /// other windows.
+    tab_indicators: Vec<GridTabIndicator<W>>,
+    /// Whether the tab indicators were laid out since the grid opened. The ones that show up
+    /// later belong to tabs that joined a column while the grid showed.
+    tab_indicators_laid_out: bool,
     /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
     /// tile, so that the choice can follow its column when column indices shift.
     pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
@@ -182,6 +199,11 @@ impl<W: LayoutElement> GridOverview<W> {
             added_window_ids: Vec::new(),
             restored_window_ids: Vec::new(),
             minimized_highlights: Vec::new(),
+            focus_rings: Vec::new(),
+            ring_focus: None,
+            ring_slide: None,
+            tab_indicators: Vec::new(),
+            tab_indicators_laid_out: false,
             column_tile_focus: Vec::new(),
             clock,
             options,
@@ -952,6 +974,15 @@ impl<W: LayoutElement> GridOverview<W> {
                         urgent_gradient: None,
                         ..Default::default()
                     }),
+                    dim: FocusRing::new(niri_config::FocusRing {
+                        off: false,
+                        width: 0.,
+                        active_color: niri_config::Color::new_unpremul(0., 0., 0., 1.),
+                        active_gradient: None,
+                        urgent_gradient: None,
+                        ..Default::default()
+                    }),
+                    dim_loc: None,
                     fade: Animation::new(self.clock.clone(), 0., 1., 0., fade_config),
                 },
             };
@@ -970,6 +1001,16 @@ impl<W: LayoutElement> GridOverview<W> {
                 continue;
             }
 
+            // Concentric with the window's rounded corners unless the config sets a radius, so
+            // that the frame's corners follow the focus ring's.
+            let frame_radius = match config.corner_radius {
+                Some(radius) => CornerRadius::from(radius as f32),
+                None => entry
+                    .tile_rect
+                    .map_or(CornerRadius::default(), |(_, radius)| {
+                        radius.expanded_by(config.padding as f32)
+                    }),
+            };
             let mut ring_config = *highlight.ring.config();
             ring_config.active_color = config.color;
             ring_config.urgent_color = config.urgent_color;
@@ -980,10 +1021,27 @@ impl<W: LayoutElement> GridOverview<W> {
                 false,
                 entry.is_urgent,
                 Rectangle::default(),
-                CornerRadius::from(config.corner_radius as f32),
+                frame_radius,
                 scale,
                 (grid_alpha * fade) as f32,
             );
+
+            highlight.dim_loc = None;
+            if config.dim > 0. {
+                if let Some((rect, radius)) = entry.tile_rect {
+                    highlight.dim.update_render_elements(
+                        rect.size,
+                        true,
+                        false,
+                        false,
+                        Rectangle::default(),
+                        radius,
+                        scale,
+                        (config.dim * grid_alpha * fade) as f32,
+                    );
+                    highlight.dim_loc = Some(rect.loc);
+                }
+            }
 
             self.minimized_highlights.push(highlight);
         }
@@ -1011,6 +1069,389 @@ impl<W: LayoutElement> GridOverview<W> {
         };
 
         highlight.ring.render(renderer, location, push);
+    }
+
+    /// Renders the dark layer over a minimized window's thumbnail.
+    pub(super) fn render_minimized_dim(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        window: &W::Id,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        let Some(highlight) = self
+            .minimized_highlights
+            .iter()
+            .find(|h| &h.window == window)
+        else {
+            return;
+        };
+
+        if let Some(loc) = highlight.dim_loc {
+            highlight.dim.render(renderer, loc, push);
+        }
+    }
+
+    /// Windows that have a focus ring in the grid.
+    pub(super) fn focus_ring_windows(&self) -> impl Iterator<Item = &W::Id> {
+        self.focus_rings.iter().map(|ring| &ring.window)
+    }
+
+    /// Updates the focus rings drawn around grid cells.
+    ///
+    /// `focus` is the focused window, if it has a ring, and `targets` has the current geometry of
+    /// it and of every window from [`Self::focus_ring_windows`] still in the grid.
+    pub(super) fn update_focus_rings(
+        &mut self,
+        focus: Option<&W::Id>,
+        targets: &[GridRingTarget<W>],
+        is_active: bool,
+        view_size: Size<f64, Logical>,
+        scale: f64,
+    ) {
+        let transition = self.options.grid_overview.focus_ring_transition;
+        let anim_config = self.options.animations.focus_ring.0;
+        let grid_width = self.options.grid_overview.focus_ring_width;
+        let progress = self.progress_value().clamp(0., 1.);
+        let target_of = |id: &W::Id| targets.iter().find(|t| &t.window == id);
+
+        // Rings only animate when the focus moves from one cell to another, not when a ring first
+        // shows up as the grid opens.
+        let focus_moved =
+            self.ring_focus.is_some() && focus.is_some() && self.ring_focus.as_ref() != focus;
+        self.ring_focus = focus.cloned();
+
+        let clock = self.clock.clone();
+        let new_ring = |window: &W::Id| GridFocusRing {
+            window: window.clone(),
+            ring: FocusRing::new(niri_config::FocusRing::default()),
+            shown: 1.,
+            fade: None,
+            rect: None,
+        };
+
+        match transition {
+            GridFocusRingTransition::None | GridFocusRingTransition::Slide => {
+                // One ring, on the focused window. Keep its buffers when it moves.
+                self.focus_rings.truncate(1);
+                match (focus, self.focus_rings.first_mut()) {
+                    (Some(focus), Some(ring)) => {
+                        ring.window = focus.clone();
+                        ring.shown = 1.;
+                        ring.fade = None;
+                    }
+                    (Some(focus), None) => self.focus_rings.push(new_ring(focus)),
+                    (None, _) => self.focus_rings.clear(),
+                }
+
+                if transition == GridFocusRingTransition::Slide && focus_moved {
+                    // Slide from where the ring is drawn right now, which is somewhere along the
+                    // way if a slide is ongoing.
+                    let from = self.focus_rings.first().and_then(|ring| ring.rect);
+                    self.ring_slide = from.map(|(rect, radius)| GridRingSlide {
+                        from: rect,
+                        from_radius: radius,
+                        anim: Animation::new(clock.clone(), 0., 1., 0., anim_config),
+                    });
+                } else if transition == GridFocusRingTransition::None {
+                    self.ring_slide = None;
+                }
+            }
+            GridFocusRingTransition::Grow => {
+                self.ring_slide = None;
+
+                for ring in &mut self.focus_rings {
+                    let target = if Some(&ring.window) == focus { 1. } else { 0. };
+                    if ring.shown != target {
+                        // Start from wherever an ongoing fade has got to.
+                        let from = ring.shown_value();
+                        ring.shown = target;
+                        ring.fade =
+                            Some(Animation::new(clock.clone(), from, target, 0., anim_config));
+                    }
+                }
+                if let Some(focus) = focus {
+                    if !self.focus_rings.iter().any(|ring| &ring.window == focus) {
+                        let mut ring = new_ring(focus);
+                        if focus_moved {
+                            ring.fade =
+                                Some(Animation::new(clock.clone(), 0., 1., 0., anim_config));
+                        }
+                        self.focus_rings.push(ring);
+                    }
+                }
+                self.drop_hidden_focus_rings();
+            }
+        }
+
+        let now = self.clock.now();
+        let slide = self
+            .ring_slide
+            .as_ref()
+            .map(|slide| (slide, slide_progress(&slide.anim, now)));
+
+        for ring in &mut self.focus_rings {
+            let Some(target) = target_of(&ring.window) else {
+                ring.rect = None;
+                continue;
+            };
+
+            // A spring can grow the ring a little past its width, but never past full opacity.
+            let grown = ring.shown_value();
+            let shown = grown.clamp(0., 1.);
+            let normal_width = target.config.width;
+            let full_width = grid_width.map_or(normal_width, |grid_width| {
+                normal_width + (grid_width - normal_width) * progress
+            });
+            let width = full_width * grown.max(0.);
+
+            let (rect, radius) = match slide {
+                Some((slide, (lead, trail))) => (
+                    stretch_rect(slide.from, target.rect, lead, trail),
+                    lerp_radius(
+                        slide.from_radius,
+                        target.radius,
+                        ((lead + trail) / 2.) as f32,
+                    ),
+                ),
+                None => (target.rect, target.radius),
+            };
+
+            let mut config = target.config;
+            config.off = false;
+            config.width = width;
+            ring.ring.update_config(config);
+            // Relative to the ring, for gradients relative to the workspace view.
+            let view_rect = Rectangle::new(Point::from((-rect.loc.x, -rect.loc.y)), view_size);
+            ring.ring.update_render_elements(
+                rect.size,
+                is_active,
+                true,
+                target.is_urgent,
+                view_rect,
+                radius.expanded_by(width as f32),
+                scale,
+                (shown * target.alpha) as f32,
+            );
+            ring.rect = Some((rect, radius));
+        }
+    }
+
+    fn focus_rings_animating(&self) -> bool {
+        self.ring_slide.is_some() || self.focus_rings.iter().any(|ring| ring.fade.is_some())
+    }
+
+    fn tab_indicators_animating(&self) -> bool {
+        self.tab_indicators
+            .iter()
+            .any(|tab| tab.indicator.are_animations_ongoing())
+    }
+
+    fn advance_focus_rings(&mut self) {
+        for tab in &mut self.tab_indicators {
+            tab.indicator.advance_animations();
+        }
+        self.tab_indicators
+            .retain(|tab| !(tab.leaving && tab.indicator.is_closed()));
+
+        for ring in &mut self.focus_rings {
+            if ring.fade.as_ref().is_some_and(|fade| fade.is_done()) {
+                ring.fade = None;
+            }
+        }
+        self.drop_hidden_focus_rings();
+
+        if self
+            .ring_slide
+            .as_ref()
+            .is_some_and(|slide| slide.anim.is_done())
+        {
+            self.ring_slide = None;
+        }
+    }
+
+    /// Drops the rings that shrank all the way back.
+    fn drop_hidden_focus_rings(&mut self) {
+        self.focus_rings
+            .retain(|ring| ring.shown > 0. || ring.fade.is_some());
+    }
+
+    /// Renders the focus rings of the grid cells.
+    pub(super) fn render_focus_rings(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        for ring in &self.focus_rings {
+            if let Some((rect, _)) = ring.rect {
+                ring.ring.render(renderer, rect.loc, push);
+            }
+        }
+    }
+
+    /// Updates the tab indicators next to the cells of tabs.
+    ///
+    /// `leaving` has the current on-screen rectangle of windows that have an indicator but are
+    /// no longer tabs: theirs folds away there.
+    pub(super) fn update_tab_indicators(
+        &mut self,
+        targets: Vec<GridTabTarget<W>>,
+        leaving: &[(W::Id, Rectangle<f64, Logical>)],
+        is_active: bool,
+        view_size: Size<f64, Logical>,
+        scale: f64,
+    ) {
+        // They fade in as the grid opens.
+        let alpha = self.progress_value().clamp(0., 1.) as f32;
+
+        // A tab that joins a column while the grid shows has its indicator grow in, like a
+        // column's own indicator when it turns tabbed. The ones there as the grid opens fade in
+        // with it instead.
+        let grows_in = self.open && self.tab_indicators_laid_out;
+        self.tab_indicators_laid_out = self.open;
+        let movement = self.options.animations.window_movement.0;
+
+        let mut old = std::mem::take(&mut self.tab_indicators);
+        for target in targets {
+            let mut tab = match old.iter().position(|t| t.window == target.window) {
+                Some(idx) => old.swap_remove(idx),
+                None => GridTabIndicator {
+                    window: target.window.clone(),
+                    indicator: TabIndicator::new(target.config),
+                    slot: FocusRing::new(niri_config::FocusRing {
+                        off: false,
+                        width: 0.,
+                        active_gradient: None,
+                        urgent_gradient: None,
+                        ..Default::default()
+                    }),
+                    slot_loc: None,
+                    last_tabs: Vec::new(),
+                    leaving: false,
+                },
+            };
+            let is_new = tab.slot_loc.is_none() && tab.indicator.bounds().is_none();
+            let indicator = &mut tab.indicator;
+            if (is_new && grows_in) || tab.leaving {
+                indicator.start_open_animation(self.clock.clone(), movement);
+            }
+            tab.leaving = false;
+            tab.last_tabs.clone_from(&target.tabs);
+            indicator.set_count_animation(self.clock.clone(), movement);
+            indicator.update_config(target.config);
+            indicator.set_alpha(alpha);
+            // Relative to the tabs area, for gradients relative to the workspace view.
+            let view_rect = Rectangle::new(
+                Point::from((-target.area.loc.x, -target.area.loc.y)),
+                view_size,
+            );
+            let count = target.tabs.len();
+            indicator.update_render_elements(
+                true,
+                target.area,
+                view_rect,
+                count,
+                target.tabs.into_iter(),
+                is_active,
+                scale,
+            );
+
+            // A slot in the background color around the indicator, a pixel wider on every side.
+            // On a focused cell it cuts into the focus ring, so that the lit tab, which has the
+            // ring's colors, doesn't run into it.
+            tab.slot_loc = None;
+            if let Some(bounds) = tab.indicator.bounds() {
+                let mut slot_config = *tab.slot.config();
+                slot_config.active_color = target.slot_color;
+                tab.slot.update_config(slot_config);
+                let size = bounds.size + Size::from((2., 2.));
+                tab.slot.update_render_elements(
+                    size,
+                    true,
+                    false,
+                    false,
+                    Rectangle::default(),
+                    CornerRadius::from(target.config.corner_radius as f32 + 1.),
+                    scale,
+                    alpha,
+                );
+                tab.slot_loc = Some(bounds.loc - Point::from((1., 1.)));
+            }
+
+            self.tab_indicators.push(tab);
+        }
+
+        // A window that stopped being a tab folds its indicator away where its cell is now, with
+        // the tabs it last had.
+        for mut tab in old {
+            let Some((_, area)) = leaving.iter().find(|(id, _)| id == &tab.window) else {
+                continue;
+            };
+            if !self.open || tab.indicator.is_closed() {
+                continue;
+            }
+            if !tab.leaving {
+                tab.leaving = true;
+                tab.indicator
+                    .start_close_animation(self.clock.clone(), movement);
+            }
+
+            tab.indicator.set_alpha(alpha);
+            let view_rect = Rectangle::new(Point::from((-area.loc.x, -area.loc.y)), view_size);
+            let tabs = tab.last_tabs.clone();
+            tab.indicator.update_render_elements(
+                true,
+                *area,
+                view_rect,
+                tabs.len(),
+                tabs.into_iter(),
+                is_active,
+                scale,
+            );
+            tab.slot_loc = None;
+            if let Some(bounds) = tab.indicator.bounds() {
+                tab.slot.update_render_elements(
+                    bounds.size + Size::from((2., 2.)),
+                    true,
+                    false,
+                    false,
+                    Rectangle::default(),
+                    CornerRadius::from(tab.indicator.config().corner_radius as f32 + 1.),
+                    scale,
+                    alpha,
+                );
+                tab.slot_loc = Some(bounds.loc - Point::from((1., 1.)));
+            }
+            self.tab_indicators.push(tab);
+        }
+    }
+
+    /// Windows whose cell has a tab indicator, including ones folding away.
+    pub(super) fn tab_indicator_windows(&self) -> impl Iterator<Item = &W::Id> {
+        self.tab_indicators.iter().map(|t| &t.window)
+    }
+
+    /// Renders the tab indicators next to the cells of tabs.
+    pub(super) fn render_tab_indicators(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        push: &mut dyn FnMut(TabIndicatorRenderElement),
+    ) {
+        for tab in &self.tab_indicators {
+            tab.indicator.render(renderer, Point::default(), push);
+        }
+    }
+
+    /// Renders the slots under the tab indicators, see [`Self::update_tab_indicators`].
+    pub(super) fn render_tab_indicator_slots(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        push: &mut dyn FnMut(FocusRingRenderElement),
+    ) {
+        for tab in &self.tab_indicators {
+            if let Some(loc) = tab.slot_loc {
+                tab.slot.render(renderer, loc, push);
+            }
+        }
     }
 
     pub(super) fn record_added_window(&mut self, id: W::Id) {
@@ -1085,6 +1526,7 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     pub fn advance_animations(&mut self) {
+        self.advance_focus_rings();
         if let Some(OverviewProgress::Animation(anim)) = &mut self.progress {
             if anim.is_done() {
                 self.progress = if self.open {
@@ -1142,6 +1584,8 @@ impl<W: LayoutElement> GridOverview<W> {
             || self.rearrange_anim.is_some()
             || self.focus_boost_anim.is_some()
             || self.minimized_highlights_animating()
+            || self.focus_rings_animating()
+            || self.tab_indicators_animating()
     }
 }
 
@@ -1389,6 +1833,143 @@ pub(super) struct MinimizedHighlightEntry<W: LayoutElement> {
     pub size: Size<f64, Logical>,
     pub is_urgent: bool,
     pub is_minimized: bool,
+    /// The window's tile as drawn in the grid right now, with its corner radius, for the dim
+    /// layer.
+    pub tile_rect: Option<(Rectangle<f64, Logical>, CornerRadius)>,
+}
+
+/// Where and how to draw the focus ring of a window in the grid, as input to
+/// [`GridOverview::update_focus_rings`].
+pub(super) struct GridRingTarget<W: LayoutElement> {
+    pub window: W::Id,
+    /// The window's tile as drawn in the grid right now.
+    pub rect: Rectangle<f64, Logical>,
+    /// The tile's corner radius, scaled down with it.
+    pub radius: CornerRadius,
+    /// The window's own focus ring settings.
+    pub config: niri_config::FocusRing,
+    pub is_urgent: bool,
+    /// Opacity of the ring, for windows whose own ring is hidden outside the grid.
+    pub alpha: f64,
+}
+
+/// The tab indicator next to the cell of a tab, as input to
+/// [`GridOverview::update_tab_indicators`].
+pub(super) struct GridTabTarget<W: LayoutElement> {
+    /// The tab's window.
+    pub window: W::Id,
+    /// The tab's tile as drawn in the grid right now.
+    pub area: Rectangle<f64, Logical>,
+    pub config: niri_config::TabIndicator,
+    /// Every tab of the column, this one active.
+    pub tabs: Vec<TabInfo>,
+    /// Color of the slot around the indicator: the background behind the cells.
+    pub slot_color: niri_config::Color,
+}
+
+/// The tab indicator next to the cell of a tab.
+#[derive(Debug)]
+struct GridTabIndicator<W: LayoutElement> {
+    window: W::Id,
+    indicator: TabIndicator,
+    slot: FocusRing,
+    slot_loc: Option<Point<f64, Logical>>,
+    /// The column's tabs as of the last update, for folding the indicator away.
+    last_tabs: Vec<TabInfo>,
+    /// Whether the window stopped being a tab and the indicator is folding away.
+    leaving: bool,
+}
+
+/// A focus ring the grid draws around a cell's window.
+#[derive(Debug)]
+struct GridFocusRing<W: LayoutElement> {
+    window: W::Id,
+    ring: FocusRing,
+    /// How far the ring is grown in: 1 on the focused window, 0 once it lost the focus.
+    shown: f64,
+    /// The ongoing change of `shown`, with the grow transition.
+    fade: Option<Animation>,
+    /// Where the ring was last laid out: the tile's rectangle and corner radius.
+    rect: Option<(Rectangle<f64, Logical>, CornerRadius)>,
+}
+
+impl<W: LayoutElement> GridFocusRing<W> {
+    /// How far the ring is grown in. A spring can take it past 1.
+    fn shown_value(&self) -> f64 {
+        self.fade.as_ref().map_or(self.shown, |fade| fade.value())
+    }
+}
+
+/// How far the trailing edges of a sliding ring lag behind its leading edges, as a share of the
+/// slide. The ring stretches a little on the way, which reads as moving rather than being moved.
+const SLIDE_STRETCH: f64 = 0.1;
+
+/// Progress of the leading and of the trailing edges of a sliding ring.
+///
+/// Both follow the slide's own curve, the leading ones sped up and the trailing ones starting
+/// late, so that both arrive when the slide ends.
+fn slide_progress(anim: &Animation, now: Duration) -> (f64, f64) {
+    let start = anim.start_time();
+    let total = anim.duration().as_secs_f64();
+    let elapsed = now.saturating_sub(start).as_secs_f64();
+    let k = SLIDE_STRETCH;
+
+    let lead = elapsed / (1. - k);
+    let trail = (elapsed - k * total).max(0.) / (1. - k);
+    (
+        anim.value_at(start + Duration::from_secs_f64(lead)),
+        anim.value_at(start + Duration::from_secs_f64(trail)),
+    )
+}
+
+/// Moves each edge of `from` toward `to`, the edges in front in the direction of motion with the
+/// `lead` progress and the ones behind with the `trail` progress.
+fn stretch_rect(
+    from: Rectangle<f64, Logical>,
+    to: Rectangle<f64, Logical>,
+    lead: f64,
+    trail: f64,
+) -> Rectangle<f64, Logical> {
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let moves_right = to.loc.x + to.size.w / 2. >= from.loc.x + from.size.w / 2.;
+    let moves_down = to.loc.y + to.size.h / 2. >= from.loc.y + from.size.h / 2.;
+    let (left_t, right_t) = if moves_right {
+        (trail, lead)
+    } else {
+        (lead, trail)
+    };
+    let (top_t, bottom_t) = if moves_down {
+        (trail, lead)
+    } else {
+        (lead, trail)
+    };
+
+    let left = lerp(from.loc.x, to.loc.x, left_t);
+    let right = lerp(from.loc.x + from.size.w, to.loc.x + to.size.w, right_t);
+    let top = lerp(from.loc.y, to.loc.y, top_t);
+    let bottom = lerp(from.loc.y + from.size.h, to.loc.y + to.size.h, bottom_t);
+    Rectangle::new(
+        Point::from((left, top)),
+        Size::from(((right - left).max(0.), (bottom - top).max(0.))),
+    )
+}
+
+/// The focus ring sliding to a new cell.
+#[derive(Debug)]
+struct GridRingSlide {
+    from: Rectangle<f64, Logical>,
+    from_radius: CornerRadius,
+    anim: Animation,
+}
+
+fn lerp_radius(from: CornerRadius, to: CornerRadius, t: f32) -> CornerRadius {
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    CornerRadius {
+        top_left: lerp(from.top_left, to.top_left),
+        top_right: lerp(from.top_right, to.top_right),
+        bottom_right: lerp(from.bottom_right, to.bottom_right),
+        bottom_left: lerp(from.bottom_left, to.bottom_left),
+    }
 }
 
 /// A highlight drawn behind the cell of a minimized window, with its own fade.
@@ -1396,6 +1977,10 @@ pub(super) struct MinimizedHighlightEntry<W: LayoutElement> {
 struct MinimizedHighlight<W: LayoutElement> {
     window: W::Id,
     ring: FocusRing,
+    /// The dark layer over the thumbnail, a filled rectangle like `ring`.
+    dim: FocusRing,
+    /// Where `dim` goes, if it shows.
+    dim_loc: Option<Point<f64, Logical>>,
     /// 0 while absent, 1 while fully shown; a fade-out is dropped once it reaches 0.
     fade: Animation,
 }

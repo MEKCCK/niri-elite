@@ -370,8 +370,18 @@ grid-overview {
     // Minimum scale for grid cells.
     min-scale 0.08
 
+    // The focus ring marks the focused cell and keeps its on-screen width in the grid.
+    // Make it twice as thick as the normal focus ring there, so it stands out on small cells.
+    focus-ring-width 8
+
+    // How the focus ring moves between cells: "grow" (the default), "slide" or "none".
+    // focus-ring-transition "slide"
+
     // Scale the focused column relative to its cell. Ranges from 1 to 2.
-    focused-column-scale 1.04
+    // focused-column-scale 1.04
+
+    // Uncomment to move the focus to the cell under the pointer as the mouse moves.
+    // focus-follows-mouse min-distance=8
 
     // When true (the default), tapping the Mod key alone (press and release without
     // pressing any other key) toggles the grid overview, even without an explicit binding.
@@ -386,7 +396,10 @@ grid-overview {
         color "#999999b3"
         urgent-color "#ff9999"
         padding 6
-        corner-radius 0
+        // The frame's corners follow the window's rounded corners; set a radius to override.
+        // corner-radius 0
+        // How dark minimized windows are drawn, from 0 (not at all) to 1 (black).
+        dim 0.4
     }
 }
 
