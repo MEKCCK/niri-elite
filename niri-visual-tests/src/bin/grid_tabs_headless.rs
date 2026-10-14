@@ -235,11 +235,21 @@ fn main() -> anyhow::Result<()> {
         (3000, "05_close_start", true),
         (3080, "06_closing", false),
         (5000, "07_closed", false),
+        // Outside the grid: window 3 joins the tabbed column.
+        (5200, "08_join", false),
+        (5240, "09_joining", false),
+        (5300, "10_joining", false),
+        (5420, "11_joining", false),
+        (6000, "12_joined", false),
     ];
     for (t_ms, name, toggle) in steps {
         clock.set_unadjusted(Duration::from_millis(*t_ms));
         if *toggle {
             layout.toggle_grid_overview();
+        }
+        if *t_ms == 5200 {
+            layout.activate_window(&3);
+            layout.consume_or_expel_window_left(None);
         }
         layout.advance_animations();
         layout.update_render_elements(Some(&output));

@@ -24,6 +24,12 @@ pub struct TabIndicator {
     alpha: f32,
     /// The rectangle the tabs cover, as of the last update, in the coordinates of the area.
     bounds: Option<Rectangle<f64, Logical>>,
+    /// Where the tabs were drawn on the last update, relative to the area.
+    shown_rects: Vec<Rectangle<f64, Logical>>,
+    /// The tabs moving to their new places after the tab count changed, from where they were.
+    count_anim: Option<(Vec<Rectangle<f64, Logical>>, Animation)>,
+    /// Clock and timing for `count_anim`, if the tab count changes animate.
+    count_anim_config: Option<(Clock, niri_config::Animation)>,
 }
 
 #[derive(Debug)]
@@ -49,7 +55,15 @@ impl TabIndicator {
             config,
             alpha: 1.,
             bounds: None,
+            shown_rects: Vec::new(),
+            count_anim: None,
+            count_anim_config: None,
         }
+    }
+
+    /// Animates the tabs to their new places when the tab count changes, with this timing.
+    pub fn set_count_animation(&mut self, clock: Clock, config: niri_config::Animation) {
+        self.count_anim_config = Some((clock, config));
     }
 
     /// The rectangle the tabs cover, as of the last update.
@@ -78,10 +92,17 @@ impl TabIndicator {
                 self.open_anim = None;
             }
         }
+        if self
+            .count_anim
+            .as_ref()
+            .is_some_and(|(_, anim)| anim.is_done())
+        {
+            self.count_anim = None;
+        }
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.open_anim.is_some()
+        self.open_anim.is_some() || self.count_anim.is_some()
     }
 
     pub fn start_open_animation(&mut self, clock: Clock, config: niri_config::Animation) {
@@ -188,6 +209,8 @@ impl TabIndicator {
         if !enabled || self.config.off {
             self.shader_locs.clear();
             self.shaders.clear();
+            self.shown_rects.clear();
+            self.count_anim = None;
             return;
         }
 
@@ -195,6 +218,8 @@ impl TabIndicator {
         if self.config.hide_when_single_tab && count == 1 {
             self.shader_locs.clear();
             self.shaders.clear();
+            self.shown_rects.clear();
+            self.count_anim = None;
             return;
         }
 
@@ -206,7 +231,7 @@ impl TabIndicator {
         let shared_rounded_corners = self.config.gaps_between_tabs == 0.;
         let mut tabs_left = tab_count;
 
-        let rects: Vec<_> = self.tab_rects(area, count, scale).collect();
+        let rects = self.animated_tab_rects(area, count, scale);
         self.bounds = rects.iter().copied().reduce(|a, b| a.merge(b));
         for ((shader, loc), (tab, rect)) in zip(
             zip(&mut self.shaders, &mut self.shader_locs),
@@ -285,6 +310,76 @@ impl TabIndicator {
                 self.alpha,
             );
         }
+    }
+
+    /// The tab rectangles, moving from where they were when the tab count changed.
+    ///
+    /// The indicator only knows the count, not which tab came or went: a new tab grows in at the
+    /// end, and when one goes, the rest stretch to fill its place.
+    fn animated_tab_rects(
+        &mut self,
+        area: Rectangle<f64, Logical>,
+        count: usize,
+        scale: f64,
+    ) -> Vec<Rectangle<f64, Logical>> {
+        let target: Vec<_> = self
+            .tab_rects(area, count, scale)
+            .map(|rect| Rectangle::new(rect.loc - area.loc, rect.size))
+            .collect();
+
+        let prev = &self.shown_rects;
+        if !prev.is_empty() && prev.len() != count {
+            if let Some((clock, config)) = &self.count_anim_config {
+                let mut from = prev.clone();
+                if count > from.len() {
+                    // New tabs start out empty at the end of the last one.
+                    let last = *from.last().unwrap();
+                    let (loc, size) = match self.config.position {
+                        TabIndicatorPosition::Left | TabIndicatorPosition::Right => (
+                            Point::from((last.loc.x, last.loc.y + last.size.h)),
+                            Size::from((last.size.w, 0.)),
+                        ),
+                        TabIndicatorPosition::Top | TabIndicatorPosition::Bottom => (
+                            Point::from((last.loc.x + last.size.w, last.loc.y)),
+                            Size::from((0., last.size.h)),
+                        ),
+                    };
+                    from.resize(count, Rectangle::new(loc, size));
+                } else {
+                    from.truncate(count);
+                }
+                let anim = Animation::new(clock.clone(), 0., 1., 0., *config);
+                self.count_anim = Some((from, anim));
+            }
+        }
+
+        let rects = match &self.count_anim {
+            Some((from, anim)) if from.len() == count => {
+                let t = anim.value();
+                let lerp = |a: f64, b: f64| a + (b - a) * t;
+                zip(from, &target)
+                    .map(|(a, b)| {
+                        Rectangle::new(
+                            Point::from((lerp(a.loc.x, b.loc.x), lerp(a.loc.y, b.loc.y))),
+                            Size::from((
+                                lerp(a.size.w, b.size.w).max(0.),
+                                lerp(a.size.h, b.size.h).max(0.),
+                            )),
+                        )
+                    })
+                    .collect()
+            }
+            _ => {
+                self.count_anim = None;
+                target
+            }
+        };
+
+        self.shown_rects = rects.clone();
+        rects
+            .into_iter()
+            .map(|rect| Rectangle::new(rect.loc + area.loc, rect.size))
+            .collect()
     }
 
     pub fn hit(
@@ -426,5 +521,66 @@ impl TabInfo {
         let geometry = Rectangle::new(position, tile.animated_tile_size());
 
         TabInfo { gradient, geometry }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use niri_config::Color;
+
+    use super::*;
+
+    fn tabs(count: usize) -> impl Iterator<Item = TabInfo> {
+        (0..count).map(|_| TabInfo {
+            gradient: Gradient::from(Color::new_unpremul(1., 1., 1., 1.)),
+            geometry: Rectangle::from_size(Size::from((100., 100.))),
+        })
+    }
+
+    fn update(indicator: &mut TabIndicator, count: usize) {
+        let area = Rectangle::from_size(Size::from((100., 400.)));
+        indicator.update_render_elements(true, area, area, count, tabs(count), true, 1.);
+    }
+
+    #[test]
+    fn tab_count_change_grows_new_tab_in() {
+        let mut clock = Clock::with_time(Duration::ZERO);
+        let mut indicator = TabIndicator::new(niri_config::TabIndicator::default());
+        let config = niri_config::Animation {
+            off: false,
+            kind: niri_config::animations::Kind::Easing(niri_config::animations::EasingParams {
+                duration_ms: 100,
+                curve: niri_config::animations::Curve::Linear,
+            }),
+        };
+        indicator.set_count_animation(clock.clone(), config);
+
+        update(&mut indicator, 3);
+        assert!(!indicator.are_animations_ongoing());
+        let settled = indicator.bounds().unwrap();
+
+        // A fourth tab starts out empty at the end, so the tabs still cover the same length.
+        update(&mut indicator, 4);
+        assert!(indicator.are_animations_ongoing());
+        assert_eq!(indicator.shown_rects.len(), 4);
+        assert_eq!(indicator.shown_rects[3].size.h, 0.);
+        assert_eq!(indicator.bounds().unwrap(), settled);
+
+        clock.set_unadjusted(Duration::from_millis(200));
+        indicator.advance_animations();
+        update(&mut indicator, 4);
+        assert!(!indicator.are_animations_ongoing());
+        assert!(indicator.shown_rects[3].size.h > 0.);
+    }
+
+    #[test]
+    fn tab_count_change_is_instant_without_animation() {
+        let mut indicator = TabIndicator::new(niri_config::TabIndicator::default());
+        update(&mut indicator, 3);
+        update(&mut indicator, 2);
+        assert!(!indicator.are_animations_ongoing());
+        assert_eq!(indicator.shown_rects.len(), 2);
     }
 }

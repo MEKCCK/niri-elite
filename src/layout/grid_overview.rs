@@ -1236,7 +1236,17 @@ impl<W: LayoutElement> GridOverview<W> {
         self.ring_slide.is_some() || self.focus_rings.iter().any(|ring| ring.fade.is_some())
     }
 
+    fn tab_indicators_animating(&self) -> bool {
+        self.tab_indicators
+            .iter()
+            .any(|tab| tab.indicator.are_animations_ongoing())
+    }
+
     fn advance_focus_rings(&mut self) {
+        for tab in &mut self.tab_indicators {
+            tab.indicator.advance_animations();
+        }
+
         for ring in &mut self.focus_rings {
             if ring.fade.as_ref().is_some_and(|fade| fade.is_done()) {
                 ring.fade = None;
@@ -1283,6 +1293,12 @@ impl<W: LayoutElement> GridOverview<W> {
         // They fade in as the grid opens.
         let alpha = self.progress_value().clamp(0., 1.) as f32;
 
+        // A tab that joins a column while the grid shows has its indicator grow in, like a
+        // column's own indicator when it turns tabbed. The ones there as the grid opens fade in
+        // with it instead.
+        let grows_in = self.open && self.progress.as_ref().is_some_and(|p| !p.is_animation());
+        let movement = self.options.animations.window_movement.0;
+
         let mut old = std::mem::take(&mut self.tab_indicators);
         for target in targets {
             let mut tab = match old.iter().position(|t| t.window == target.window) {
@@ -1300,7 +1316,12 @@ impl<W: LayoutElement> GridOverview<W> {
                     slot_loc: None,
                 },
             };
+            let is_new = tab.slot_loc.is_none() && tab.indicator.bounds().is_none();
             let indicator = &mut tab.indicator;
+            if is_new && grows_in {
+                indicator.start_open_animation(self.clock.clone(), movement);
+            }
+            indicator.set_count_animation(self.clock.clone(), movement);
             indicator.update_config(target.config);
             indicator.set_alpha(alpha);
             // Relative to the tabs area, for gradients relative to the workspace view.
@@ -1506,6 +1527,7 @@ impl<W: LayoutElement> GridOverview<W> {
             || self.focus_boost_anim.is_some()
             || self.minimized_highlights_animating()
             || self.focus_rings_animating()
+            || self.tab_indicators_animating()
     }
 }
 

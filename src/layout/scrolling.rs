@@ -5208,6 +5208,11 @@ impl<W: LayoutElement> Column<W> {
             .iter()
             .filter(|tile| !tile.window().is_minimized())
             .count();
+        // Tabs coming and going slide the others over, like the windows themselves.
+        self.tab_indicator.set_count_animation(
+            self.clock.clone(),
+            self.options.animations.window_movement.0,
+        );
         self.tab_indicator.update_render_elements(
             enabled,
             self.tab_indicator_area(),
