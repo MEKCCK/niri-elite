@@ -22,14 +22,15 @@ use tracing::debug;
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::focus_ring::FocusRingRenderElement;
 use super::grid_overview::{
-    GridDirection, GridEntryInfo, GridItem, GridOverview, GridRingTarget, MinimizedHighlightEntry,
+    GridDirection, GridEntryInfo, GridItem, GridOverview, GridRingTarget, GridTabTarget,
+    MinimizedHighlightEntry,
 };
 use super::scrolling::{
     Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingPart, ScrollingSpace,
     ScrollingSpaceRenderElement,
 };
 use super::shadow::Shadow;
-use super::tab_indicator::TabIndicator;
+use super::tab_indicator::{TabIndicator, TabInfo};
 use super::tile::{Tile, TileRenderElement, TileRenderSnapshot};
 use super::{
     ActivateWindow, HitType, InsertPosition, InteractiveResizeData, LayoutElement, Options,
@@ -1582,6 +1583,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         self.update_grid_minimized_highlights();
         self.update_grid_focus_rings(is_active);
+        self.update_grid_tab_indicators(is_active);
 
         if layer.is_normal() {
             self.shadow.update_render_elements(
@@ -1686,6 +1688,64 @@ impl<W: LayoutElement> Workspace<W> {
         let focus = focus.filter(|id| targets.iter().any(|t| &t.window == id));
         if let Some(go) = &mut self.grid_overview {
             go.update_focus_rings(focus.as_ref(), &targets, is_active, view_size, scale);
+        }
+    }
+
+    /// Lays out the tab indicators next to the cells of tabs.
+    ///
+    /// The grid gives every tab of a tabbed column its own cell. Each gets a copy of the column's
+    /// tab indicator with its own tab lit, so that the tabs read as one column.
+    fn update_grid_tab_indicators(&mut self, is_active: bool) {
+        let scale = self.scale.fractional_scale();
+        let view_size = self.view_size;
+
+        let mut targets = Vec::new();
+        if let Some(go) = &self.grid_overview {
+            // As the grid closes, the tabs merge back under the column's own indicator, which
+            // the closing grid draws; two sets of indicators on the way would be a mess.
+            if go.open {
+                // Sized in screen space like the focus ring, and drawn inside the thumbnail's edge:
+                // the gap between cells is too narrow for it next to a focus ring, and a focused
+                // neighbor's ring would cover it there.
+                let mut config = self.options.layout.tab_indicator;
+                config.place_within_column = false;
+                config.gap = -(config.width + 6.);
+                config.gaps_between_tabs = config.gaps_between_tabs.max(2.);
+
+                for (item, _) in &go.layout.entries {
+                    let GridItem::Tab {
+                        col_idx, window_id, ..
+                    } = item
+                    else {
+                        continue;
+                    };
+                    let Some(col) = self.scrolling.columns().nth(*col_idx) else {
+                        continue;
+                    };
+                    let Some((area, _)) = self.grid_tile_visual_rect(go, window_id) else {
+                        continue;
+                    };
+
+                    let tabs = col
+                        .tiles()
+                        .map(|(tile, _)| {
+                            let is_this_tab = tile.window().id() == window_id;
+                            let is_urgent = tile.window().is_urgent();
+                            TabInfo::from_tile(tile, area.loc, is_this_tab, is_urgent, &config)
+                        })
+                        .collect();
+                    targets.push(GridTabTarget {
+                        window: window_id.clone(),
+                        area,
+                        config,
+                        tabs,
+                    });
+                }
+            }
+        }
+
+        if let Some(go) = &mut self.grid_overview {
+            go.update_tab_indicators(targets, is_active, view_size, scale);
         }
     }
 
@@ -3542,6 +3602,13 @@ impl<W: LayoutElement> Workspace<W> {
                 go.render_minimized_dim(ctx.renderer, item.window_id(), &mut |elem| {
                     push(elem.into())
                 });
+
+                if let GridItem::Tab { window_id, .. } = item {
+                    go.render_tab_indicator(ctx.renderer, window_id, &mut |elem| {
+                        let elem: ScrollingSpaceRenderElement<R> = elem.into();
+                        push(elem.into())
+                    });
+                }
 
                 match item {
                     GridItem::Column { col_idx, .. } => {

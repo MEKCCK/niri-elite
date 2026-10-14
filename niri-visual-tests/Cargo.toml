@@ -35,5 +35,13 @@ name = "grid-focus-ring-headless"
 path = "src/bin/grid_focus_ring_headless.rs"
 
 [[bin]]
+name = "grid-timing-headless"
+path = "src/bin/grid_timing_headless.rs"
+
+[[bin]]
+name = "grid-tabs-headless"
+path = "src/bin/grid_tabs_headless.rs"
+
+[[bin]]
 name = "grid-minimized-headless"
 path = "src/bin/grid_minimized_headless.rs"

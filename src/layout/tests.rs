@@ -6045,6 +6045,25 @@ fn focus_ring_moves_to_floating_and_back() {
     assert_eq!(windows_with_visible_focus_ring(&layout), [1]);
 }
 
+#[test]
+fn grid_tab_cells_get_tab_indicators() {
+    let mut layout = tabbed_column_and_column_grid();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    let mut ids: Vec<usize> = go.tab_indicator_windows().copied().collect();
+    ids.sort();
+    // The two tabs of the tabbed column, not the window in its own column.
+    assert_eq!(ids, [1, 2]);
+
+    // Closing the grid hands over to the column's own indicator right away.
+    check_ops_on_layout(&mut layout, [Op::ToggleGridOverview]);
+    layout.update_render_elements(None);
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert_eq!(go.tab_indicator_windows().count(), 0);
+}
+
 fn scrolling_column_ids(layout: &Layout<TestWindow>) -> Vec<Vec<usize>> {
     layout
         .active_workspace()

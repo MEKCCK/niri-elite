@@ -20,6 +20,8 @@ pub struct TabIndicator {
     shaders: Vec<BorderRenderElement>,
     open_anim: Option<Animation>,
     config: niri_config::TabIndicator,
+    /// Opacity of the whole indicator.
+    alpha: f32,
 }
 
 #[derive(Debug)]
@@ -43,11 +45,17 @@ impl TabIndicator {
             shaders: Vec::new(),
             open_anim: None,
             config,
+            alpha: 1.,
         }
     }
 
     pub fn update_config(&mut self, config: niri_config::TabIndicator) {
         self.config = config;
+    }
+
+    /// Sets the opacity of the whole indicator, applied on the next update.
+    pub fn set_alpha(&mut self, alpha: f32) {
+        self.alpha = alpha;
     }
 
     pub fn update_shaders(&mut self) {
@@ -264,7 +272,7 @@ impl TabIndicator {
                 0.,
                 radius,
                 scale as f32,
-                1.,
+                self.alpha,
             );
         }
     }

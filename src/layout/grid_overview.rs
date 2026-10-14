@@ -6,6 +6,7 @@ use niri_config::{CornerRadius, GridFocusRingTransition};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
+use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::{Animation, Clock, LayoutElement, Options, OverviewProgress};
 use crate::render_helpers::renderer::NiriRenderer;
 
@@ -161,6 +162,9 @@ pub struct GridOverview<W: LayoutElement> {
     ring_focus: Option<W::Id>,
     /// With the slide transition, where the ring slides from.
     ring_slide: Option<GridRingSlide>,
+    /// Tab indicators next to the cells of tabs, which tell the tabs of one column apart from
+    /// other windows.
+    tab_indicators: Vec<(W::Id, TabIndicator)>,
     /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
     /// tile, so that the choice can follow its column when column indices shift.
     pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
@@ -195,6 +199,7 @@ impl<W: LayoutElement> GridOverview<W> {
             focus_rings: Vec::new(),
             ring_focus: None,
             ring_slide: None,
+            tab_indicators: Vec::new(),
             column_tile_focus: Vec::new(),
             clock,
             options,
@@ -1267,6 +1272,62 @@ impl<W: LayoutElement> GridOverview<W> {
         }
     }
 
+    /// Updates the tab indicators next to the cells of tabs.
+    pub(super) fn update_tab_indicators(
+        &mut self,
+        targets: Vec<GridTabTarget<W>>,
+        is_active: bool,
+        view_size: Size<f64, Logical>,
+        scale: f64,
+    ) {
+        // They fade in as the grid opens.
+        let alpha = self.progress_value().clamp(0., 1.) as f32;
+
+        let mut old = std::mem::take(&mut self.tab_indicators);
+        for target in targets {
+            let mut indicator = match old.iter().position(|(id, _)| id == &target.window) {
+                Some(idx) => old.swap_remove(idx).1,
+                None => TabIndicator::new(target.config),
+            };
+            indicator.update_config(target.config);
+            indicator.set_alpha(alpha);
+            // Relative to the tabs area, for gradients relative to the workspace view.
+            let view_rect = Rectangle::new(
+                Point::from((-target.area.loc.x, -target.area.loc.y)),
+                view_size,
+            );
+            let count = target.tabs.len();
+            indicator.update_render_elements(
+                true,
+                target.area,
+                view_rect,
+                count,
+                target.tabs.into_iter(),
+                is_active,
+                scale,
+            );
+            self.tab_indicators.push((target.window, indicator));
+        }
+    }
+
+    /// Windows whose tab cell has a tab indicator.
+    #[cfg(test)]
+    pub(super) fn tab_indicator_windows(&self) -> impl Iterator<Item = &W::Id> {
+        self.tab_indicators.iter().map(|(id, _)| id)
+    }
+
+    /// Renders the tab indicator next to the cell of this tab, if it has one.
+    pub(super) fn render_tab_indicator(
+        &self,
+        renderer: &mut impl NiriRenderer,
+        window: &W::Id,
+        push: &mut dyn FnMut(TabIndicatorRenderElement),
+    ) {
+        if let Some((_, indicator)) = self.tab_indicators.iter().find(|(id, _)| id == window) {
+            indicator.render(renderer, Point::default(), push);
+        }
+    }
+
     pub(super) fn record_added_window(&mut self, id: W::Id) {
         if !self.added_window_ids.contains(&id) {
             self.added_window_ids.push(id);
@@ -1663,6 +1724,18 @@ pub(super) struct GridRingTarget<W: LayoutElement> {
     pub is_urgent: bool,
     /// Opacity of the ring, for windows whose own ring is hidden outside the grid.
     pub alpha: f64,
+}
+
+/// The tab indicator next to the cell of a tab, as input to
+/// [`GridOverview::update_tab_indicators`].
+pub(super) struct GridTabTarget<W: LayoutElement> {
+    /// The tab's window.
+    pub window: W::Id,
+    /// The tab's tile as drawn in the grid right now.
+    pub area: Rectangle<f64, Logical>,
+    pub config: niri_config::TabIndicator,
+    /// Every tab of the column, this one active.
+    pub tabs: Vec<TabInfo>,
 }
 
 /// A focus ring the grid draws around a cell's window.
