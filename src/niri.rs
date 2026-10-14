@@ -379,6 +379,7 @@ pub struct Niri {
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
+    pub grid_mouse_focus: GridMouseFocus,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
     pub keyboard_shortcuts_inhibiting_surfaces: HashMap<WlSurface, KeyboardShortcutsInhibitor>,
@@ -591,6 +592,22 @@ pub enum KeyboardFocus {
     ExitConfirmDialog,
     Overview,
     Mru,
+}
+
+/// State of `grid-overview { focus-follows-mouse }`.
+///
+/// The pointer only takes the grid focus over once it moved far enough from where it was when the
+/// focus was last set some other way: when the grid opened, by keyboard navigation, or by a layout
+/// change. Then the focus follows every motion until it is set some other way again.
+#[derive(Debug, Default)]
+pub struct GridMouseFocus {
+    /// The grid session this state belongs to, from [`Layout::grid_overview_open_count`].
+    open_count: u64,
+    /// The grid focus as of the last pointer motion.
+    focus: Option<Window>,
+    /// Where the pointer was when the focus was last set some other way, while the pointer
+    /// hasn't moved far enough from there yet.
+    anchor: Option<Point<f64, Logical>>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -3432,6 +3449,7 @@ impl Niri {
             seat,
             keyboard_focus: KeyboardFocus::Layout { surface: None },
             layer_shell_on_demand_focus: None,
+            grid_mouse_focus: GridMouseFocus::default(),
             idle_inhibiting_surfaces: HashSet::new(),
             is_fdo_idle_inhibited: Arc::new(AtomicBool::new(false)),
             keyboard_shortcuts_inhibiting_surfaces: HashMap::new(),
@@ -8605,6 +8623,60 @@ impl Niri {
 
         if let Err(err) = res {
             warn!("error spawning a thread to send MonitorsChanged: {err:?}");
+        }
+    }
+
+    /// Moves the grid focus to the cell under the pointer as the pointer moves.
+    ///
+    /// Call this before the pointer moves to `new_pos`, with `under` the contents there.
+    pub fn handle_grid_focus_follows_mouse(
+        &mut self,
+        new_pos: Point<f64, Logical>,
+        under: &PointContents,
+    ) {
+        let ffm = self.config.borrow().grid_overview.focus_follows_mouse;
+        let Some(ffm) = ffm.filter(|_| self.layout.is_grid_overview_open()) else {
+            self.grid_mouse_focus = GridMouseFocus::default();
+            return;
+        };
+
+        // Drags and the MRU switcher own the pointer.
+        let pointer = self.seat.get_pointer().unwrap();
+        if pointer.is_grabbed() || self.window_mru_ui.is_open() {
+            return;
+        }
+
+        let old_pos = pointer.current_location();
+        let open_count = self.layout.grid_overview_open_count();
+        let focus = self.layout.grid_focused_window_id();
+
+        let state = &mut self.grid_mouse_focus;
+        if state.open_count != open_count || state.focus != focus {
+            // A new grid, or the focus was set some other way since the last motion.
+            state.open_count = open_count;
+            state.focus = focus.clone();
+            state.anchor = Some(old_pos);
+        }
+
+        if let Some(anchor) = state.anchor {
+            let delta = new_pos - anchor;
+            if delta.x.hypot(delta.y) < ffm.min_distance() {
+                return;
+            }
+            state.anchor = None;
+        }
+
+        // Over a gap or over a window that isn't in the grid, the focus stays where it is.
+        let Some((window, _)) = &under.window else {
+            return;
+        };
+        if focus.as_ref() == Some(window) || !self.layout.window_is_in_open_grid_overview(window) {
+            return;
+        }
+
+        if self.layout.focus_grid_cell_for_window(window) {
+            self.grid_mouse_focus.focus = self.layout.grid_focused_window_id();
+            self.queue_redraw_all();
         }
     }
 

@@ -380,10 +380,47 @@ grid-overview {
 
 Scale the focused column relative to its cell.
 Ranges from 1 to 2, where higher values make the focused column larger.
+Defaults to 1 (no scaling): the focus ring already marks the focused cell, and a scaled-up cell misrepresents the window's size next to the others.
 
 ```kdl
 grid-overview {
     focused-column-scale 1.08
+}
+```
+
+#### `focus-ring-width`
+
+<sup>Since: 26.04 (fork)</sup>
+
+The focused cell is marked by the focus ring of its window, drawn at a fixed on-screen width rather than scaled down with the cell.
+By default, that is the width of the window's own focus ring; this setting picks another width for the grid, in logical pixels.
+The ring changes between the two widths as the grid opens and closes.
+
+The colors are the focus ring's, so there is no separate setting for them.
+If the focus ring is off, nothing marks the focused cell other than `focused-column-scale`.
+
+```kdl
+grid-overview {
+    focus-ring-width 8
+}
+```
+
+#### `focus-follows-mouse`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Moving the mouse moves the grid focus to the cell under the pointer.
+Off by default.
+
+The pointer takes the focus over once it moved more than `min-distance` logical pixels (8 by default) from where it was when the focus was last set some other way: when the grid opened, by keyboard navigation, or when the grid rearranged.
+From then on the focus follows every motion, until the keyboard moves it again.
+Over the gaps between cells, the focus stays where it is.
+
+This is separate from `focus-follows-mouse` in the `input` section, which doesn't act on grid cells.
+
+```kdl
+grid-overview {
+    focus-follows-mouse min-distance=8
 }
 ```
 
@@ -396,6 +433,7 @@ This setting controls the frame drawn around their cells so you can tell them ap
 
 The highlight is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
 Its thickness does not change with the grid scale.
+While a minimized cell is focused, its focus ring marks it instead, and the frame fades out.
 The knobs mirror the [recent-windows highlight](./Configuration:-Recent-Windows.md), and so do the colors; only `padding` is smaller, since it has to fit inside the `gap` between cells.
 
 Colors may carry an alpha channel, which blends the frame into the backdrop; the default is 70% opaque.

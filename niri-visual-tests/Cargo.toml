@@ -31,5 +31,9 @@ name = "floating-raise-headless"
 path = "src/bin/floating_raise_headless.rs"
 
 [[bin]]
+name = "grid-focus-ring-headless"
+path = "src/bin/grid_focus_ring_headless.rs"
+
+[[bin]]
 name = "grid-minimized-headless"
 path = "src/bin/grid_minimized_headless.rs"

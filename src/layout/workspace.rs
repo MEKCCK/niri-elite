@@ -1572,18 +1572,31 @@ impl<W: LayoutElement> Workspace<W> {
                         .and_then(|_| grid_focused_window_id.as_ref());
 
                     if is_grid_focused {
-                        let target_scale = info.target_scale;
                         if let Some(window_id) = focused_window {
+                            // The focus ring is what marks the focused cell, so keep it at the same
+                            // on-screen width however far the cell is scaled down. The ring is
+                            // drawn in tile coordinates and scaled with the tile, so divide by the
+                            // scale the tile is drawn at right now: following it through the open
+                            // and close animations keeps the ring as wide as outside the grid.
+                            let (_, item_scale) =
+                                self.grid_item_render_visual_transform(go, item, info);
+                            let (_, tile_scale) =
+                                go.window_visual_transform(window_id, Point::default(), item_scale);
+                            let grid_width = self.options.grid_overview.focus_ring_width;
+                            let progress = go.progress_value().clamp(0., 1.);
+
                             for tile in self.scrolling.tiles_mut().chain(self.floating.tiles_mut())
                             {
                                 if tile.window().id() == window_id {
                                     let normal_width = tile.focus_ring().config().width;
-                                    if normal_width > 0. {
-                                        let max_width = normal_width * 2.;
-                                        let grid_width = (normal_width
-                                            / target_scale.max(0.0001).sqrt())
-                                        .clamp(normal_width, max_width);
-                                        tile.focus_ring_mut().set_width_override(grid_width);
+                                    // A grid width set in the config still has to start out from
+                                    // the normal width as the grid opens.
+                                    let width = grid_width.map_or(normal_width, |grid_width| {
+                                        normal_width + (grid_width - normal_width) * progress
+                                    });
+                                    if width > 0. {
+                                        tile.focus_ring_mut()
+                                            .set_width_override(width / tile_scale.max(0.0001));
                                     }
                                     break;
                                 }
@@ -1640,7 +1653,15 @@ impl<W: LayoutElement> Workspace<W> {
                             continue;
                         };
                         let is_urgent = win.is_urgent();
-                        let is_minimized = win.is_minimized();
+                        // The focus ring alone marks the focused cell, minimized or not: the two
+                        // frames on one cell would read as one muddled marker.
+                        let is_grid_focused = info.row == go.focus.0 && info.col == go.focus.1;
+                        let ring_marks_focus = is_grid_focused
+                            && self
+                                .tiles()
+                                .find(|tile| tile.window().id() == id)
+                                .is_some_and(|tile| !tile.focus_ring().is_off());
+                        let is_minimized = win.is_minimized() && !ring_marks_focus;
 
                         let (_, visual_scale) = self.grid_item_visual_transform(go, item, info);
                         let source_size = info.target_size.downscale(info.target_scale.max(0.0001));

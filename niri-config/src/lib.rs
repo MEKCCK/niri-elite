@@ -688,6 +688,38 @@ mod tests {
     }
 
     #[test]
+    fn grid_overview_focus_settings_parse() {
+        let config = Config::parse_mem("").unwrap();
+        assert_eq!(config.grid_overview.focused_column_scale, 1.);
+        assert_eq!(config.grid_overview.focus_ring_width, None);
+        assert_eq!(config.grid_overview.focus_follows_mouse, None);
+
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                focus-ring-width 6
+                focus-follows-mouse
+            }
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.grid_overview.focus_ring_width, Some(6.));
+        let ffm = config.grid_overview.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.min_distance(), 8.);
+
+        let config = Config::parse_mem(
+            r#"
+            grid-overview {
+                focus-follows-mouse min-distance=20
+            }
+            "#,
+        )
+        .unwrap();
+        let ffm = config.grid_overview.focus_follows_mouse.unwrap();
+        assert_eq!(ffm.min_distance(), 20.);
+    }
+
+    #[test]
     fn grid_overview_minimized_highlight_parses() {
         let config = Config::parse_mem(
             r##"
@@ -2050,7 +2082,9 @@ mod tests {
                     bottom: 80.0,
                 },
                 min_scale: 0.08,
-                focused_column_scale: 1.04,
+                focused_column_scale: 1.0,
+                focus_ring_width: None,
+                focus_follows_mouse: None,
                 grid_all_monitors: true,
                 default_mod_action: true,
                 minimized_highlight: GridMinimizedHighlight {

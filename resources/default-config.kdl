@@ -370,8 +370,15 @@ grid-overview {
     // Minimum scale for grid cells.
     min-scale 0.08
 
+    // The focus ring marks the focused cell and keeps its on-screen width in the grid.
+    // Uncomment to make it thicker there.
+    // focus-ring-width 8
+
     // Scale the focused column relative to its cell. Ranges from 1 to 2.
-    focused-column-scale 1.04
+    // focused-column-scale 1.04
+
+    // Uncomment to move the focus to the cell under the pointer as the mouse moves.
+    // focus-follows-mouse min-distance=8
 
     // When true (the default), tapping the Mod key alone (press and release without
     // pressing any other key) toggles the grid overview, even without an explicit binding.

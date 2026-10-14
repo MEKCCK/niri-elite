@@ -483,9 +483,30 @@ pub struct GridOverview {
     pub padding: GridOverviewPadding,
     pub min_scale: f64,
     pub focused_column_scale: f64,
+    /// On-screen width of the focus ring around the focused cell, in logical pixels.
+    ///
+    /// `None` keeps the width of the window's own focus ring. Either way, the width doesn't shrink
+    /// with the cells.
+    pub focus_ring_width: Option<f64>,
+    pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     pub grid_all_monitors: bool,
     pub default_mod_action: bool,
     pub minimized_highlight: GridMinimizedHighlight,
+}
+
+/// Moving the mouse moves the grid focus to the cell under the pointer.
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+pub struct GridFocusFollowsMouse {
+    /// How far the pointer has to move after the focus was last set some other way, in logical
+    /// pixels, before the focus follows it.
+    #[knuffel(property)]
+    pub min_distance: Option<FloatOrInt<0, 65535>>,
+}
+
+impl GridFocusFollowsMouse {
+    pub fn min_distance(&self) -> f64 {
+        self.min_distance.map_or(8., |d| d.0)
+    }
 }
 
 /// Highlight drawn behind the grid cell of a minimized window.
@@ -579,7 +600,11 @@ impl Default for GridOverview {
             gap: 16.,
             padding: GridOverviewPadding::default(),
             min_scale: 0.08,
-            focused_column_scale: 1.04,
+            // The focus ring marks the focused cell; scaling it up would misrepresent the window's
+            // size next to the others.
+            focused_column_scale: 1.,
+            focus_ring_width: None,
+            focus_follows_mouse: None,
             grid_all_monitors: true,
             default_mod_action: true,
             minimized_highlight: GridMinimizedHighlight::default(),
@@ -717,6 +742,10 @@ pub struct GridOverviewPart {
     #[knuffel(child, unwrap(argument))]
     pub focused_column_scale: Option<FloatOrInt<1, 2>>,
     #[knuffel(child, unwrap(argument))]
+    pub focus_ring_width: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child)]
+    pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
+    #[knuffel(child, unwrap(argument))]
     pub grid_all_monitors: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub default_mod_action: Option<bool>,
@@ -737,6 +766,12 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         }
         if let Some(focused_column_scale) = &part.focused_column_scale {
             self.focused_column_scale = focused_column_scale.0;
+        }
+        if let Some(focus_ring_width) = &part.focus_ring_width {
+            self.focus_ring_width = Some(focus_ring_width.0);
+        }
+        if let Some(focus_follows_mouse) = part.focus_follows_mouse {
+            self.focus_follows_mouse = Some(focus_follows_mouse);
         }
         if let Some(grid_all_monitors) = part.grid_all_monitors {
             self.grid_all_monitors = grid_all_monitors;

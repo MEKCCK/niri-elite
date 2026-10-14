@@ -13,6 +13,16 @@ If a column contains multiple windows, use <kbd>J</kbd>/<kbd>K</kbd> to switch b
 Click a window to activate it and close the grid overview.
 Focusing a window from elsewhere, like a taskbar or `niri msg action focus-window`, does the same.
 
+With `focus-follows-mouse` in the `grid-overview` section, moving the mouse also moves the focus to the cell under the pointer, so closing the grid activates that window.
+The pointer only takes the focus over once it moved a few pixels (`min-distance`, 8 by default) from where it was when the grid opened or the keyboard last moved the focus, so nudging the mouse while navigating with the keyboard keeps the keyboard's choice.
+Cells moving under a still pointer, for example as the grid opens, don't take the focus either.
+
+```kdl
+grid-overview {
+    focus-follows-mouse min-distance=8
+}
+```
+
 ### Minimized windows
 
 The grid overview is where [minimized windows](./Configuration:-Key-Bindings.md#minimize-window) live: a minimized window keeps its place in the layout and only shows up here, as a cell marked with a colored frame.
@@ -57,7 +67,18 @@ grid-overview {
 }
 ```
 
-To change the focused column scale, use the `focused-column-scale` setting:
+The focused cell is marked by the focus ring of its window.
+In the grid, the ring keeps its on-screen width instead of shrinking with the cell, so it stays easy to see however many windows the grid shows.
+To make it thicker in the grid, use the `focus-ring-width` setting:
+
+```kdl
+grid-overview {
+    focus-ring-width 8
+}
+```
+
+The focused column can also be scaled up with the `focused-column-scale` setting.
+This is off by default, since a larger cell no longer shows the window's size next to the others:
 
 ```kdl
 grid-overview {

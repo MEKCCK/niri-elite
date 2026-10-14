@@ -4039,12 +4039,15 @@ fn grid_overview_does_not_upscale_single_floating_window() {
     let mut floating = TestWindowParams::new(1);
     floating.is_floating = true;
 
-    let layout = check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow { params: floating },
-        Op::ToggleGridOverview,
-        Op::CompleteAnimations,
-    ]);
+    let layout = check_ops_with_options(
+        grid_focus_boost_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow { params: floating },
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
     let go = layout
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
@@ -4060,16 +4063,19 @@ fn grid_overview_does_not_upscale_mixed_floating_window() {
     let mut floating = TestWindowParams::new(2);
     floating.is_floating = true;
 
-    let layout = check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow {
-            params: TestWindowParams::new(1),
-        },
-        Op::AddWindow { params: floating },
-        Op::FocusWindow(2),
-        Op::ToggleGridOverview,
-        Op::CompleteAnimations,
-    ]);
+    let layout = check_ops_with_options(
+        grid_focus_boost_options(),
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow { params: floating },
+            Op::FocusWindow(2),
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
     let go = layout
         .active_workspace()
         .and_then(|ws| ws.grid_overview())
@@ -5853,22 +5859,36 @@ fn two_column_grid_focused_on_second() -> Layout<TestWindow> {
     layout
 }
 
+/// Options that scale up the focused grid cell, which is off by default.
+fn grid_focus_boost_options() -> Options {
+    let mut options = Options::default();
+    options.grid_overview.focused_column_scale = 1.04;
+    options
+}
+
 fn tabbed_column_and_column_grid() -> Layout<TestWindow> {
-    check_ops([
-        Op::AddOutput(1),
-        Op::AddWindow {
-            params: TestWindowParams::new(1),
-        },
-        Op::AddWindow {
-            params: TestWindowParams::new(2),
-        },
-        Op::ConsumeOrExpelWindowLeft { id: None },
-        Op::ToggleColumnTabbedDisplay,
-        Op::AddWindow {
-            params: TestWindowParams::new(3),
-        },
-        Op::ToggleGridOverview,
-    ])
+    tabbed_column_and_column_grid_with_options(Options::default())
+}
+
+fn tabbed_column_and_column_grid_with_options(options: Options) -> Layout<TestWindow> {
+    check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+            Op::ConsumeOrExpelWindowLeft { id: None },
+            Op::ToggleColumnTabbedDisplay,
+            Op::AddWindow {
+                params: TestWindowParams::new(3),
+            },
+            Op::ToggleGridOverview,
+        ],
+    )
 }
 
 fn large_grid_layout() -> Layout<TestWindow> {
@@ -6015,7 +6035,7 @@ fn grid_move_column_moves_tabbed_column_as_group() {
 
 #[test]
 fn grid_move_column_keeps_focus_boost_stationary() {
-    let mut layout = tabbed_column_and_column_grid();
+    let mut layout = tabbed_column_and_column_grid_with_options(grid_focus_boost_options());
     assert!(layout
         .active_workspace_mut()
         .unwrap()
@@ -7491,7 +7511,7 @@ fn grid_move_window_down_twice_midflight_keeps_visual_continuity() {
 fn grid_focus_switch_preserves_shrink_velocity() {
     use niri_config::animations::{Kind, SpringParams};
 
-    let mut options = Options::default();
+    let mut options = grid_focus_boost_options();
     options.animations.window_resize.anim.kind = Kind::Spring(SpringParams {
         damping_ratio: 0.9,
         stiffness: 500,
