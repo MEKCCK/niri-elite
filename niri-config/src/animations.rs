@@ -25,7 +25,7 @@ pub struct Animations {
     pub screen_cast_picker_open_close: ScreenCastPickerOpenCloseAnim,
     pub overview_open_close: OverviewOpenCloseAnim,
     pub grid_overview_open_close: GridOverviewOpenCloseAnim,
-    pub grid_focus_ring: GridFocusRingAnim,
+    pub focus_ring: FocusRingAnim,
     pub magnifier: MagnifierAnim,
     pub recent_windows_close: RecentWindowsCloseAnim,
     pub cursor_enlarge: CursorEnlargeAnim,
@@ -48,7 +48,7 @@ impl Default for Animations {
             screen_cast_picker_open_close: Default::default(),
             overview_open_close: Default::default(),
             grid_overview_open_close: Default::default(),
-            grid_focus_ring: Default::default(),
+            focus_ring: Default::default(),
             magnifier: Default::default(),
             recent_windows_close: Default::default(),
             cursor_enlarge: Default::default(),
@@ -89,7 +89,7 @@ pub struct AnimationsPart {
     #[knuffel(child)]
     pub grid_overview_open_close: Option<GridOverviewOpenCloseAnim>,
     #[knuffel(child)]
-    pub grid_focus_ring: Option<GridFocusRingAnim>,
+    pub focus_ring: Option<FocusRingAnim>,
     #[knuffel(child)]
     pub magnifier: Option<MagnifierAnim>,
     #[knuffel(child)]
@@ -123,7 +123,7 @@ impl MergeWith<AnimationsPart> for Animations {
             screen_cast_picker_open_close,
             overview_open_close,
             grid_overview_open_close,
-            grid_focus_ring,
+            focus_ring,
             magnifier,
             recent_windows_close,
             cursor_enlarge,
@@ -422,18 +422,17 @@ impl Default for GridOverviewOpenCloseAnim {
     }
 }
 
-/// The focus ring moving to another grid cell, as set by `grid-overview { focus-ring-transition }`.
+/// The focus ring moving to another window: growing in and shrinking back, or sliding to another
+/// cell in the grid overview.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct GridFocusRingAnim(pub Animation);
+pub struct FocusRingAnim(pub Animation);
 
-impl Default for GridFocusRingAnim {
+impl Default for FocusRingAnim {
     fn default() -> Self {
-        // Short and easing out: with grid focus-follows-mouse the ring chases the pointer, and a
-        // spring would lag behind it.
         Self(Animation {
             off: false,
             kind: Kind::Easing(EasingParams {
-                duration_ms: 150,
+                duration_ms: 300,
                 curve: Curve::EaseOutCubic,
             }),
         })
@@ -743,7 +742,7 @@ where
     }
 }
 
-impl<S> knuffel::Decode<S> for GridFocusRingAnim
+impl<S> knuffel::Decode<S> for FocusRingAnim
 where
     S: knuffel::traits::ErrorSpan,
 {

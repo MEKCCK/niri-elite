@@ -413,10 +413,10 @@ grid-overview {
 How the focus ring goes from one cell to another when the focus moves.
 
 - `"grow"` (the default): the new cell's ring grows out from its edge, while the old one shrinks back and fades out. Each ring stays on its own cell.
-- `"slide"`: one ring slides and resizes from the old cell to the new one, over the cells in between.
+- `"slide"`: one ring slides and resizes from the old cell to the new one, over the cells in between. Its leading edges set off slightly ahead of the trailing ones, so the ring stretches a little on the way.
 - `"none"`: the ring appears on the new cell right away.
 
-The timing is the [`grid-focus-ring`](./Configuration:-Animations.md#grid-focus-ring) animation; turning it off works like `"none"`.
+The timing is the [`focus-ring`](./Configuration:-Animations.md#focus-ring) animation; turning it off works like `"none"`.
 
 ```kdl
 grid-overview {

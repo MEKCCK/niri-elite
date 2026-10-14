@@ -241,6 +241,11 @@ fn main() -> anyhow::Result<()> {
         (3000, "18_close_start", Some(|l| l.toggle_grid_overview())),
         (3100, "19_closing", None),
         (5000, "20_closed", None),
+        // Outside the grid: the rings of the normal layout grow and shrink too.
+        (5100, "21_layout_left", Some(|l| l.focus_left())),
+        (5150, "22_layout", None),
+        (5250, "23_layout", None),
+        (5600, "24_layout_settled", None),
     ];
     for (t_ms, name, step) in steps {
         clock.set_unadjusted(Duration::from_millis(*t_ms));

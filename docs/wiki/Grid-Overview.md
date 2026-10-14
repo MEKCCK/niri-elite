@@ -78,7 +78,7 @@ grid-overview {
 ```
 
 When the focus moves, the new cell's ring grows in while the old one shrinks back.
-`focus-ring-transition` picks another way, `"slide"` or `"none"`, and the `grid-focus-ring` animation sets the timing:
+`focus-ring-transition` picks another way, `"slide"` or `"none"`, and the `focus-ring` animation sets the timing:
 
 ```kdl
 grid-overview {

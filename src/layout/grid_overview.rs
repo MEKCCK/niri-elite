@@ -1044,7 +1044,7 @@ impl<W: LayoutElement> GridOverview<W> {
         scale: f64,
     ) {
         let transition = self.options.grid_overview.focus_ring_transition;
-        let anim_config = self.options.animations.grid_focus_ring.0;
+        let anim_config = self.options.animations.focus_ring.0;
         let grid_width = self.options.grid_overview.focus_ring_width;
         let progress = self.progress_value().clamp(0., 1.);
         let target_of = |id: &W::Id| targets.iter().find(|t| &t.window == id);
@@ -1118,10 +1118,11 @@ impl<W: LayoutElement> GridOverview<W> {
             }
         }
 
-        let slide = self.ring_slide.as_ref().map(|slide| {
-            let t = slide.anim.value();
-            (slide, t)
-        });
+        let now = self.clock.now();
+        let slide = self
+            .ring_slide
+            .as_ref()
+            .map(|slide| (slide, slide_progress(&slide.anim, now)));
 
         for ring in &mut self.focus_rings {
             let Some(target) = target_of(&ring.window) else {
@@ -1129,17 +1130,23 @@ impl<W: LayoutElement> GridOverview<W> {
                 continue;
             };
 
-            let shown = ring.shown_value().clamp(0., 1.);
+            // A spring can grow the ring a little past its width, but never past full opacity.
+            let grown = ring.shown_value();
+            let shown = grown.clamp(0., 1.);
             let normal_width = target.config.width;
             let full_width = grid_width.map_or(normal_width, |grid_width| {
                 normal_width + (grid_width - normal_width) * progress
             });
-            let width = full_width * shown;
+            let width = full_width * grown.max(0.);
 
             let (rect, radius) = match slide {
-                Some((slide, t)) => (
-                    lerp_rect(slide.from, target.rect, t),
-                    lerp_radius(slide.from_radius, target.radius, t as f32),
+                Some((slide, (lead, trail))) => (
+                    stretch_rect(slide.from, target.rect, lead, trail),
+                    lerp_radius(
+                        slide.from_radius,
+                        target.radius,
+                        ((lead + trail) / 2.) as f32,
+                    ),
                 ),
                 None => (target.rect, target.radius),
             };
@@ -1613,11 +1620,64 @@ struct GridFocusRing<W: LayoutElement> {
 }
 
 impl<W: LayoutElement> GridFocusRing<W> {
+    /// How far the ring is grown in. A spring can take it past 1.
     fn shown_value(&self) -> f64 {
-        self.fade
-            .as_ref()
-            .map_or(self.shown, |fade| fade.clamped_value())
+        self.fade.as_ref().map_or(self.shown, |fade| fade.value())
     }
+}
+
+/// How far the trailing edges of a sliding ring lag behind its leading edges, as a share of the
+/// slide. The ring stretches a little on the way, which reads as moving rather than being moved.
+const SLIDE_STRETCH: f64 = 0.1;
+
+/// Progress of the leading and of the trailing edges of a sliding ring.
+///
+/// Both follow the slide's own curve, the leading ones sped up and the trailing ones starting
+/// late, so that both arrive when the slide ends.
+fn slide_progress(anim: &Animation, now: Duration) -> (f64, f64) {
+    let start = anim.start_time();
+    let total = anim.duration().as_secs_f64();
+    let elapsed = now.saturating_sub(start).as_secs_f64();
+    let k = SLIDE_STRETCH;
+
+    let lead = elapsed / (1. - k);
+    let trail = (elapsed - k * total).max(0.) / (1. - k);
+    (
+        anim.value_at(start + Duration::from_secs_f64(lead)),
+        anim.value_at(start + Duration::from_secs_f64(trail)),
+    )
+}
+
+/// Moves each edge of `from` toward `to`, the edges in front in the direction of motion with the
+/// `lead` progress and the ones behind with the `trail` progress.
+fn stretch_rect(
+    from: Rectangle<f64, Logical>,
+    to: Rectangle<f64, Logical>,
+    lead: f64,
+    trail: f64,
+) -> Rectangle<f64, Logical> {
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let moves_right = to.loc.x + to.size.w / 2. >= from.loc.x + from.size.w / 2.;
+    let moves_down = to.loc.y + to.size.h / 2. >= from.loc.y + from.size.h / 2.;
+    let (left_t, right_t) = if moves_right {
+        (trail, lead)
+    } else {
+        (lead, trail)
+    };
+    let (top_t, bottom_t) = if moves_down {
+        (trail, lead)
+    } else {
+        (lead, trail)
+    };
+
+    let left = lerp(from.loc.x, to.loc.x, left_t);
+    let right = lerp(from.loc.x + from.size.w, to.loc.x + to.size.w, right_t);
+    let top = lerp(from.loc.y, to.loc.y, top_t);
+    let bottom = lerp(from.loc.y + from.size.h, to.loc.y + to.size.h, bottom_t);
+    Rectangle::new(
+        Point::from((left, top)),
+        Size::from(((right - left).max(0.), (bottom - top).max(0.))),
+    )
 }
 
 /// The focus ring sliding to a new cell.
@@ -1626,18 +1686,6 @@ struct GridRingSlide {
     from: Rectangle<f64, Logical>,
     from_radius: CornerRadius,
     anim: Animation,
-}
-
-fn lerp_rect(
-    from: Rectangle<f64, Logical>,
-    to: Rectangle<f64, Logical>,
-    t: f64,
-) -> Rectangle<f64, Logical> {
-    let lerp = |a: f64, b: f64| a + (b - a) * t;
-    Rectangle::new(
-        Point::from((lerp(from.loc.x, to.loc.x), lerp(from.loc.y, to.loc.y))),
-        Size::from((lerp(from.size.w, to.size.w), lerp(from.size.h, to.size.h))),
-    )
 }
 
 fn lerp_radius(from: CornerRadius, to: CornerRadius, t: f32) -> CornerRadius {

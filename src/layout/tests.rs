@@ -5984,6 +5984,67 @@ fn grid_focus_ring_follows_window_focus_ring_off() {
     assert!(grid_focus_ring_windows(&layout).is_empty());
 }
 
+fn windows_with_visible_focus_ring(layout: &Layout<TestWindow>) -> Vec<usize> {
+    let ws = layout.active_workspace().unwrap();
+    let mut ids: Vec<usize> = ws
+        .tiles()
+        .filter(|tile| tile.focus_ring_visible())
+        .map(|tile| *tile.window().id())
+        .collect();
+    ids.sort();
+    ids
+}
+
+#[test]
+fn focus_ring_shrinks_back_on_the_window_that_lost_focus() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWindow(2),
+        Op::CompleteAnimations,
+    ]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [2]);
+
+    layout.activate_window(&1);
+    layout.update_render_elements(None);
+    // Window 2 keeps its ring while it shrinks back.
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1, 2]);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1]);
+}
+
+#[test]
+fn focus_ring_moves_to_floating_and_back() {
+    let mut floating = TestWindowParams::new(2);
+    floating.is_floating = true;
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow { params: floating },
+        Op::CompleteAnimations,
+    ]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [2]);
+
+    check_ops_on_layout(&mut layout, [Op::FocusTiling]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1, 2]);
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    assert_eq!(windows_with_visible_focus_ring(&layout), [1]);
+}
+
 fn scrolling_column_ids(layout: &Layout<TestWindow>) -> Vec<Vec<usize>> {
     layout
         .active_workspace()

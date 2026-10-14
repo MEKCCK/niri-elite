@@ -742,8 +742,8 @@ mod tests {
         let config = Config::parse_mem(
             r#"
             animations {
-                grid-focus-ring {
-                    duration-ms 300
+                focus-ring {
+                    duration-ms 100
                     curve "linear"
                 }
             }
@@ -751,9 +751,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            config.animations.grid_focus_ring.0.kind,
+            config.animations.focus_ring.0.kind,
             animations::Kind::Easing(animations::EasingParams {
-                duration_ms: 300,
+                duration_ms: 100,
                 curve: animations::Curve::Linear,
             })
         );
@@ -2022,12 +2022,12 @@ mod tests {
                         ),
                     },
                 ),
-                grid_focus_ring: GridFocusRingAnim(
+                focus_ring: FocusRingAnim(
                     Animation {
                         off: false,
                         kind: Easing(
                             EasingParams {
-                                duration_ms: 150,
+                                duration_ms: 300,
                                 curve: EaseOutCubic,
                             },
                         ),

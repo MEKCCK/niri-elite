@@ -1538,13 +1538,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
-        // Clear lingering focus-ring width overrides.
-        for tile in self.scrolling.tiles_mut() {
-            tile.focus_ring_mut().clear_width_override();
-        }
-        for tile in self.floating.tiles_mut() {
-            tile.focus_ring_mut().clear_width_override();
-        }
+        self.update_focus_rings_shown();
 
         self.scrolling
             .update_render_elements(is_active && !self.floating_is_active.get(), layer);
@@ -1597,6 +1591,31 @@ impl<W: LayoutElement> Workspace<W> {
                 self.scale.fractional_scale(),
                 1.,
             );
+        }
+    }
+
+    /// Tells every tile whether its focus ring shows: the active window of the active space.
+    ///
+    /// Tiles grow their ring in and shrink it back as this changes. Not while the grid overview
+    /// shows, though: it draws its own rings, and a tile ring caught mid-way would pop when the
+    /// grid hands back to it.
+    fn update_focus_rings_shown(&mut self) {
+        let animate = self
+            .grid_overview
+            .as_ref()
+            .is_none_or(|go| !go.open && go.progress.is_none());
+        let floating_is_active = self.floating_is_active.get();
+
+        let active = self.scrolling.active_window().map(|win| win.id().clone());
+        for tile in self.scrolling.tiles_mut() {
+            let shown = !floating_is_active && Some(tile.window().id()) == active.as_ref();
+            tile.set_focus_ring_shown(shown, animate);
+        }
+
+        let active = self.floating.active_window().map(|win| win.id().clone());
+        for tile in self.floating.tiles_mut() {
+            let shown = floating_is_active && Some(tile.window().id()) == active.as_ref();
+            tile.set_focus_ring_shown(shown, animate);
         }
     }
 
@@ -3225,15 +3244,11 @@ impl<W: LayoutElement> Workspace<W> {
             ScrollingPart::All
         };
 
-        let scrolling_focus_ring = focus_ring && !self.floating_is_active();
-        self.scrolling.render(
-            ctx,
-            xray_pos,
-            scrolling_focus_ring,
-            layer,
-            part,
-            &mut |elem| push(elem.into()),
-        );
+        // Each tile knows whether its ring shows, see update_focus_rings_shown().
+        self.scrolling
+            .render(ctx, xray_pos, focus_ring, layer, part, &mut |elem| {
+                push(elem.into())
+            });
     }
 
     /// Renders the active scrolling tile when it goes above the floating windows.
@@ -3281,7 +3296,6 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         let view_rect = Rectangle::from_size(self.view_size);
-        let floating_focus_ring = focus_ring && self.floating_is_active();
 
         // The closing windows may have rendered above the active scrolling tile already.
         if layer.is_normal() && !self.active_tile_above_floating() {
@@ -3290,7 +3304,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         self.floating
-            .render(ctx, xray_pos, floating_focus_ring, layer, &mut |elem| {
+            .render(ctx, xray_pos, focus_ring, layer, &mut |elem| {
                 push(elem.into())
             });
     }

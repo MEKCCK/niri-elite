@@ -72,8 +72,8 @@ animations {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
     }
 
-    grid-focus-ring {
-        duration-ms 150
+    focus-ring {
+        duration-ms 300
         curve "ease-out-cubic"
     }
 
@@ -489,18 +489,21 @@ animations {
 }
 ```
 
-#### `grid-focus-ring`
+#### `focus-ring`
 
 <sup>Since: 26.04 (fork)</sup>
 
-The focus ring moving to another cell in the [Grid Overview](./Grid-Overview.md), either growing in and shrinking back or sliding, as picked by [`focus-ring-transition`](./Configuration:-Miscellaneous.md#focus-ring-transition).
+The focus ring moving to another window.
+The ring of the newly focused window grows out from its edge, while the ring of the window that lost focus shrinks back and fades out.
+In the [Grid Overview](./Grid-Overview.md), it also times the sliding ring of [`focus-ring-transition "slide"`](./Configuration:-Miscellaneous.md#focus-ring-transition).
 
-It is short and eases out by default, so that with the grid's `focus-follows-mouse` the ring keeps up with the pointer.
+Turning it off makes the ring jump from one window to the other.
+A spring works too: it lets the ring grow a little past its width and settle back.
 
 ```kdl
 animations {
-    grid-focus-ring {
-        duration-ms 150
+    focus-ring {
+        duration-ms 300
         curve "ease-out-cubic"
     }
 }

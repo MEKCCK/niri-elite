@@ -497,7 +497,7 @@ pub struct GridOverview {
 
 /// How the focus ring goes from one grid cell to another.
 ///
-/// Timing comes from `animations { grid-focus-ring }`.
+/// Timing comes from `animations { focus-ring }`.
 #[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum GridFocusRingTransition {
     /// The ring appears on the new cell right away.

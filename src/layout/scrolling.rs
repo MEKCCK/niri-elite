@@ -3902,8 +3902,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
                 // And now the drawing logic.
 
-                // For the active tile, draw the focus ring.
-                let focus_ring = focus_ring && is_active_tile;
+                // The active tile shows its focus ring, and a tile that lost the focus shows it
+                // while it shrinks back.
+                let focus_ring = focus_ring && tile.focus_ring_visible();
 
                 // In the scrolling layout, we currently use visible only for hidden tabs in the
                 // tabbed mode. We want to animate their opacity when going in and out of tabbed
