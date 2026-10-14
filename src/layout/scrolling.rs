@@ -341,9 +341,10 @@ pub enum MoveTargets {
 pub enum ScrollingPart {
     /// Every tile.
     All,
-    /// Only the active tile, together with the tab indicator of its column.
+    /// Only the active tile, together with the tab indicator of its column and the closing
+    /// windows.
     ActiveTile,
-    /// Every tile except the active one.
+    /// Every tile except the active one, without the closing windows.
     AllButActiveTile,
 }
 
@@ -3857,8 +3858,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     ) {
         let scale = Scale::from(self.scale);
 
-        // Draw the closing windows on top of the other windows.
-        if layer.is_normal() && part != ScrollingPart::ActiveTile {
+        // Draw the closing windows on top of the other windows. When the active tile renders
+        // separately above the floating windows, they go on top of it.
+        if layer.is_normal() && part != ScrollingPart::AllButActiveTile {
             let view_rect = Rectangle::new(Point::from((self.view_pos(), 0.)), self.view_size);
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);

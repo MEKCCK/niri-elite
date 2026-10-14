@@ -3149,15 +3149,25 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     /// Renders the active scrolling tile when it goes above the floating windows.
+    ///
+    /// The closing windows of both spaces go on top of it: a floating window that just closed was
+    /// on top until focus went back to the scrolling space, and a scrolling window that just
+    /// closed was usually the active tile.
     pub fn render_scrolling_above_floating<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
         focus_ring: bool,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
         if !self.active_tile_above_floating() {
             return;
+        }
+
+        if self.is_floating_visible() {
+            let view_rect = Rectangle::from_size(self.view_size);
+            self.floating
+                .render_closing_windows(ctx.r(), view_rect, &mut |elem| push(elem.into()));
         }
 
         self.scrolling.render(
@@ -3172,7 +3182,7 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn render_floating<R: NiriRenderer>(
         &self,
-        ctx: RenderCtx<R>,
+        mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
         focus_ring: bool,
         layer: RenderLayer,
@@ -3184,14 +3194,17 @@ impl<W: LayoutElement> Workspace<W> {
 
         let view_rect = Rectangle::from_size(self.view_size);
         let floating_focus_ring = focus_ring && self.floating_is_active();
-        self.floating.render(
-            ctx,
-            xray_pos,
-            view_rect,
-            floating_focus_ring,
-            layer,
-            &mut |elem| push(elem.into()),
-        );
+
+        // The closing windows may have rendered above the active scrolling tile already.
+        if layer.is_normal() && !self.active_tile_above_floating() {
+            self.floating
+                .render_closing_windows(ctx.r(), view_rect, &mut |elem| push(elem.into()));
+        }
+
+        self.floating
+            .render(ctx, xray_pos, floating_focus_ring, layer, &mut |elem| {
+                push(elem.into())
+            });
     }
 
     pub fn render_shadow<R: NiriRenderer>(

@@ -1100,23 +1100,10 @@ impl<W: LayoutElement> FloatingSpace<W> {
         &self,
         mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
-        view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
-        let scale = Scale::from(self.scale);
-
-        // Draw the closing windows on top of the other windows.
-        //
-        // FIXME: I guess this should rather preserve the stacking order when the window is closed.
-        if layer.is_normal() {
-            for closing in self.closing_windows.iter().rev() {
-                let elem = closing.render(ctx.as_gles(), view_rect, scale);
-                push(elem.into());
-            }
-        }
-
         let active = self.active_window_id.clone();
         for (tile, tile_pos) in self.tiles_with_render_positions() {
             // Skip tiles belonging to a different render layer, and minimized tiles.
@@ -1133,6 +1120,22 @@ impl<W: LayoutElement> FloatingSpace<W> {
             tile.render(ctx.r(), tile_pos, xray_pos, focus_ring, &mut |elem| {
                 push(elem.into())
             });
+        }
+    }
+
+    /// Renders the closing windows, which go on top of the other windows.
+    ///
+    /// FIXME: I guess this should rather preserve the stacking order when the window is closed.
+    pub fn render_closing_windows<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        view_rect: Rectangle<f64, Logical>,
+        push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
+    ) {
+        let scale = Scale::from(self.scale);
+        for closing in self.closing_windows.iter().rev() {
+            let elem = closing.render(ctx.as_gles(), view_rect, scale);
+            push(elem.into());
         }
     }
 
