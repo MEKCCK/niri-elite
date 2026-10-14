@@ -1766,8 +1766,22 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
 
+        // Where the windows that stopped being tabs are, so that their indicators fold away
+        // there.
+        let mut leaving = Vec::new();
+        if let Some(go) = &self.grid_overview {
+            for id in go.tab_indicator_windows() {
+                if targets.iter().any(|t: &GridTabTarget<W>| &t.window == id) {
+                    continue;
+                }
+                if let Some((rect, _)) = self.grid_tile_visual_rect(go, id) {
+                    leaving.push((id.clone(), rect));
+                }
+            }
+        }
+
         if let Some(go) = &mut self.grid_overview {
-            go.update_tab_indicators(targets, is_active, view_size, scale);
+            go.update_tab_indicators(targets, &leaving, is_active, view_size, scale);
         }
     }
 

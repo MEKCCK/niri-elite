@@ -30,9 +30,11 @@ pub struct TabIndicator {
     count_anim: Option<(Vec<Rectangle<f64, Logical>>, Animation)>,
     /// Clock and timing for `count_anim`, if the tab count changes animate.
     count_anim_config: Option<(Clock, niri_config::Animation)>,
+    /// Whether `open_anim` runs backwards, folding the indicator away.
+    closing: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct TabInfo {
     /// Gradient for the tab indicator.
     pub gradient: Gradient,
@@ -58,6 +60,7 @@ impl TabIndicator {
             shown_rects: Vec::new(),
             count_anim: None,
             count_anim_config: None,
+            closing: false,
         }
     }
 
@@ -88,7 +91,8 @@ impl TabIndicator {
 
     pub fn advance_animations(&mut self) {
         if let Some(anim) = &mut self.open_anim {
-            if anim.is_done() {
+            // A folded-away indicator stays folded.
+            if anim.is_done() && !self.closing {
                 self.open_anim = None;
             }
         }
@@ -102,11 +106,36 @@ impl TabIndicator {
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.open_anim.is_some() || self.count_anim.is_some()
+        self.open_anim
+            .as_ref()
+            .is_some_and(|anim| !self.closing || !anim.is_done())
+            || self.count_anim.is_some()
     }
 
     pub fn start_open_animation(&mut self, clock: Clock, config: niri_config::Animation) {
-        self.open_anim = Some(Animation::new(clock, 0., 1., 0., config));
+        // Unfolding one that was folding away starts from where it got to.
+        let from = if self.closing {
+            self.open_anim.as_ref().map_or(0., |anim| anim.value())
+        } else {
+            0.
+        };
+        self.closing = false;
+        self.open_anim = Some(Animation::new(clock, from, 1., 0., config));
+    }
+
+    /// Folds the indicator away, the opening animation backwards.
+    pub fn start_close_animation(&mut self, clock: Clock, config: niri_config::Animation) {
+        if self.closing {
+            return;
+        }
+        let from = self.open_anim.as_ref().map_or(1., |anim| anim.value());
+        self.closing = true;
+        self.open_anim = Some(Animation::new(clock, from, 0., 0., config));
+    }
+
+    /// Whether the indicator finished folding away.
+    pub fn is_closed(&self) -> bool {
+        self.closing && self.open_anim.as_ref().is_none_or(|anim| anim.is_done())
     }
 
     fn tab_rects(

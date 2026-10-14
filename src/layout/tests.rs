@@ -6064,6 +6064,34 @@ fn grid_tab_cells_get_tab_indicators() {
     assert_eq!(go.tab_indicator_windows().count(), 0);
 }
 
+#[test]
+fn grid_tab_indicator_folds_away_when_tab_leaves() {
+    let mut layout = tabbed_column_and_column_grid();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+
+    // Window 2 leaves the tabbed column into a column of its own.
+    assert!(layout
+        .active_workspace_mut()
+        .unwrap()
+        .set_grid_focus_for_window(&2));
+    layout.consume_or_expel_window_left(None);
+    layout.verify_invariants();
+    layout.update_render_elements(None);
+
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    let mut ids: Vec<usize> = go.tab_indicator_windows().copied().collect();
+    ids.sort();
+    // Window 2 keeps its indicator while it folds away.
+    assert!(ids.contains(&2), "{ids:?}");
+    assert!(layout.are_animations_ongoing(None));
+
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    layout.update_render_elements(None);
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert!(!go.tab_indicator_windows().any(|id| *id == 2));
+}
+
 fn scrolling_column_ids(layout: &Layout<TestWindow>) -> Vec<Vec<usize>> {
     layout
         .active_workspace()

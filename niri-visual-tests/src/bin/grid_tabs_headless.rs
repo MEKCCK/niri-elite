@@ -232,6 +232,11 @@ fn main() -> anyhow::Result<()> {
         (200, "02_open_start", true),
         (260, "03_opening", false),
         (2000, "04_open", false),
+        // In the grid: the focused tab leaves the column.
+        (2400, "04a_expel", false),
+        (2440, "04b_expelling", false),
+        (2520, "04c_expelling", false),
+        (2900, "04d_expelled", false),
         (3000, "05_close_start", true),
         (3080, "06_closing", false),
         (5000, "07_closed", false),
@@ -246,6 +251,9 @@ fn main() -> anyhow::Result<()> {
         clock.set_unadjusted(Duration::from_millis(*t_ms));
         if *toggle {
             layout.toggle_grid_overview();
+        }
+        if *t_ms == 2400 {
+            layout.consume_or_expel_window_left(None);
         }
         if *t_ms == 5200 {
             layout.activate_window(&3);

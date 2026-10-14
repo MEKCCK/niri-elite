@@ -165,6 +165,9 @@ pub struct GridOverview<W: LayoutElement> {
     /// Tab indicators next to the cells of tabs, which tell the tabs of one column apart from
     /// other windows.
     tab_indicators: Vec<GridTabIndicator<W>>,
+    /// Whether the tab indicators were laid out since the grid opened. The ones that show up
+    /// later belong to tabs that joined a column while the grid showed.
+    tab_indicators_laid_out: bool,
     /// col_idx → tile_idx for Column items that have multiple tiles, with the window at that
     /// tile, so that the choice can follow its column when column indices shift.
     pub column_tile_focus: Vec<(usize, usize, Option<W::Id>)>,
@@ -200,6 +203,7 @@ impl<W: LayoutElement> GridOverview<W> {
             ring_focus: None,
             ring_slide: None,
             tab_indicators: Vec::new(),
+            tab_indicators_laid_out: false,
             column_tile_focus: Vec::new(),
             clock,
             options,
@@ -1246,6 +1250,8 @@ impl<W: LayoutElement> GridOverview<W> {
         for tab in &mut self.tab_indicators {
             tab.indicator.advance_animations();
         }
+        self.tab_indicators
+            .retain(|tab| !(tab.leaving && tab.indicator.is_closed()));
 
         for ring in &mut self.focus_rings {
             if ring.fade.as_ref().is_some_and(|fade| fade.is_done()) {
@@ -1283,9 +1289,13 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     /// Updates the tab indicators next to the cells of tabs.
+    ///
+    /// `leaving` has the current on-screen rectangle of windows that have an indicator but are
+    /// no longer tabs: theirs folds away there.
     pub(super) fn update_tab_indicators(
         &mut self,
         targets: Vec<GridTabTarget<W>>,
+        leaving: &[(W::Id, Rectangle<f64, Logical>)],
         is_active: bool,
         view_size: Size<f64, Logical>,
         scale: f64,
@@ -1296,7 +1306,8 @@ impl<W: LayoutElement> GridOverview<W> {
         // A tab that joins a column while the grid shows has its indicator grow in, like a
         // column's own indicator when it turns tabbed. The ones there as the grid opens fade in
         // with it instead.
-        let grows_in = self.open && self.progress.as_ref().is_some_and(|p| !p.is_animation());
+        let grows_in = self.open && self.tab_indicators_laid_out;
+        self.tab_indicators_laid_out = self.open;
         let movement = self.options.animations.window_movement.0;
 
         let mut old = std::mem::take(&mut self.tab_indicators);
@@ -1314,13 +1325,17 @@ impl<W: LayoutElement> GridOverview<W> {
                         ..Default::default()
                     }),
                     slot_loc: None,
+                    last_tabs: Vec::new(),
+                    leaving: false,
                 },
             };
             let is_new = tab.slot_loc.is_none() && tab.indicator.bounds().is_none();
             let indicator = &mut tab.indicator;
-            if is_new && grows_in {
+            if (is_new && grows_in) || tab.leaving {
                 indicator.start_open_animation(self.clock.clone(), movement);
             }
+            tab.leaving = false;
+            tab.last_tabs.clone_from(&target.tabs);
             indicator.set_count_animation(self.clock.clone(), movement);
             indicator.update_config(target.config);
             indicator.set_alpha(alpha);
@@ -1364,10 +1379,53 @@ impl<W: LayoutElement> GridOverview<W> {
 
             self.tab_indicators.push(tab);
         }
+
+        // A window that stopped being a tab folds its indicator away where its cell is now, with
+        // the tabs it last had.
+        for mut tab in old {
+            let Some((_, area)) = leaving.iter().find(|(id, _)| id == &tab.window) else {
+                continue;
+            };
+            if !self.open || tab.indicator.is_closed() {
+                continue;
+            }
+            if !tab.leaving {
+                tab.leaving = true;
+                tab.indicator
+                    .start_close_animation(self.clock.clone(), movement);
+            }
+
+            tab.indicator.set_alpha(alpha);
+            let view_rect = Rectangle::new(Point::from((-area.loc.x, -area.loc.y)), view_size);
+            let tabs = tab.last_tabs.clone();
+            tab.indicator.update_render_elements(
+                true,
+                *area,
+                view_rect,
+                tabs.len(),
+                tabs.into_iter(),
+                is_active,
+                scale,
+            );
+            tab.slot_loc = None;
+            if let Some(bounds) = tab.indicator.bounds() {
+                tab.slot.update_render_elements(
+                    bounds.size + Size::from((2., 2.)),
+                    true,
+                    false,
+                    false,
+                    Rectangle::default(),
+                    CornerRadius::from(tab.indicator.config().corner_radius as f32 + 1.),
+                    scale,
+                    alpha,
+                );
+                tab.slot_loc = Some(bounds.loc - Point::from((1., 1.)));
+            }
+            self.tab_indicators.push(tab);
+        }
     }
 
-    /// Windows whose tab cell has a tab indicator.
-    #[cfg(test)]
+    /// Windows whose cell has a tab indicator, including ones folding away.
     pub(super) fn tab_indicator_windows(&self) -> impl Iterator<Item = &W::Id> {
         self.tab_indicators.iter().map(|t| &t.window)
     }
@@ -1816,6 +1874,10 @@ struct GridTabIndicator<W: LayoutElement> {
     indicator: TabIndicator,
     slot: FocusRing,
     slot_loc: Option<Point<f64, Logical>>,
+    /// The column's tabs as of the last update, for folding the indicator away.
+    last_tabs: Vec<TabInfo>,
+    /// Whether the window stopped being a tab and the indicator is folding away.
+    leaving: bool,
 }
 
 /// A focus ring the grid draws around a cell's window.
