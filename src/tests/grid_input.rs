@@ -405,3 +405,43 @@ fn mod_tap_dismissing_exit_dialog_doesnt_toggle_grid() {
     tap_key(&mut f, id, "LWIN");
     assert!(f.niri().layout.is_grid_overview_open());
 }
+
+#[test]
+fn mod_drag_moves_ignored_window() {
+    const BTN_LEFT: u32 = 0x110;
+    let SetUp {
+        mut f,
+        id,
+        pointer,
+        ignored,
+        ..
+    } = set_up();
+
+    let pos_of = |f: &mut Fixture| {
+        let ws = f.niri().layout.active_workspace().unwrap();
+        ws.tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().window == ignored)
+            .map(|(_, pos, _)| pos)
+            .unwrap()
+    };
+    let before = pos_of(&mut f);
+    let pos = point_on(&mut f, &ignored);
+    f.niri_state().move_cursor(pos);
+
+    press_key(&mut f, "LWIN", KeyState::Pressed);
+    pointer.button(0, BTN_LEFT, wl_pointer::ButtonState::Pressed);
+    pointer.frame();
+    f.roundtrip(id);
+    for _ in 0..10 {
+        pointer.motion(0, 20., 0.);
+        pointer.frame();
+        f.roundtrip(id);
+    }
+    pointer.button(0, BTN_LEFT, wl_pointer::ButtonState::Released);
+    pointer.frame();
+    press_key(&mut f, "LWIN", KeyState::Released);
+    f.double_roundtrip(id);
+
+    assert!(pos_of(&mut f).x > before.x + 100.);
+    assert!(f.niri().layout.is_grid_overview_open());
+}

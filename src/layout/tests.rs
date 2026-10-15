@@ -10704,3 +10704,45 @@ proptest! {
         check_ops_with_options(options, ops);
     }
 }
+
+#[test]
+fn grid_moves_a_focused_ignored_window_like_without_the_grid() {
+    let mut ignored_floating = TestWindowParams::new(2);
+    ignored_floating.is_floating = true;
+    ignored_floating.rules = Some(ResolvedWindowRules {
+        ignore_grid_overview: Some(true),
+        ..ResolvedWindowRules::default()
+    });
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: ignored_floating,
+        },
+        Op::FocusWindow(1),
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+    ]);
+    let pos = |layout: &Layout<TestWindow>| {
+        let ws = layout.active_workspace().unwrap();
+        ws.tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().id() == &2)
+            .map(|(_, pos, _)| pos)
+            .unwrap()
+    };
+
+    // The user clicks the ignored window, then presses a move bind.
+    layout.activate_window(&2);
+    let before = pos(&layout);
+    layout.move_left();
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+
+    // It used to move (and activate) the grid's focused cell instead, leaving the window where it
+    // was and taking the focus away from it.
+    assert!(pos(&layout).x < before.x);
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(2));
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+    assert!(layout.is_grid_overview_open());
+}

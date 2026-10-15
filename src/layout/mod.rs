@@ -6335,7 +6335,9 @@ impl<W: LayoutElement> Layout<W> {
         allow_minimized: bool,
     ) -> Option<(WorkspaceId, W::Id, Vec<GridWindowVisual<W>>)> {
         let ws = self.active_workspace_mut()?;
-        if !ws.is_grid_overview_open() {
+        // A window outside the grid that has the focus (an ignore-grid-overview window the user
+        // clicked) takes actions as if the grid weren't open, rather than the grid's focused cell.
+        if !ws.is_grid_overview_open() || ws.active_ignored_floating_window_in_grid().is_some() {
             return None;
         }
 
@@ -6441,7 +6443,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     fn grid_move_guard(&self) -> bool {
+        // Actions on a window outside the grid that has the focus go through as if the grid
+        // weren't open.
         self.is_grid_overview_open()
+            && self
+                .active_workspace()
+                .is_none_or(|ws| ws.active_ignored_floating_window_in_grid().is_none())
     }
 }
 
