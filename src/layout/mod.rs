@@ -4820,8 +4820,10 @@ impl<W: LayoutElement> Layout<W> {
         let gesture = self.grid_gesture.as_mut()?;
         gesture.tracker.push(delta_y, timestamp);
 
+        // Unlike the overview, the grid doesn't stretch past open or closed: the windows stop
+        // where they belong.
         let pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
-        let new_value = OVERVIEW_GESTURE_RUBBER_BAND.clamp(0., 1., gesture.start + pos);
+        let new_value = (gesture.start + pos).clamp(0., 1.);
         if gesture.value == new_value {
             return Some(false);
         }
@@ -4845,8 +4847,10 @@ impl<W: LayoutElement> Layout<W> {
         let current_pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
         let pos = gesture.tracker.projected_end_pos() / OVERVIEW_GESTURE_MOVEMENT;
         let open = (gesture.start + pos).clamp(0., 1.).round() == 1.;
-        velocity *=
-            OVERVIEW_GESTURE_RUBBER_BAND.clamp_derivative(0., 1., gesture.start + current_pos);
+        // Pushing on past the end doesn't carry speed into the animation.
+        if !(0. ..=1.).contains(&(gesture.start + current_pos)) {
+            velocity = 0.;
+        }
 
         let mut from = gesture.value;
         if open != self.grid_overview_open_in_scope() {

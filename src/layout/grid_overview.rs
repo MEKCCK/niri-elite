@@ -578,7 +578,12 @@ impl<W: LayoutElement> GridOverview<W> {
             return (pos, scale);
         }
 
-        let anim_p = self.rearrange_anim.as_ref().map_or(p, |anim| anim.value());
+        // Past fully open or fully closed, like a gesture going on or a spring overshooting,
+        // the windows stay where they'd be at the end.
+        let anim_p = self
+            .rearrange_anim
+            .as_ref()
+            .map_or(p.clamp(0., 1.), |anim| anim.value());
         let is_rearranging = self.rearrange_anim.is_some();
         let is_opening = self.open
             && self

@@ -11302,3 +11302,33 @@ fn minimized_window_moved_away_while_the_grid_closes_shows_at_once() {
         },
     ]);
 }
+
+#[test]
+fn grid_gesture_stops_at_closed_and_at_open() {
+    let mut layout = grid_gesture_layout();
+    let normal = {
+        let ws = layout.active_workspace().unwrap();
+        ws.tiles_with_render_positions()
+            .find(|(tile, _, _)| tile.window().id() == &2)
+            .map(|(_, pos, _)| pos)
+            .unwrap()
+    };
+
+    // Up a little, then down well past where it started.
+    gesture(&mut layout, &[60., -200., -200.]);
+    assert_eq!(grid_progress(&layout), Some(0.));
+    let shown = grid_window_visual_rect(&layout, 2);
+    assert!(
+        (shown.loc.x - normal.x).abs() < 0.5 && (shown.loc.y - normal.y).abs() < 0.5,
+        "{shown:?} vs {normal:?}"
+    );
+    assert!((shown.size.w - 620.).abs() < 0.5, "{shown:?}");
+    check_ops_on_layout(&mut layout, [Op::GridGestureEnd, Op::CompleteAnimations]);
+
+    // Up well past open.
+    gesture(&mut layout, &[200., 200., 200.]);
+    assert_eq!(grid_progress(&layout), Some(1.));
+    let cell = grid_entry_target_size(&layout, 2);
+    let shown = grid_window_visual_rect(&layout, 2);
+    assert!((shown.size.w - cell.w).abs() < 0.5, "{shown:?} vs {cell:?}");
+}
