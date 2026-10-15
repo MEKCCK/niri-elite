@@ -9,6 +9,7 @@ use niri::layout::{ActivateWindow, AddWindowTarget, LayoutElement as _, Options,
 use niri::render_helpers::{
     copy_framebuffer, create_texture, resources, shaders, RenderCtx, RenderIntent, RenderTarget,
 };
+use niri::utils::transaction::Transaction;
 use niri_config::{Color, OutputName, PresetSize};
 use niri_ipc::PositionChange;
 use niri_visual_tests::test_window::TestWindow;
@@ -95,7 +96,11 @@ enum Spec {
 
 /// Grid overview layout scenarios, one PNG per step plus the cell geometry on stderr.
 ///
-/// Usage: grid-layout-headless OUT_DIR [mixed|five|allfloat|tiled]
+/// Usage: grid-layout-headless OUT_DIR [mixed|five|allfloat|wechat|tiled] [drag|close|add]
+///
+/// `drag` (the default) drags windows into and out of tiling; `close` closes the tiled windows
+/// one after another, and `add` opens floating windows one after another, printing how far every
+/// floating window moves.
 fn main() -> anyhow::Result<()> {
     make_sure_egl_is_loaded().context("loading EGL")?;
     let display = unsafe { EGLDisplay::new(EGLSurfacelessDisplay) }
@@ -113,6 +118,7 @@ fn main() -> anyhow::Result<()> {
     let scenario = std::env::args()
         .nth(2)
         .unwrap_or_else(|| "mixed".to_owned());
+    let mode = std::env::args().nth(3).unwrap_or_else(|| "drag".to_owned());
     std::fs::create_dir_all(&out_dir)?;
 
     let mut clock = Clock::with_time(Duration::ZERO);
@@ -186,6 +192,15 @@ fn main() -> anyhow::Result<()> {
             Spec::Floating((880, 380), (380, 300)),
             Spec::Floating((560, 40), (260, 190)),
             Spec::Floating((420, 520), (380, 180)),
+        ],
+        // Five tiled windows and a small floating one in the middle of the screen.
+        "wechat" => vec![
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Floating((569, 264), (142, 192)),
         ],
         "tiled" => vec![
             Spec::Tiled(0.5),
@@ -292,6 +307,7 @@ fn main() -> anyhow::Result<()> {
         .rposition(|spec| matches!(spec, Spec::Tiled(..)));
 
     let mut t = 100;
+    let mut last_rects: Vec<(usize, Rectangle<f64, Logical>)> = Vec::new();
     let mut step = |layout: &mut niri::layout::Layout<TestWindow>,
                     renderer: &mut GlesRenderer,
                     name: &str,
@@ -344,6 +360,28 @@ fn main() -> anyhow::Result<()> {
                 "   covered {:.0}% of the working area",
                 100. * covered / (area.size.w * area.size.h)
             );
+            let mut moves = Vec::new();
+            for (item, info) in &go.layout.entries {
+                if !matches!(item, GridItem::Floating { .. }) {
+                    continue;
+                }
+                let id = *item.window_id();
+                let r = info.rect();
+                if let Some((_, old)) = last_rects.iter().find(|(old_id, _)| *old_id == id) {
+                    let dx = (r.loc.x + r.size.w / 2.) - (old.loc.x + old.size.w / 2.);
+                    let dy = (r.loc.y + r.size.h / 2.) - (old.loc.y + old.size.h / 2.);
+                    moves.push(format!("{id}: {:.0}", dx.hypot(dy)));
+                }
+            }
+            if !moves.is_empty() {
+                eprintln!("   floating windows moved by {}", moves.join(", "));
+            }
+            last_rects = go
+                .layout
+                .entries
+                .iter()
+                .map(|(item, info)| (*item.window_id(), info.rect()))
+                .collect();
         }
 
         let mut elements = Vec::new();
@@ -399,6 +437,75 @@ fn main() -> anyhow::Result<()> {
     step(&mut layout, &mut renderer, "1_grid", &mut |layout| {
         layout.toggle_grid_overview()
     })?;
+    if mode == "add" {
+        let spots = [
+            ((700, 120), (420, 300)),
+            ((150, 380), (360, 260)),
+            ((900, 420), (300, 240)),
+            ((450, 200), (500, 360)),
+            ((80, 60), (280, 200)),
+            ((1000, 80), (240, 180)),
+        ];
+        for (n, &((x, y), (w, h))) in spots.iter().enumerate() {
+            let id = specs.len() + n;
+            let mut window = TestWindow::freeform(id);
+            window.set_color(colors[id % colors.len()]);
+            window.request_size(Size::from((w, h)), SizingMode::Normal, false, None);
+            window.communicate();
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("add_{id}"),
+                &mut |layout| {
+                    layout.add_window(
+                        window.clone(),
+                        AddWindowTarget::Auto,
+                        None,
+                        None,
+                        false,
+                        true,
+                        ActivateWindow::Yes,
+                    );
+                    layout.move_floating_window(
+                        Some(&id),
+                        PositionChange::SetFixed(x as f64),
+                        PositionChange::SetFixed(y as f64),
+                        false,
+                    );
+                },
+            )?;
+        }
+        return Ok(());
+    }
+
+    if mode == "close" {
+        // The first tiled window, then the last, then whatever is left, one after another.
+        let mut tiled: Vec<usize> = specs
+            .iter()
+            .enumerate()
+            .filter(|(_, spec)| matches!(spec, Spec::Tiled(..)))
+            .map(|(id, _)| id)
+            .collect();
+        let mut order = Vec::new();
+        while !tiled.is_empty() {
+            order.push(tiled.remove(0));
+            if let Some(last) = tiled.pop() {
+                order.push(last);
+            }
+        }
+        for id in order {
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("close_{id}"),
+                &mut |layout| {
+                    layout.remove_window(&id, Transaction::new());
+                },
+            )?;
+        }
+        return Ok(());
+    }
+
     if let (Some(floating), Some(tiled)) = (first_floating, last_tiled) {
         step(
             &mut layout,
