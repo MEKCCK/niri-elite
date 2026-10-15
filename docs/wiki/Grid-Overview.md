@@ -28,31 +28,17 @@ grid-overview {
 ### Layout
 
 The grid shows windows at one scale, the largest at which they all fit, so windows keep their sizes relative to each other: a small dialog stays smaller than a big editor.
-Floating windows smaller than the largest window are spared some of that shrinking, so that a small chat window doesn't end up too small to recognize next to big tiled windows.
 
-Tiled windows form a block in the order of the scrolling layout, left to right, wrapped into rows like text.
+Tiled windows form a block in the middle of the grid, in the order of the scrolling layout, left to right, wrapped into rows like text.
 The tabs of a tabbed column stay together in one row.
 How wide the rows get is picked to show the windows as large as possible.
 
-Floating windows each take the free spot closest to where they are on the screen, and keep to their side of it: a window in the top right corner shows in the top right of the grid, one along the top in the top half, and one near the middle of the screen anywhere.
-For that, the grid rather shows everything smaller; only if keeping to their sides would show the windows less than 60% as large as they could be does a window in a corner keep to just the side it is further to, and failing that, any side.
-That spot can be in the room that a short row of tiled windows leaves beside it.
-When that shows everything larger, the block of tiled windows moves to one side of the grid, leaving the floating windows one large stretch of room instead of two narrow ones.
-Among layouts that show the windows about as large, the grid prefers the block in the middle, then rows of even width over a last row with a single window, then the layout that keeps floating windows closest to where they are.
+Floating windows start out where they are on the screen and push each other and the block of tiled windows apart, so they end up around the block, on the side of the screen they are on.
+A floating window that a gap in the block, like beside a short row, has room for closer to where it is than where it got pushed to takes the gap.
 On a workspace with only floating windows, the grid works like the window overviews of other desktops.
 
-While the grid stays open, it keeps what it can when windows come and go:
-
-- Floating windows stay where the grid shows them. One that something else moves into keeps to its side of the screen, everything shrinking rather than it going to the other side.
-- A floating window that opens takes the room that is left on its side, or if there is none, the room that is left anywhere; if there isn't enough, everything shrinks in place.
-- Tiled columns keep their rows. A new column joins the row of the column before it if that row has room for it, and starts a row of its own after it otherwise. While the scale stays, the rows stay where they are, a row in the middle keeping its middle: a row that closing windows emptied leaves its room rather than everything moving over.
-- Rows wrap anew when tiled windows came, went or moved and wrapping anew shows the windows noticeably larger. For floating windows alone coming and going, only if that also leaves the floating windows where they are.
-- The block of tiled windows stays on its side of the grid.
-- The scale doesn't grow while windows open, and grows noticeably when windows close; floating windows then move out along with the block.
-- It never gets far worse than laying everything out anew, the way opening the grid would: as soon as that shows the windows 25% larger, or after windows closed, 15% larger, the grid moves everything there.
-
-Opening the grid again with the same windows as when it closed shows them where it did then; a floating window that moved or changed size in the meantime takes the free spot closest to where it is now.
-With windows opened or closed in the meantime, the grid lays everything out afresh.
+When windows come and go, the grid keeps the width the rows wrap at as long as it shows the windows at least 92% as large as another one would, and keeps its scale unless the windows could grow by more than about 7%.
+Opening the grid again starts from what it showed when it closed, the same way, so with nothing changed it shows the same.
 
 Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
 Dragging a floating window moves it on the screen: its middle goes where you let go of it, and the grid shows it there, or in the closest free spot, moving it on from where you let go.

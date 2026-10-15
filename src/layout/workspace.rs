@@ -22,8 +22,8 @@ use tracing::debug;
 use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::focus_ring::FocusRingRenderElement;
 use super::grid_overview::{
-    GridDirection, GridEntryInfo, GridItem, GridOverview, GridRingTarget, GridSource,
-    GridTabTarget, MinimizedHighlightEntry, SavedGridLayout,
+    GridDirection, GridEntryInfo, GridItem, GridLayout, GridOverview, GridRingTarget, GridSource,
+    GridTabTarget, MinimizedHighlightEntry,
 };
 use super::scrolling::{
     Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingPart, ScrollingSpace,
@@ -135,7 +135,7 @@ pub struct Workspace<W: LayoutElement> {
     /// Grid overview state for this workspace.
     pub(super) grid_overview: Option<GridOverview<W>>,
     /// What the grid overview showed when it last closed, for the next one to pick up from.
-    last_grid_layout: Option<SavedGridLayout<W>>,
+    last_grid_layout: Option<GridLayout<W>>,
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
@@ -1296,8 +1296,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         go.advance_animations();
         if go.progress.is_none() && !go.open {
-            let items = self.grid_overview_items();
-            self.last_grid_layout = Some(go.save_layout(items, self.working_area));
+            self.last_grid_layout = Some(go.save_layout());
             return;
         }
 
@@ -3198,6 +3197,8 @@ impl<W: LayoutElement> Workspace<W> {
             self.floating.has_window(id)
         }) {
             self.floating.move_window(id, x, y, animate);
+            // The grid shows floating windows around where they are.
+            self.refresh_grid_overview_layout(Vec::new());
         } else {
             // If the target tile isn't floating, set its stored floating position.
             let tile = if let Some(id) = id {
