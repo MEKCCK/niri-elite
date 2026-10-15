@@ -5746,14 +5746,11 @@ fn assert_grid_layout_is_sound(
             "{:?} at {r:?} leaves the grid",
             item.window_id(),
         );
-        // One scale for tiled windows; small floating windows show larger, but never larger
-        // than they are.
-        if matches!(item, super::grid_overview::GridItem::Floating { .. }) {
-            assert!(info.target_scale >= layout.scale - 0.000001, "{info:?}");
-            assert!(info.target_scale <= 1. + 0.000001, "{info:?}");
-        } else {
-            approx::assert_abs_diff_eq!(info.target_scale, layout.scale);
-        }
+        // Every window at its own scale, never larger than it is.
+        assert!(
+            info.target_scale > 0. && info.target_scale <= 1. + 0.000001,
+            "{info:?}"
+        );
     }
     for (i, (a, info_a)) in layout.entries.iter().enumerate() {
         for (b, info_b) in &layout.entries[i + 1..] {
@@ -10830,21 +10827,24 @@ fn grid_dropping_a_floating_window_moves_it_on_from_where_it_was_dropped() {
     );
     layout.interactive_move_end(&3);
 
-    // It lands where it was let go of, rather than wherever its top left corner would put its
-    // middle, and it shows there right away.
+    // It shows where it was let go of right away, rather than wherever its top left corner
+    // would put its middle, and lands on the side of the tiled windows it was dropped on.
     let center = |r: Rectangle<f64, Logical>| r.loc + r.size.downscale(2.).to_point();
     let dropped = grid_window_visual_rect(&layout, 3);
     check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
     let settled = grid_window_visual_rect(&layout, 3);
     let moved = center(settled) - center(before);
-    assert!(moved.x < -100. && moved.y > 20., "{before:?} {settled:?}");
-    for (what, rect) in [("shows", dropped), ("lands", settled)] {
-        let off = center(rect) - center(let_go);
-        assert!(
-            off.x.abs() < 2. && off.y.abs() < 2.,
-            "let go at {let_go:?}, but {what} at {rect:?}"
-        );
-    }
+    assert!(moved.x < -100., "{before:?} {settled:?}");
+    let off = center(dropped) - center(let_go);
+    assert!(
+        off.x.abs() < 2. && off.y.abs() < 2.,
+        "let go at {let_go:?}, but shows at {dropped:?}"
+    );
+    let tiled_left = grid_window_visual_rect(&layout, 1).loc.x;
+    assert!(
+        settled.loc.x + settled.size.w <= tiled_left,
+        "{settled:?} not left of the tiled windows at {tiled_left}"
+    );
 
     // Dropped onto the tiled windows, it can't stay there: it moves on to the closest free spot
     // from where it was let go of, rather than jumping there.
@@ -11127,9 +11127,13 @@ fn grid_stacked_floats_layout(cascade: bool) -> Layout<TestWindow> {
 fn grid_spreads_floating_windows_that_opened_on_top_of_each_other() {
     for cascade in [false, true] {
         let layout = grid_stacked_floats_layout(cascade);
-        // They spread out all around rather than into one tall column that everything has to
-        // shrink for (they showed at 0.14 and 0.23 that way).
-        assert!(grid_scale(&layout) > 0.25, "{}", grid_scale(&layout));
+        // They spread out rather than into one tall column that everything has to shrink for
+        // (they showed at 0.14 and 0.23 that way).
+        let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+        let shown: Vec<f64> = (200..207)
+            .map(|id| go.find_grid_info(&id).unwrap().target_scale)
+            .collect();
+        assert!(shown.iter().all(|s| *s > 0.3), "{shown:?}");
         // The ones along the top stay in the upper half.
         let go = layout.active_workspace().unwrap().grid_overview().unwrap();
         for id in 100..103 {

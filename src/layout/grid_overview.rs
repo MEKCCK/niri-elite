@@ -2,12 +2,15 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
 
+use bands::{Arrangement, BandLine, Bands, ARRANGEMENTS};
 use niri_config::{CornerRadius, GridFocusRingTransition};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::{Animation, Clock, LayoutElement, Options, OverviewGesture, OverviewProgress};
+
+mod bands;
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::render_helpers::renderer::NiriRenderer;
 
@@ -1420,13 +1423,17 @@ impl<W: LayoutElement> GridOverview<W> {
 
 #[derive(Debug)]
 pub struct GridLayout<W: LayoutElement> {
-    /// The scale all windows are shown at. It is the same for every window, so that their sizes
-    /// compare like they do on the workspace.
+    /// The scale the windows are laid out at. With tiled windows, it applies to their sizes
+    /// squeezed towards each other's, so a window shows at its own scale.
     pub scale: f64,
     /// The width the rows of tiled windows wrap at, as a fraction of the grid's width.
     pub wrap: f64,
     pub gap: f64,
     pub entries: Vec<(GridItem<W>, GridEntryInfo)>,
+    /// How the floating windows go around the tiled ones; `None` without tiled windows.
+    arrangement: Option<Arrangement>,
+    /// The lines of the floating windows in the bands around the tiled ones.
+    lines: Vec<BandLine<W>>,
 }
 
 impl<W: LayoutElement> Clone for GridLayout<W> {
@@ -1436,6 +1443,8 @@ impl<W: LayoutElement> Clone for GridLayout<W> {
             wrap: self.wrap,
             gap: self.gap,
             entries: self.entries.clone(),
+            arrangement: self.arrangement,
+            lines: self.lines.clone(),
         }
     }
 }
@@ -1469,6 +1478,9 @@ const WRAP_WIDTHS: [f64; 5] = [1., 0.85, 0.7, 0.55, 0.42];
 /// The grid keeps the wrap width it had as long as that shows the windows at least this fraction
 /// of the largest the others could.
 const KEEP_WRAP_SCALE: f64 = 0.92;
+/// The grid keeps the wrap width and the arrangement of the bands around the tiled windows it had
+/// as long as that shows the windows at least this fraction of the largest the others could.
+const KEEP_ARRANGEMENT_SCALE: f64 = 1. / 1.18;
 /// The grid keeps the scale it had as long as the windows could only grow by less than this.
 const SCALE_GROW_HYSTERESIS: f64 = 1. / 0.93;
 /// How much the block of tiled windows gives way when floating windows push against it, against
@@ -1492,6 +1504,8 @@ impl<W: LayoutElement> GridLayout<W> {
             wrap: 1.,
             gap: 0.,
             entries: Vec::new(),
+            arrangement: None,
+            lines: Vec::new(),
         }
     }
 
@@ -1530,6 +1544,33 @@ impl<W: LayoutElement> GridLayout<W> {
 
         let solver = GridSolver::new(items, content, gap);
         let min_scale = config.min_scale.clamp(0.001, MAX_SCALE);
+        if !solver.groups.is_empty() {
+            let bands = Bands::new(items, area, content, gap, &solver.groups, &solver.floating);
+            return Self::compute_bands(items, &bands, gap, min_scale, prev);
+        }
+
+        // Floating windows only: they push each other apart, at their sizes squeezed like with
+        // tiled windows, each staying centered where it is.
+        let factors: Vec<f64> = items
+            .iter()
+            .map(|(_, source)| bands::squeeze_factor(area, source.size))
+            .collect();
+        let squeezed: Vec<_> = items
+            .iter()
+            .zip(&factors)
+            .map(|((item, source), k)| {
+                let size = source.size.upscale(*k);
+                let pos = source.pos.map(|pos| {
+                    pos + Point::from((
+                        (source.size.w - size.w) / 2.,
+                        (source.size.h - size.h) / 2.,
+                    ))
+                });
+                (item.clone(), GridSource { size, pos })
+            })
+            .collect();
+        let mut solver = GridSolver::new(&squeezed, content, gap);
+        solver.max_scales = factors.iter().map(|k| MAX_SCALE / k).collect();
         let wraps = if solver.groups.is_empty() {
             &WRAP_WIDTHS[..1]
         } else {
@@ -1582,15 +1623,18 @@ impl<W: LayoutElement> GridLayout<W> {
             .or_else(|| solver.place(wrap, scale, true))
             .unwrap_or_default();
 
+        // Every window shows at its own scale, never larger than it is.
         let entries = items
             .iter()
             .zip(placed)
-            .map(|((item, source), (pos, row))| {
+            .zip(&factors)
+            .map(|(((item, source), (pos, row)), k)| {
+                let shown = (scale * k).min(MAX_SCALE);
                 let info = GridEntryInfo {
                     row,
                     target_pos: pos,
-                    target_size: source.size.upscale(scale),
-                    target_scale: scale,
+                    target_size: source.size.upscale(shown),
+                    target_scale: shown,
                 };
                 (item.clone(), info)
             })
@@ -1601,6 +1645,129 @@ impl<W: LayoutElement> GridLayout<W> {
             wrap,
             gap,
             entries,
+            arrangement: None,
+            lines: Vec::new(),
+        }
+    }
+
+    /// Lays out a grid with tiled windows: the tiled windows in a block in the middle, the
+    /// floating ones in bands around it, everything at sizes squeezed towards each other's.
+    ///
+    /// Of every wrap width and every arrangement of the bands, the one that shows the windows the
+    /// largest wins. With `prev`, the layout shown before, the new one keeps its wrap width and
+    /// arrangement unless another one is clearly better, keeps its scale unless the windows
+    /// could grow by more than a little, and keeps the floating windows in the lines of the
+    /// bands they were in unless starting over is clearly better.
+    fn compute_bands(
+        items: &[(GridItem<W>, GridSource)],
+        bands: &Bands<W>,
+        gap: f64,
+        min_scale: f64,
+        prev: Option<&GridLayout<W>>,
+    ) -> Self {
+        let prev_choice = prev.and_then(|p| p.arrangement.map(|a| (p.wrap, a, p.scale)));
+        let run = |kept: Option<&[BandLine<W>]>| {
+            // The lines a floating window was in only count for the arrangement they were in.
+            let kept_for = |arrangement: Arrangement| {
+                kept.filter(|_| prev_choice.is_some_and(|(_, a, _)| a == arrangement))
+            };
+            let fits = |wrap: f64, arrangement: Arrangement, scale: f64| {
+                bands
+                    .place(wrap, scale, arrangement, kept_for(arrangement), false)
+                    .is_some()
+            };
+
+            let mut results = Vec::new();
+            for wrap in WRAP_WIDTHS {
+                for arrangement in ARRANGEMENTS {
+                    let (yes, no) = if fits(wrap, arrangement, MAX_SCALE) {
+                        (MAX_SCALE, MAX_SCALE)
+                    } else if !fits(wrap, arrangement, min_scale) {
+                        (min_scale, min_scale)
+                    } else {
+                        bisect(min_scale, MAX_SCALE, 16, |s| fits(wrap, arrangement, s))
+                    };
+                    results.push((wrap, arrangement, yes, no));
+                }
+            }
+            let mut best = results[0];
+            for &result in &results {
+                if result.2 > best.2 + EPSILON {
+                    best = result;
+                }
+            }
+
+            let mut choice = best;
+            let mut kept_scale = false;
+            if let Some((wrap, arrangement, scale)) = prev_choice {
+                if let Some(&k) = results.iter().find(|r| {
+                    r.0 == wrap && r.1 == arrangement && r.2 >= best.2 * KEEP_ARRANGEMENT_SCALE
+                }) {
+                    choice = k;
+                }
+                // The scale shown before, as long as it still fits: the rough largest scale is
+                // only good to compare with.
+                if choice.0 == wrap
+                    && choice.1 == arrangement
+                    && scale <= choice.3
+                    && choice.2 <= scale * SCALE_GROW_HYSTERESIS
+                    && fits(wrap, arrangement, scale)
+                {
+                    choice.2 = scale;
+                    kept_scale = true;
+                }
+            }
+            let (wrap, arrangement, mut scale, no) = choice;
+            if !kept_scale && no > scale {
+                scale = bisect(scale, no, 14, |s| fits(wrap, arrangement, s)).0;
+            }
+            (wrap, arrangement, scale, kept_for(arrangement).is_some())
+        };
+
+        let fresh = run(None);
+        let prev_lines = prev.map(|p| &p.lines[..]).filter(|lines| !lines.is_empty());
+        let (wrap, arrangement, scale, uses_kept) = match prev_lines {
+            Some(lines) => {
+                let kept = run(Some(lines));
+                if fresh.2 > kept.2 * SCALE_GROW_HYSTERESIS {
+                    fresh
+                } else {
+                    kept
+                }
+            }
+            None => fresh,
+        };
+        let kept = prev_lines.filter(|_| uses_kept);
+
+        let placed = bands
+            .place(wrap, scale, arrangement, kept, false)
+            .or_else(|| bands.place(wrap, scale, arrangement, kept, true))
+            .unwrap();
+
+        // Every window shows at its own scale, never larger than it is.
+        let entries = items
+            .iter()
+            .zip(placed.slots)
+            .enumerate()
+            .map(|(idx, ((item, source), (slot, row)))| {
+                let shown = (scale * bands.factor(idx)).min(MAX_SCALE);
+                let info = GridEntryInfo {
+                    row,
+                    target_pos: slot.loc,
+                    target_size: source.size.upscale(shown),
+                    target_scale: shown,
+                };
+                (item.clone(), info)
+            })
+            .collect();
+
+        Self {
+            scale,
+            wrap,
+            gap,
+            entries,
+            arrangement: Some(arrangement),
+            lines: placed.lines,
         }
     }
 
@@ -1713,6 +1880,8 @@ struct GridSolver<'a, W: LayoutElement> {
     groups: Vec<Range<usize>>,
     /// Item indices of the floating windows.
     floating: Vec<usize>,
+    /// The largest scale every item shows at, whatever the scale of the others.
+    max_scales: Vec<f64>,
 }
 
 impl<'a, W: LayoutElement> GridSolver<'a, W> {
@@ -1743,6 +1912,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             gap,
             groups,
             floating,
+            max_scales: vec![f64::INFINITY; items.len()],
         }
     }
 
@@ -1871,7 +2041,12 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
     ) -> Option<Vec<(Point<f64, Logical>, Option<usize>)>> {
         let content = self.content;
         let gap = self.gap;
-        let size = |idx: usize| self.items[idx].1.size.upscale(scale);
+        let size = |idx: usize| {
+            self.items[idx]
+                .1
+                .size
+                .upscale(scale.min(self.max_scales[idx]))
+        };
         let mut placed = vec![(content.loc, None); self.items.len()];
 
         let mut bodies = Vec::new();
@@ -2066,6 +2241,20 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
         }
         Some(placed)
     }
+}
+
+/// Narrows down, in `steps` halvings, the largest value that `fits` between `yes`, one that does,
+/// and `no`, one that doesn't.
+fn bisect(mut yes: f64, mut no: f64, steps: u32, fits: impl Fn(f64) -> bool) -> (f64, f64) {
+    for _ in 0..steps {
+        let mid = (yes + no) / 2.;
+        if fits(mid) {
+            yes = mid;
+        } else {
+            no = mid;
+        }
+    }
+    (yes, no)
 }
 
 fn rect_center(r: Rectangle<f64, Logical>) -> Point<f64, Logical> {

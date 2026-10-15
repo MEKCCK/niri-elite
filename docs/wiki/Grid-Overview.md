@@ -27,22 +27,26 @@ grid-overview {
 
 ### Layout
 
-The grid shows windows at one scale, the largest at which they all fit, so windows keep their sizes relative to each other: a small dialog stays smaller than a big editor.
+Like the window overviews of other desktops, the grid squeezes window sizes towards each other: a big window shows smaller and a small one larger than one scale for all would show them, so that small windows like terminals and dialogs stay readable.
+A window with 4 times the area of another shows with 2 times its area.
+How much a window is squeezed depends only on its own size, so windows coming and going don't change it, and no window shows larger than it is.
 
 Tiled windows form a block in the middle of the grid, in the order of the scrolling layout, left to right, wrapped into rows like text.
 The tabs of a tabbed column stay together in one row.
-How wide the rows get is picked to show the windows as large as possible.
 
-Floating windows start out where they are on the screen and push each other and the block of tiled windows apart, so they end up around the block, on the side of the screen they are on.
-A floating window that a gap in the block, like beside a short row, has room for closer to where it is than where it got pushed to takes the gap.
-Floating windows piled on top of each other, like several that opened in the same spot, spread out all around rather than into one column.
-On a workspace with only floating windows, the grid works like the window overviews of other desktops.
+Floating windows go around the block in bands, on the side of the screen they are on, judged by thirds of the screen: above the block for windows at the top, below it for windows at the bottom or in the middle, and beside it for windows on the left or the right.
+In a band, they keep their order on the screen, each as close to where it is as the others let it.
+A band that runs out of room gets another line further out; a window stays in the line it was in for as long as there's room for it there, so a new window never moves an older one to another line.
+A window on the left or the right can also take the room beside a short row of the block: one at the top beside the first row, one at the bottom beside the last.
+The grid tries three arrangements: windows in the corners above and below the block, windows in the corners beside it, and every window beside it, on its side of the screen, with the block wrapping into more rows.
+How wide the rows get and which arrangement it uses are picked to show the windows as large as possible.
+On a workspace with only floating windows, they push each other apart from where they are, like the window overviews of other desktops.
 
-When windows come and go, the grid keeps the width the rows wrap at as long as it shows the windows at least 92% as large as another one would, and keeps its scale unless the windows could grow by more than about 7%.
+When windows come and go, the grid keeps the width the rows wrap at and the arrangement as long as they show the windows at least 85% as large as others would, and keeps its scale unless the windows could grow by more than about 7%.
 Opening the grid again starts from what it showed when it closed, the same way, so with nothing changed it shows the same.
 
 Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
-Dragging a floating window moves it on the screen: its middle goes where you let go of it, and the grid shows it there, or in the closest free spot, moving it on from where you let go.
+Dragging a floating window moves it on the screen: its middle goes where you let go of it, and the grid shows it there first, then moves it on to its place in the band on that side.
 As outside the grid, clicking the right mouse button during the drag switches the window between floating and tiling.
 [`toggle-window-floating`](./Configuration:-Key-Bindings.md) switches the window in the focused cell.
 
