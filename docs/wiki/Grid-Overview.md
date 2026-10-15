@@ -28,7 +28,6 @@ grid-overview {
 ### Layout
 
 The grid shows windows at one scale, the largest at which they all fit, so windows keep their sizes relative to each other: a small dialog stays smaller than a big editor.
-When the tiled windows take up the grid but leave room around them, the floating windows grow into it, all of them alike, so they show larger than the tiled ones but still keep their sizes relative to each other.
 
 Tiled windows form a block in the middle of the grid, in the order of the scrolling layout, left to right, wrapped into rows like text.
 The tabs of a tabbed column stay together in one row.
@@ -36,7 +35,6 @@ How wide the rows get is picked to show the windows as large as possible.
 
 Floating windows start out where they are on the screen and push each other and the block of tiled windows apart, so they end up around the block, on the side of the screen they are on.
 A floating window that a gap in the block, like beside a short row, has room for closer to where it is than where it got pushed to takes the gap.
-Floating windows that pushing can't get apart, like several that opened on top of each other, take the free spot closest to where they are, on their side of the screen.
 On a workspace with only floating windows, the grid works like the window overviews of other desktops.
 
 When windows come and go, the grid keeps the width the rows wrap at as long as it shows the windows at least 92% as large as another one would, and keeps its scale unless the windows could grow by more than about 7%.
