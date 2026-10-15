@@ -72,6 +72,18 @@ struct EventStreamSender {
 }
 
 impl IpcServer {
+    /// The active window of the focused workspace, as last sent over the event stream.
+    #[cfg(test)]
+    pub fn focused_workspace_active_window(&self) -> Option<u64> {
+        let state = self.event_stream_state.borrow();
+        state
+            .workspaces
+            .workspaces
+            .values()
+            .find(|ws| ws.is_focused)
+            .and_then(|ws| ws.active_window_id)
+    }
+
     pub fn start(
         event_loop: &LoopHandle<'static, State>,
         wayland_socket_name: Option<&OsStr>,
@@ -657,7 +669,7 @@ impl State {
                 break;
             }
 
-            let active_window_id = ws.active_window().map(|win| win.id().get());
+            let active_window_id = ipc_active_window_id(ws);
             if ipc_ws.active_window_id != active_window_id {
                 events.push(Event::WorkspaceActiveWindowChanged {
                     workspace_id: id,
@@ -705,7 +717,7 @@ impl State {
                         is_urgent: ws.is_urgent(),
                         is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
                         is_focused: Some(id) == focused_ws_id,
-                        active_window_id: ws.active_window().map(|win| win.id().get()),
+                        active_window_id: ipc_active_window_id(ws),
                     }
                 })
                 .collect();
@@ -1035,4 +1047,24 @@ impl State {
         state.apply(event.clone());
         server.send_event(event);
     }
+}
+
+/// The active window of a workspace for IPC.
+///
+/// While the grid overview is open on it, that's the window in the focused cell, which closing the
+/// grid activates, or an ignore-grid-overview window that the user clicked, so that IPC consumers
+/// that show the active window of the focused workspace (e.g. waybar's window title) follow the
+/// selection, like they do the focused window.
+fn ipc_active_window_id(ws: &crate::layout::workspace::Workspace<Mapped>) -> Option<u64> {
+    if ws.is_grid_overview_open() {
+        if let Some(win) = ws.active_ignored_floating_window_in_grid() {
+            return Some(win.id().get());
+        }
+        if let Some(window) = ws.grid_focused_window_id() {
+            if let Some(mapped) = ws.windows().find(|mapped| mapped.window == window) {
+                return Some(mapped.id().get());
+            }
+        }
+    }
+    ws.active_window().map(|win| win.id().get())
 }

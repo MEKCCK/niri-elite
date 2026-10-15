@@ -249,3 +249,40 @@ fn grid_flow() {
     flow.dump("grid_unchanged_again");
     assert_eq!(flow.cells().unwrap().1, shown.1);
 }
+
+#[test]
+fn grid_focus_is_the_active_window_over_ipc() {
+    let mut flow = Flow::new();
+    flow.open("t1", (800, 600));
+    flow.open("t2", (800, 600));
+    flow.open("t3", (800, 600));
+    flow.toggle_grid();
+
+    let ipc_active = |flow: &mut Flow| {
+        flow.f
+            .niri()
+            .ipc_server
+            .as_ref()
+            .unwrap()
+            .focused_workspace_active_window()
+    };
+    let grid_focus = |flow: &mut Flow| {
+        let niri = flow.f.niri();
+        let ws = niri.layout.active_workspace().unwrap();
+        let window = ws.grid_focused_window_id().unwrap();
+        ws.windows()
+            .find(|mapped| mapped.window == window)
+            .map(|mapped| mapped.id().get())
+    };
+    assert_eq!(ipc_active(&mut flow), grid_focus(&mut flow));
+    let before = ipc_active(&mut flow);
+
+    // Moving the grid focus moves the active window that IPC consumers like waybar show the
+    // title of, before the grid closes.
+    flow.f
+        .niri_state()
+        .do_action(Action::FocusColumnLeft, false);
+    flow.settle();
+    assert_ne!(ipc_active(&mut flow), before);
+    assert_eq!(ipc_active(&mut flow), grid_focus(&mut flow));
+}
