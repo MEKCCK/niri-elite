@@ -428,7 +428,7 @@ impl<'a, W: LayoutElement> Bands<'a, W> {
                     key.0 < b.0 - EPSILON
                         || ((key.0 - b.0).abs() <= EPSILON
                             && (key.1 < b.1 - EPSILON
-                                || ((key.1 - b.1).abs() <= EPSILON && key.2 < b.2)))
+                                || ((key.1 - b.1).abs() <= EPSILON && !key.2 && b.2)))
                 });
                 if better {
                     best = Some((pocket_idx, key));

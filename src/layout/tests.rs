@@ -11177,7 +11177,7 @@ fn grid_gesture_opens_the_grid_as_far_as_the_fingers_go() {
         .active_workspace()
         .unwrap()
         .active_window()
-        .map(|w| w.id().clone());
+        .map(|w| *w.id());
 
     gesture(&mut layout, &[50., 50., 50.]);
     // Halfway, and it stays there while the fingers rest.
@@ -11206,7 +11206,7 @@ fn grid_gesture_opens_the_grid_as_far_as_the_fingers_go() {
     );
     let ws = layout.active_workspace().unwrap();
     assert!(ws.grid_overview().unwrap().is_fully_open());
-    assert_eq!(ws.active_window().map(|w| w.id().clone()), active);
+    assert_eq!(ws.active_window().map(|w| *w.id()), active);
 }
 
 #[test]
@@ -11216,14 +11216,14 @@ fn grid_gesture_that_turns_back_leaves_the_grid_closed() {
         .active_workspace()
         .unwrap()
         .active_window()
-        .map(|w| w.id().clone());
+        .map(|w| *w.id());
 
     gesture(&mut layout, &[60., 60., -60., -60., -30.]);
     check_ops_on_layout(&mut layout, [Op::GridGestureEnd, Op::CompleteAnimations]);
     let ws = layout.active_workspace().unwrap();
     assert!(!ws.is_grid_overview_open());
     assert!(ws.grid_overview().is_none());
-    assert_eq!(ws.active_window().map(|w| w.id().clone()), active);
+    assert_eq!(ws.active_window().map(|w| *w.id()), active);
 }
 
 #[test]
