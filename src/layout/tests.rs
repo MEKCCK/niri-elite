@@ -6058,6 +6058,51 @@ fn grid_layout_keeps_rows_and_floating_windows_when_a_tiled_window_closes() {
 }
 
 #[test]
+fn grid_layout_keeps_floating_windows_on_their_side_of_the_screen() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview {
+        gap: 12.,
+        padding: niri_config::GridOverviewPadding::uniform(40.),
+        ..Default::default()
+    };
+    let area = Rectangle::from_size(Size::from((1280., 720.)));
+    // Two tiled windows, and floating windows along the bottom, large top right and small top
+    // left, last opened first like the floating layout has them, as in a screenshot of the
+    // problem.
+    let tiled = [(0, (628., 704.)), (1, (628., 704.))];
+    let floating = [
+        ((230., 420.), (700., 290.)),
+        ((560., 20.), (600., 380.)),
+        ((30., 15.), (150., 210.)),
+    ];
+    let items = grid_layout_items(&tiled, &floating);
+    let layout = GridLayout::compute(&items, area, &config, None);
+    assert_grid_layout_is_sound(&layout, area, &config);
+
+    let padding = config.padding;
+    let middle: Point<f64, Logical> = Point::from((
+        (padding.left + area.size.w - padding.right) / 2.,
+        (padding.top + area.size.h - padding.bottom) / 2.,
+    ));
+    let half: Size<f64, Logical> = Size::from((
+        (area.size.w - padding.left - padding.right) / 2.,
+        (area.size.h - padding.top - padding.bottom) / 2.,
+    ));
+    for (((x, y), (w, h)), (id, shown)) in floating.iter().zip(floating_centers(&layout)) {
+        let real: Point<f64, Logical> = Point::from((x + w / 2., y + h / 2.));
+        let side = |real: f64, shown: f64, middle: f64, half: f64| {
+            let real = (real - middle) / half;
+            real.abs() <= 0.25 || (shown - middle).signum() == real.signum()
+        };
+        assert!(
+            side(real.x, shown.x, middle.x, half.w) && side(real.y, shown.y, middle.y, half.h),
+            "floating window {id} at {real:?} on the workspace shows at {shown:?}: {layout:?}"
+        );
+    }
+}
+
+#[test]
 fn grid_layout_spares_small_floating_windows_some_shrinking() {
     use super::grid_overview::GridLayout;
 
