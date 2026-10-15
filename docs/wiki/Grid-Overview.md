@@ -45,12 +45,14 @@ While the grid stays open, it keeps what it can when windows come and go:
 
 - Floating windows stay where the grid shows them. One that something else moves into keeps to its side of the screen, everything shrinking rather than it going to the other side.
 - A floating window that opens takes the room that is left on its side, or if there is none, the room that is left anywhere; if there isn't enough, everything shrinks in place.
-- Tiled columns keep their rows, and while the scale stays, the rows stay where they are: a row that closing windows emptied leaves its room rather than everything moving over. Rows wrap anew only when that shows the windows much larger and leaves the floating windows where they are.
+- Tiled columns keep their rows. A new column joins the row of the column before it if that row has room for it, and starts a row of its own after it otherwise. While the scale stays, the rows stay where they are, a row in the middle keeping its middle: a row that closing windows emptied leaves its room rather than everything moving over.
+- Rows wrap anew when tiled windows came, went or moved and wrapping anew shows the windows noticeably larger. For floating windows alone coming and going, only if that also leaves the floating windows where they are.
 - The block of tiled windows stays on its side of the grid.
-- The scale doesn't grow while windows open, and only grows noticeably when windows close; floating windows then move out along with the block.
+- The scale doesn't grow while windows open, and grows noticeably when windows close; floating windows then move out along with the block.
+- It never gets far worse than laying everything out anew, the way opening the grid would: as soon as that shows the windows 25% larger, or after windows closed, 15% larger, the grid moves everything there.
 
-Opening the grid again picks up from where it was when it closed, the same way: windows show where they did then, windows that opened or closed in the meantime come and go like they would have with the grid open, and a floating window that moved or changed size takes the free spot closest to where it is now.
-The very first time on a workspace, the grid lays everything out afresh.
+Opening the grid again with the same windows as when it closed shows them where it did then; a floating window that moved or changed size in the meantime takes the free spot closest to where it is now.
+With windows opened or closed in the meantime, the grid lays everything out afresh.
 
 Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
 Dragging a floating window moves it on the screen: its middle goes where you let go of it, and the grid shows it there, or in the closest free spot, moving it on from where you let go.

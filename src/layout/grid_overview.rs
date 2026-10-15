@@ -2129,10 +2129,12 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                     .and_then(|(_, info)| info.row)
             };
             let mut rows = Vec::with_capacity(groups.len());
+            let mut new = Vec::with_capacity(groups.len());
             let mut any_shown = false;
             for group in &groups {
                 let shown = group.clone().filter_map(shown_row).min();
                 any_shown |= shown.is_some();
+                new.push(shown.is_none());
                 // Rows stay in strip order.
                 let last = rows.last().copied().unwrap_or(0);
                 rows.push(shown.unwrap_or(last).max(last));
@@ -2140,26 +2142,50 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             if !any_shown {
                 return None;
             }
-            // Rows that lost all their windows go away.
+            // Rows that lost all their windows go away. A new column joins the row of the column
+            // before it if that row has room for it at the scale the grid shows, and starts a row
+            // of its own after it otherwise, rather than making everything shrink to fit it.
+            let width = |group: &Range<usize>| {
+                group
+                    .clone()
+                    .map(|idx| items[idx].1.size.w * prev.scale)
+                    .sum::<f64>()
+                    + gap * (group.len() - 1) as f64
+            };
             let mut compact = Vec::with_capacity(rows.len());
-            for (i, row) in rows.iter().enumerate() {
-                let next = match i {
-                    0 => 0,
-                    _ => compact[i - 1] + usize::from(*row != rows[i - 1]),
+            let mut row_width = 0.;
+            for (i, group) in groups.iter().enumerate() {
+                let width = width(group);
+                let next = if i == 0 {
+                    0
+                } else if rows[i] != rows[i - 1]
+                    || (new[i] && row_width + gap + width > content.size.w + EPSILON)
+                {
+                    compact[i - 1] + 1
+                } else {
+                    row_width += gap + width;
+                    compact.push(compact[i - 1]);
+                    continue;
                 };
+                row_width = width;
                 compact.push(next);
             }
-            Some((compact, rows))
+            Some((compact, rows, new))
         });
         // Where each kept row started, by the row it was.
+        // A row of new columns alone has none.
         let kept_row_spots = kept_rows
             .as_ref()
-            .map(|(compact, rows)| {
+            .map(|(compact, rows, new)| {
                 let prev = prev.unwrap();
                 let row_count = compact.last().map_or(0, |last| last + 1);
                 (0..row_count)
                     .map(|c| {
-                        let i = compact.iter().position(|row| *row == c)?;
+                        let i = (0..compact.len()).find(|&i| compact[i] == c && !new[i])?;
+                        // The first of the rows that took windows from the same row.
+                        if (0..i).any(|j| rows[j] == rows[i] && compact[j] != c && !new[j]) {
+                            return None;
+                        }
                         let shown = prev
                             .entries
                             .iter()
@@ -2173,7 +2199,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                     .collect()
             })
             .unwrap_or_default();
-        let kept_rows = kept_rows.map(|(compact, _)| compact);
+        let kept_rows = kept_rows.map(|(compact, _, _)| compact);
         // The tiled windows in strip order, column by column, now and in the layout shown.
         let tiled_now: Vec<(usize, &W::Id)> = items
             .iter()
