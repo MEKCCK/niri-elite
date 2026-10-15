@@ -3922,6 +3922,7 @@ impl<W: LayoutElement> Layout<W> {
                 })
             });
             if !moving_target {
+                self.run_grid_window_action(window, |ws, window| ws.toggle_window_floating(window));
                 return;
             }
         }
@@ -4000,6 +4001,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 return;
             }
+        }
+        if self.grid_move_guard() {
+            self.run_grid_window_action(window, |ws, window| {
+                ws.set_window_floating(window, floating)
+            });
+            return;
         }
 
         let workspace = if let Some(window) = window {
@@ -6440,6 +6447,29 @@ impl<W: LayoutElement> Layout<W> {
             window_visual_snapshots,
         );
         Some(rv)
+    }
+
+    /// Runs `action` on `window`'s workspace while the grid shows, then refreshes the grid. Without
+    /// a window, it acts on the window in the grid's focused cell, like the move binds.
+    fn run_grid_window_action(
+        &mut self,
+        window: Option<&W::Id>,
+        action: impl FnOnce(&mut Workspace<W>, Option<&W::Id>),
+    ) {
+        let Some(id) = window else {
+            self.run_active_grid_move_action(|this| {
+                if let Some(ws) = this.active_workspace_mut() {
+                    action(ws, None);
+                }
+            });
+            return;
+        };
+        let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) else {
+            return;
+        };
+        let window_visual_snapshots = ws.grid_window_visual_snapshots();
+        action(ws, Some(id));
+        ws.refresh_grid_overview_after_action(Some(id), true, window_visual_snapshots);
     }
 
     fn grid_move_guard(&self) -> bool {

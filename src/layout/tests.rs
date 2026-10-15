@@ -10853,3 +10853,57 @@ fn grid_opens_again_the_way_it_closed() {
     let (_, after) = moved.iter().find(|(id, _)| *id == 4).unwrap();
     assert_ne!(after, before);
 }
+
+#[test]
+fn toggle_window_floating_switches_the_focused_cell_in_the_grid() {
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::FocusWindow(2),
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+    ]);
+    // The grid focus goes to window 1, while window 2 stays the active window.
+    layout.focus_left();
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+    let is_floating = |layout: &Layout<TestWindow>, id: usize| {
+        layout.active_workspace().unwrap().is_floating(&id)
+    };
+
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleWindowFloating { id: None },
+            Op::CompleteAnimations,
+        ],
+    );
+    assert!(is_floating(&layout, 1));
+    assert!(!is_floating(&layout, 2));
+    assert!(layout.is_grid_overview_open());
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+    let ws = layout.active_workspace().unwrap();
+    let cell = ws
+        .grid_overview()
+        .unwrap()
+        .find_grid_info(&1)
+        .unwrap()
+        .rect();
+    assert!(ws.working_area().contains_rect(cell), "{cell:?}");
+
+    // And back.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleWindowFloating { id: None },
+            Op::CompleteAnimations,
+        ],
+    );
+    assert!(!is_floating(&layout, 1));
+    assert!(layout.is_grid_overview_open());
+    assert_eq!(layout.grid_focused_window_id(), Some(1));
+}
