@@ -3985,7 +3985,7 @@ fn grid_overview_fill_scale_makes_padding_visual() {
 }
 
 #[test]
-fn grid_overview_shows_every_window_at_one_scale() {
+fn grid_overview_keeps_window_sizes_in_proportion() {
     let mut floating = TestWindowParams::new(2);
     floating.is_floating = true;
 
@@ -4019,8 +4019,9 @@ fn grid_overview_shows_every_window_at_one_scale() {
     let fullscreen = info_for(1);
     let floating = info_for(2);
 
-    // One scale for all, so that window sizes compare like they do on the workspace.
-    approx::assert_abs_diff_eq!(fullscreen.target_scale, floating.target_scale);
+    // Sizes compare like they do on the workspace, except that a smaller floating window is
+    // spared some of the shrinking, to stay recognizable.
+    assert!(floating.target_scale >= fullscreen.target_scale);
     assert!(
         floating.target_size.w * floating.target_size.h
             < fullscreen.target_size.w * fullscreen.target_size.h,
@@ -5729,7 +5730,14 @@ fn assert_grid_layout_is_sound(
             "{:?} at {r:?} leaves the grid",
             item.window_id(),
         );
-        approx::assert_abs_diff_eq!(info.target_scale, layout.scale);
+        // One scale for tiled windows; small floating windows show larger, but never larger
+        // than they are.
+        if matches!(item, super::grid_overview::GridItem::Floating { .. }) {
+            assert!(info.target_scale >= layout.scale - 0.000001, "{info:?}");
+            assert!(info.target_scale <= 1. + 0.000001, "{info:?}");
+        } else {
+            approx::assert_abs_diff_eq!(info.target_scale, layout.scale);
+        }
     }
     for (i, (a, info_a)) in layout.entries.iter().enumerate() {
         for (b, info_b) in &layout.entries[i + 1..] {
@@ -5925,6 +5933,173 @@ fn grid_layout_keeps_floating_spots_while_open() {
     let kept = GridLayout::compute(&after, area, &config, Some(&open));
     assert_eq!(spot(&fresh), real);
     assert_eq!(spot(&kept), spot(&open));
+}
+
+fn floating_centers(
+    layout: &super::grid_overview::GridLayout<TestWindow>,
+) -> Vec<(usize, Point<f64, Logical>)> {
+    layout
+        .entries
+        .iter()
+        .filter(|(item, _)| matches!(item, super::grid_overview::GridItem::Floating { .. }))
+        .map(|(item, info)| {
+            let r = info.rect();
+            let center = r.loc + Point::from((r.size.w / 2., r.size.h / 2.));
+            (*item.window_id(), center)
+        })
+        .collect()
+}
+
+#[test]
+fn grid_layout_keeps_floating_windows_put_when_one_opens() {
+    use super::grid_overview::{GridItem, GridLayout, GridSource};
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    let tiled = [(0, (960., 1040.)), (1, (960., 1040.)), (2, (640., 1040.))];
+    let floating = [
+        ((100., 80.), (500., 360.)),
+        ((1300., 100.), (420., 300.)),
+        ((200., 650.), (480., 320.)),
+        ((1250., 600.), (520., 380.)),
+    ];
+    let mut items = grid_layout_items(&tiled, &floating);
+    let open = GridLayout::compute(&items, area, &config, None);
+
+    // A large floating window opens in the middle of the screen, where the others don't fit
+    // around it at the current scale.
+    for (n, (x, y)) in [(800., 400.), (700., 300.), (900., 500.)]
+        .into_iter()
+        .enumerate()
+    {
+        let before = GridLayout::compute(&items, area, &config, Some(&open));
+        let source = GridSource {
+            size: Size::from((700., 500.)),
+            pos: Some(Point::from((x, y))),
+        };
+        items.push((GridItem::Floating { window_id: 100 + n }, source));
+        let after = GridLayout::compute(&items, area, &config, Some(&before));
+        assert_grid_layout_is_sound(&after, area, &config);
+
+        // Nothing grows for it, and the windows that were there stay where they were, shrinking
+        // in place if they have to.
+        assert!(after.scale <= before.scale + 0.000001);
+        for (id, center) in floating_centers(&before) {
+            let (_, now) = floating_centers(&after)
+                .into_iter()
+                .find(|(other, _)| *other == id)
+                .unwrap();
+            approx::assert_abs_diff_eq!(now.x, center.x, epsilon = 0.001);
+            approx::assert_abs_diff_eq!(now.y, center.y, epsilon = 0.001);
+        }
+    }
+}
+
+#[test]
+fn grid_layout_keeps_rows_and_floating_windows_when_a_tiled_window_closes() {
+    use super::grid_overview::{GridItem, GridLayout};
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    // A first row with two columns, the second one with three tabs and another column, and a
+    // floating window in the room beside the short first row.
+    let tiled = [
+        (0, (960., 1040.)),
+        (1, (640., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (2, (960., 1040.)),
+        (3, (1280., 1040.)),
+    ];
+    let floating = [((80., 300.), (500., 360.))];
+    let items = grid_layout_items(&tiled, &floating);
+    let open = GridLayout::compute(&items, area, &config, None);
+    let row_of = |layout: &GridLayout<TestWindow>, id: usize| {
+        layout
+            .entries
+            .iter()
+            .find(|(item, _)| *item.window_id() == id)
+            .unwrap()
+            .1
+            .row
+    };
+    assert_ne!(row_of(&open, 2), row_of(&open, 3));
+
+    // The first column closes. Wrapped anew, the tabs would move up into the first row, over the
+    // floating window; kept, the rows stay as they were.
+    let after_close: Vec<_> = items[1..]
+        .iter()
+        .map(|(item, source)| {
+            let item = match item.clone() {
+                GridItem::Column { col_idx, window_id } => GridItem::Column {
+                    col_idx: col_idx - 1,
+                    window_id,
+                },
+                GridItem::Tab {
+                    col_idx,
+                    tile_idx,
+                    window_id,
+                } => GridItem::Tab {
+                    col_idx: col_idx - 1,
+                    tile_idx,
+                    window_id,
+                },
+                item => item,
+            };
+            (item, *source)
+        })
+        .collect();
+    let kept = GridLayout::compute(&after_close, area, &config, Some(&open));
+    assert_grid_layout_is_sound(&kept, area, &config);
+    assert_ne!(row_of(&kept, 2), row_of(&kept, 3));
+    if kept.scale == open.scale {
+        assert_eq!(floating_centers(&kept), floating_centers(&open));
+    }
+}
+
+#[test]
+fn grid_layout_spares_small_floating_windows_some_shrinking() {
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    let tiled: Vec<_> = (0..5).map(|i| (i, (960., 1040.))).collect();
+    // A small chat window, a quarter of a tiled window across.
+    let floating = [((850., 400.), (240., 260.))];
+    let items = grid_layout_items(&tiled, &floating);
+    let layout = GridLayout::compute(&items, area, &config, None);
+    assert_grid_layout_is_sound(&layout, area, &config);
+
+    let (_, small) = layout.entries.last().unwrap();
+    let (_, large) = layout.entries.first().unwrap();
+    assert!(
+        small.target_scale > layout.scale * 1.5,
+        "{small:?} at {}",
+        layout.scale
+    );
+    assert!(small.target_size.w < large.target_size.w);
+    assert!(small.target_size.h < large.target_size.h);
+}
+
+#[test]
+fn grid_layout_keeps_the_block_in_the_middle_when_it_shows_windows_as_large() {
+    use super::grid_overview::{BlockPlace, GridLayout};
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    let tiled: Vec<_> = (0..5).map(|i| (i, (960., 1040.))).collect();
+    let floating = [((850., 400.), (240., 260.))];
+    let layout = GridLayout::compute(&grid_layout_items(&tiled, &floating), area, &config, None);
+    assert_eq!(layout.block_place, BlockPlace::Middle);
+
+    // The rows are as even as they can be: three and two rather than four and one.
+    let mut per_row = [0; 2];
+    for (_, info) in &layout.entries {
+        if let Some(row) = info.row {
+            per_row[row] += 1;
+        }
+    }
+    assert_eq!(per_row, [3, 2]);
 }
 
 #[test]
@@ -9234,8 +9409,16 @@ fn grid_recomputes_after_window_communicate_while_open() {
     );
     let after_reopen = grid_entry_target_size(&layout, 1);
 
+    // The open grid shows the new size, at the scale it had; the window got smaller, but not by
+    // enough to zoom everything in while the grid stays open. Opened afresh, it shows the window
+    // as large as fits.
     assert_ne!(after_communicate, initial_size);
-    assert_eq!(after_communicate, after_reopen);
+    approx::assert_abs_diff_eq!(
+        after_communicate.w / after_communicate.h,
+        5.,
+        epsilon = 0.001
+    );
+    assert!(after_reopen.w >= after_communicate.w);
 }
 
 #[test]
