@@ -11065,3 +11065,60 @@ fn focus_floating_actions_bring_floating_windows_back_on_top() {
         assert_eq!(order.first(), Some(&2), "{op:?}: {order:?}");
     }
 }
+
+/// Like a screenshot of the problem: five tiled windows, three small floating windows along the
+/// top, and seven floating file managers that all opened in the middle of the screen, on top of
+/// each other.
+fn grid_stacked_floats_layout(cascade: bool) -> Layout<TestWindow> {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=5 {
+        ops.push(Op::AddWindow {
+            params: half_width_window(id),
+        });
+    }
+    for (n, id) in (100..103).enumerate() {
+        let mut params = TestWindowParams::new(id);
+        params.is_floating = true;
+        params.bbox = Rectangle::from_size(Size::from((360, 220)));
+        ops.push(Op::AddWindow { params });
+        ops.push(Op::MoveFloatingWindow {
+            id: Some(id),
+            x: PositionChange::SetFixed(200. + 300. * n as f64),
+            y: PositionChange::SetFixed(30.),
+            animate: false,
+        });
+    }
+    for (n, id) in (200..207).enumerate() {
+        let mut params = TestWindowParams::new(id);
+        params.is_floating = true;
+        params.bbox = Rectangle::from_size(Size::from((450, 320)));
+        ops.push(Op::AddWindow { params });
+        if cascade {
+            ops.push(Op::MoveFloatingWindow {
+                id: Some(id),
+                x: PositionChange::SetFixed(400. + 20. * n as f64),
+                y: PositionChange::SetFixed(220. + 20. * n as f64),
+                animate: false,
+            });
+        }
+    }
+    ops.push(Op::ToggleGridOverview);
+    ops.push(Op::CompleteAnimations);
+    check_ops(ops)
+}
+
+#[test]
+fn grid_spreads_floating_windows_that_opened_on_top_of_each_other() {
+    for cascade in [false, true] {
+        let layout = grid_stacked_floats_layout(cascade);
+        // Pushing alone doesn't get them apart; rather than shrinking everything until it does,
+        // they take free spots near where they are.
+        assert!(grid_scale(&layout) > 0.3, "{}", grid_scale(&layout));
+        // The ones along the top stay in the upper half.
+        let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+        for id in 100..103 {
+            let r = go.find_grid_info(&id).unwrap().rect();
+            assert!(r.loc.y + r.size.h / 2. < 360., "{id}: {r:?}");
+        }
+    }
+}
