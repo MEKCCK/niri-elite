@@ -2423,6 +2423,7 @@ dependencies = [
  "libadwaita",
  "niri",
  "niri-config",
+ "niri-ipc",
  "png 0.18.1",
  "smithay",
  "tracing",

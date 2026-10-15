@@ -481,8 +481,8 @@ impl MergeWith<OverviewPart> for Overview {
 pub struct GridOverview {
     pub gap: f64,
     pub padding: GridOverviewPadding,
+    /// The smallest scale the grid shows windows at; below it, they overlap instead.
     pub min_scale: f64,
-    pub focused_column_scale: f64,
     /// On-screen width of the focus ring around the focused cell, in logical pixels.
     ///
     /// `None` keeps the width of the window's own focus ring. Either way, the width doesn't shrink
@@ -632,7 +632,6 @@ impl Default for GridOverview {
             min_scale: 0.08,
             // The focus ring marks the focused cell; scaling it up would misrepresent the window's
             // size next to the others.
-            focused_column_scale: 1.,
             focus_ring_width: None,
             focus_ring_transition: GridFocusRingTransition::default(),
             focus_follows_mouse: None,
@@ -771,8 +770,6 @@ pub struct GridOverviewPart {
     #[knuffel(child, unwrap(argument))]
     pub min_scale: Option<FloatOrInt<0, 1>>,
     #[knuffel(child, unwrap(argument))]
-    pub focused_column_scale: Option<FloatOrInt<1, 2>>,
-    #[knuffel(child, unwrap(argument))]
     pub focus_ring_width: Option<FloatOrInt<0, 65535>>,
     #[knuffel(child, unwrap(argument))]
     pub focus_ring_transition: Option<GridFocusRingTransition>,
@@ -796,9 +793,6 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         }
         if let Some(min_scale) = &part.min_scale {
             self.min_scale = min_scale.0;
-        }
-        if let Some(focused_column_scale) = &part.focused_column_scale {
-            self.focused_column_scale = focused_column_scale.0;
         }
         if let Some(focus_ring_width) = &part.focus_ring_width {
             self.focus_ring_width = Some(focus_ring_width.0);

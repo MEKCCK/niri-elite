@@ -872,22 +872,50 @@ impl<W: LayoutElement> FloatingSpace<W> {
         win.request_size_once(win_size, animate);
     }
 
-    fn focus_directional(
-        &mut self,
-        distance: impl Fn(Point<f64, Logical>, Point<f64, Logical>) -> f64,
-    ) -> bool {
+    /// Focuses the window next to the active one in a direction, `dir` being a unit vector.
+    ///
+    /// Windows that line up with the active one across the direction come first, like a window
+    /// further left at about the same height for focus-left; past those, the nearest one in that
+    /// direction, weighing the distance along it far more than the one across it. A window counts
+    /// as being in a direction when both its edges are further that way than the active window's;
+    /// floating windows often overlap, so the distances go by their centers.
+    fn focus_directional(&mut self, dir: (f64, f64)) -> bool {
         let Some(active_id) = &self.active_window_id else {
             return false;
         };
         let active_idx = self.idx_of(active_id).unwrap();
-        let center = self.data[active_idx].center();
+        let active = &self.data[active_idx];
+        let center = active.center();
+        // The extent of a window along the direction, increasing in it, and across it.
+        let extents = |data: &Data| {
+            let (x0, x1) = (data.logical_pos.x, data.logical_pos.x + data.size.w);
+            let (y0, y1) = (data.logical_pos.y, data.logical_pos.y + data.size.h);
+            if dir.0 != 0. {
+                let along = if dir.0 > 0. { (x0, x1) } else { (-x1, -x0) };
+                (along, (y0, y1))
+            } else {
+                let along = if dir.1 > 0. { (y0, y1) } else { (-y1, -y0) };
+                (along, (x0, x1))
+            }
+        };
+        let ((start, end), (lo, hi)) = extents(active);
 
         let result = zip(&self.tiles, &self.data)
             .filter(|(tile, _)| tile.window().id() != active_id && !tile.window().is_minimized())
-            .map(|(tile, data)| (tile, distance(center, data.center())))
-            .filter(|(_, dist)| *dist > 0.)
-            .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
-        if let Some((tile, _)) = result {
+            .filter_map(|(tile, data)| {
+                let ((other_start, other_end), _) = extents(data);
+                if other_start <= start || other_end <= end {
+                    return None;
+                }
+                let offset = data.center() - center;
+                let along = offset.x * dir.0 + offset.y * dir.1;
+                let off_axis = (offset.x * dir.1 - offset.y * dir.0).abs();
+                let (_, (other_lo, other_hi)) = extents(data);
+                let lines_up = other_lo < hi && lo < other_hi;
+                Some((tile, !lines_up, 13. * along * along + off_axis * off_axis))
+            })
+            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        if let Some((tile, _, _)) = result {
             let id = tile.window().id().clone();
             self.activate_window(&id);
             true
@@ -897,19 +925,19 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn focus_left(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.x - other.x)
+        self.focus_directional((-1., 0.))
     }
 
     pub fn focus_right(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.x - focus.x)
+        self.focus_directional((1., 0.))
     }
 
     pub fn focus_up(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.y - other.y)
+        self.focus_directional((0., -1.))
     }
 
     pub fn focus_down(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.y - focus.y)
+        self.focus_directional((0., 1.))
     }
 
     pub fn focus_leftmost(&mut self) {

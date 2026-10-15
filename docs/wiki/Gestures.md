@@ -60,11 +60,13 @@ Switch workspaces with three-finger vertical swipes.
 
 Move the view horizontally with three-finger horizontal swipes.
 
-#### Open and Close the Overview
+#### Open and Close the Grid Overview
 
-<sup>Since: 25.05</sup>
+Open and close the [grid overview](./Grid-Overview.md) with a four-finger vertical swipe: up opens it and down closes it.
+The grid follows the fingers, so it can be stopped partway and turned back; letting go finishes opening or closing it, whichever the swipe was heading for.
+Without `grid-all-monitors`, it opens on the monitor under the cursor.
 
-Open and close the overview with a four-finger vertical swipe.
+The overview opens with the `toggle-overview` bind and the hot corner.
 
 ### Touchscreen
 

@@ -11,7 +11,8 @@ https://github.com/user-attachments/assets/379a5d1f-acdb-4c11-b36c-e85fd91f0995
 
 </video>
 
-Open it with the `toggle-overview` bind, via the top-left hot corner, or using a touchpad four-finger swipe up.
+Open it with the `toggle-overview` bind or via the top-left hot corner.
+(In this fork, the touchpad four-finger swipe opens the [grid overview](./Grid-Overview.md) instead.)
 The bottom-left hot corner opens the grid overview by default.
 While in the overview, all keyboard shortcuts keep working, while pointing devices get easier:
 

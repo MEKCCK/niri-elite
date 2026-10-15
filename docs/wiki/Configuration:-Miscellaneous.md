@@ -353,8 +353,8 @@ grid-overview {
 
 <sup>Since: 26.04 (fork)</sup>
 
-The smallest a window preview may get along its short side, as a fraction of its cell.
-Very wide or very tall windows are scaled to fit their cell, which would make them a thin strip; this keeps them at least this thick.
+The grid shows every window at one scale, so that window sizes compare like they do on the workspace; it picks the largest scale at which all windows fit.
+This is the smallest scale it goes down to: with more windows than fit at it, they overlap instead.
 Ranges from 0 to 1, and defaults to 0.08.
 
 ```kdl
@@ -376,18 +376,6 @@ grid-overview {
 }
 ```
 
-#### `focused-column-scale`
-
-Scale the focused column relative to its cell.
-Ranges from 1 to 2, where higher values make the focused column larger.
-Defaults to 1 (no scaling): the focus ring already marks the focused cell, and a scaled-up cell misrepresents the window's size next to the others.
-
-```kdl
-grid-overview {
-    focused-column-scale 1.08
-}
-```
-
 #### `focus-ring-width`
 
 <sup>Since: 26.04 (fork)</sup>
@@ -398,7 +386,7 @@ The ring changes between the two widths as the grid opens and closes.
 The ring is always drawn around the window rather than as a background behind it, so it doesn't show through semitransparent windows in the grid.
 
 The colors are the focus ring's, so there is no separate setting for them.
-If the focus ring is off, nothing marks the focused cell other than `focused-column-scale`.
+If the focus ring is off, nothing marks the focused cell.
 
 ```kdl
 grid-overview {

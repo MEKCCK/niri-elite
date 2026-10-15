@@ -4623,7 +4623,15 @@ impl State {
                 // We handled this event.
                 return;
             } else if event.fingers() == 4 {
-                self.niri.layout.overview_gesture_begin();
+                // Four fingers open and close the grid overview, following the fingers. Like
+                // the hot corner, it opens on the monitor under the cursor unless it opens on
+                // all of them.
+                if !self.niri.config.borrow().grid_overview.grid_all_monitors {
+                    if let Some(output) = self.niri.output_under_cursor() {
+                        self.niri.layout.focus_output(&output);
+                    }
+                }
+                self.niri.layout.grid_gesture_begin();
                 self.niri.queue_redraw_all();
 
                 // We handled this event.
@@ -4741,7 +4749,7 @@ impl State {
         let res = self
             .niri
             .layout
-            .overview_gesture_update(-uninverted_delta_y, timestamp);
+            .grid_gesture_update(-uninverted_delta_y, timestamp);
         if let Some(redraw) = res {
             if redraw {
                 self.niri.queue_redraw_all();
@@ -4785,7 +4793,7 @@ impl State {
             handled = true;
         }
 
-        let res = self.niri.layout.overview_gesture_end();
+        let res = self.niri.layout.grid_gesture_end();
         if res {
             self.niri.queue_redraw_all();
             handled = true;

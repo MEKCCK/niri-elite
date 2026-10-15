@@ -31,6 +31,7 @@ use wayland_client::globals::Global;
 use wayland_client::protocol::wl_buffer::{self, WlBuffer};
 use wayland_client::protocol::wl_callback::{self, WlCallback};
 use wayland_client::protocol::wl_compositor::WlCompositor;
+use wayland_client::protocol::wl_region::WlRegion;
 use wayland_client::protocol::wl_display::WlDisplay;
 use wayland_client::protocol::wl_keyboard::{self, WlKeyboard};
 use wayland_client::protocol::wl_output::{self, WlOutput};
@@ -340,6 +341,14 @@ impl State {
             },
         );
         surface
+    }
+
+    /// Makes `surface` let all pointer input through, like a click-through overlay.
+    pub fn set_empty_input_region(&mut self, surface: &WlSurface) {
+        let compositor = self.compositor.as_ref().unwrap();
+        let region = compositor.create_region(&self.qh, ());
+        surface.set_input_region(Some(&region));
+        region.destroy();
     }
 
     pub fn create_window(&mut self) -> &mut Window {
@@ -839,6 +848,7 @@ impl Dispatch<ZwlrLayerShellV1, ()> for State {
 }
 
 wayland_client::delegate_noop!(State: ZwlrVirtualPointerManagerV1);
+wayland_client::delegate_noop!(State: WlRegion);
 wayland_client::delegate_noop!(State: ZwlrVirtualPointerV1);
 
 impl Dispatch<WlSurface, ()> for State {

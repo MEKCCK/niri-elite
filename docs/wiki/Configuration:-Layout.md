@@ -162,8 +162,8 @@ layout {
 If set, focusing a tiled window raises it above the floating windows.
 Otherwise, floating windows always render on top of tiled windows.
 
-Only the focused tiled window is raised, the other tiled windows stay below the floating windows, so a floating window placed next to the focused window stays visible.
-Focusing a floating window (for example, by clicking it, or with `focus-floating` or `switch-focus-between-floating-and-tiling`) brings the floating windows back on top.
+Windows stack in the order they were focused: a tiled window stays above the floating windows after the focus moves on to another tiled window, so the floating windows don't pop back up over it.
+Focusing a floating window (for example, by clicking it, or with `focus-floating` or `switch-focus-between-floating-and-tiling`), or a new floating window opening, brings the floating windows back on top of all tiled windows.
 
 A tiled window focused by `focus-follows-mouse` does not get raised, so moving the mouse across a tiled window doesn't cover the floating windows.
 
