@@ -11158,3 +11158,85 @@ fn grid_wraps_windows_opening_while_it_shows() {
         grid_scale(&fresh)
     );
 }
+
+#[test]
+fn focused_tiled_windows_stay_above_floating_in_focus_order() {
+    let mut layout = focused_window_above_floating_layout(true);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::AddWindow {
+            params: TestWindowParams::new(3),
+        }],
+    );
+    let output = layout.outputs().next().unwrap().clone();
+    let frame = |layout: &mut Layout<TestWindow>| {
+        layout.update_render_elements(Some(&output));
+    };
+
+    layout.activate_window(&1);
+    frame(&mut layout);
+    let pos = tiled_and_floating_overlap(&layout);
+    assert_eq!(window_id_under(&layout, pos), Some(1));
+
+    // Focusing another tiled window used to put the floating window back over the first one.
+    layout.activate_window(&3);
+    frame(&mut layout);
+    let pos = tiled_and_floating_overlap(&layout);
+    assert_eq!(window_id_under(&layout, pos), Some(1));
+    let ws = layout.active_workspace().unwrap();
+    let order: Vec<_> = ws
+        .tiles_with_render_positions()
+        .map(|(tile, _, _)| *tile.window().id())
+        .collect();
+    assert!(
+        order.iter().position(|id| *id == 1) < order.iter().position(|id| *id == 2),
+        "{order:?}"
+    );
+
+    // Focusing the floating window brings the floating windows back on top of all of them.
+    layout.activate_window(&2);
+    frame(&mut layout);
+    let pos = tiled_and_floating_overlap(&layout);
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+    layout.activate_window(&3);
+    frame(&mut layout);
+    let pos = tiled_and_floating_overlap(&layout);
+    assert_eq!(window_id_under(&layout, pos), Some(2));
+}
+
+#[test]
+fn focus_floating_actions_bring_floating_windows_back_on_top() {
+    for op in [Op::FocusFloating, Op::SwitchFocusFloatingTiling] {
+        let mut layout = focused_window_above_floating_layout(true);
+        check_ops_on_layout(
+            &mut layout,
+            [Op::AddWindow {
+                params: TestWindowParams::new(3),
+            }],
+        );
+        let output = layout.outputs().next().unwrap().clone();
+        let frame = |layout: &mut Layout<TestWindow>| {
+            layout.update_render_elements(Some(&output));
+        };
+
+        // Window 1 goes above the floating window, and stays there as window 3 gets the focus.
+        layout.activate_window(&1);
+        frame(&mut layout);
+        layout.activate_window(&3);
+        frame(&mut layout);
+        let pos = tiled_and_floating_overlap(&layout);
+        assert_eq!(window_id_under(&layout, pos), Some(1));
+
+        // Focusing the floating windows by action brings them back on top, like clicking one.
+        check_ops_on_layout(&mut layout, [op.clone()]);
+        frame(&mut layout);
+        let pos = tiled_and_floating_overlap(&layout);
+        assert_eq!(window_id_under(&layout, pos), Some(2), "{op:?}");
+        let ws = layout.active_workspace().unwrap();
+        let order: Vec<_> = ws
+            .tiles_with_render_positions()
+            .map(|(tile, _, _)| *tile.window().id())
+            .collect();
+        assert_eq!(order.first(), Some(&2), "{op:?}: {order:?}");
+    }
+}

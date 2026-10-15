@@ -87,6 +87,10 @@ pub struct Tile<W: LayoutElement> {
     /// Whether the tile should float upon unfullscreening.
     pub(super) restore_to_floating: bool,
 
+    /// Whether this tiled window was focused since a floating window last was, which keeps it
+    /// above the floating windows with `focused-window-above-floating`.
+    pub(super) above_floating: bool,
+
     /// The size that the window should assume when going floating.
     ///
     /// This is generally the last size the window had when it was floating. It can be unknown if
@@ -229,6 +233,7 @@ impl<W: LayoutElement> Tile<W> {
             sizing_mode,
             fullscreen_backdrop: SolidColorBuffer::new((0., 0.), [0., 0., 0., 1.]),
             restore_to_floating: false,
+            above_floating: false,
             floating_window_size: None,
             floating_pos: None,
             floating_preset_width_idx: None,

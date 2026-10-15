@@ -1281,7 +1281,7 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn fix_floating_state_for_active(&mut self) {
         if let Some(id) = self.grid_focused_window_id() {
             if self.floating.has_window(&id) {
-                self.floating_is_active = FloatingActive::Yes;
+                self.activate_floating_space();
             } else {
                 self.floating_is_active = FloatingActive::No;
             }
@@ -1544,6 +1544,7 @@ impl<W: LayoutElement> Workspace<W> {
     }
 
     pub fn update_render_elements(&mut self, is_active: bool, layer: RenderLayer) {
+        self.remember_tile_above_floating();
         self.update_focus_rings_shown();
 
         self.scrolling
@@ -2136,6 +2137,12 @@ impl<W: LayoutElement> Workspace<W> {
     ) {
         self.enter_output_for_window(tile.window());
         tile.restore_to_floating = is_floating;
+        // A tile comes in below the floating windows, until it is focused here.
+        tile.above_floating = false;
+        // A new floating window shows on top of every tiled window.
+        if is_floating {
+            self.lower_tiles_below_floating();
+        }
 
         // Placing a window next to a minimized one is impossible; e.g. a dialog can open while
         // its parent is minimized. Fall back to automatic placement.
@@ -2161,7 +2168,7 @@ impl<W: LayoutElement> Workspace<W> {
                     self.floating.add_tile(tile, activate);
 
                     if activate || self.scrolling.active_window().is_none() {
-                        self.floating_is_active = FloatingActive::Yes;
+                        self.activate_floating_space();
                     }
                 } else {
                     let grid_col_idx = self.grid_overview.as_ref().and_then(|go| {
@@ -2230,7 +2237,7 @@ impl<W: LayoutElement> Workspace<W> {
                     }
 
                     if activate || self.scrolling.active_window().is_none() {
-                        self.floating_is_active = FloatingActive::Yes;
+                        self.activate_floating_space();
                     }
                 } else if floating_has_window {
                     self.scrolling
@@ -2298,7 +2305,7 @@ impl<W: LayoutElement> Workspace<W> {
         } else {
             // Scrolling should remain focused if both have no visible windows.
             if self.scrolling.active_window().is_none() && self.floating.active_window().is_some() {
-                self.floating_is_active = FloatingActive::Yes;
+                self.activate_floating_space();
             }
         }
     }
@@ -3127,8 +3134,9 @@ impl<W: LayoutElement> Workspace<W> {
             }
 
             self.floating.add_tile(removed.tile, target_is_active);
+            self.lower_tiles_below_floating();
             if target_is_active {
-                self.floating_is_active = FloatingActive::Yes;
+                self.activate_floating_space();
             }
         }
 
@@ -3172,11 +3180,11 @@ impl<W: LayoutElement> Workspace<W> {
             return;
         }
 
-        self.floating_is_active = if self.floating_is_active.get() {
-            FloatingActive::No
+        if self.floating_is_active.get() {
+            self.floating_is_active = FloatingActive::No;
         } else {
-            FloatingActive::Yes
-        };
+            self.activate_floating_space();
+        }
     }
 
     pub fn move_floating_window(
@@ -3280,19 +3288,23 @@ impl<W: LayoutElement> Workspace<W> {
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
-        let mut scrolling = self.scrolling.tiles_with_render_positions();
-        // The active tile comes first.
-        let active = if self.active_tile_above_floating() {
-            scrolling.next()
-        } else {
-            None
-        };
+        // The tiles above the floating windows come first. The active tile is the first one.
+        let active_above = self.active_tile_above_floating();
+        let mut above = Vec::new();
+        let mut below = Vec::new();
+        for (idx, entry) in self.scrolling.tiles_with_render_positions().enumerate() {
+            if entry.0.above_floating || active_above && idx == 0 {
+                above.push(entry);
+            } else {
+                below.push(entry);
+            }
+        }
 
         let floating = self.floating.tiles_with_render_positions();
         let visible = self.is_floating_visible();
         let floating = floating.map(move |(tile, pos)| (tile, pos, visible));
 
-        active.into_iter().chain(floating).chain(scrolling)
+        above.into_iter().chain(floating).chain(below)
     }
 
     pub fn tiles_with_render_positions_mut(
@@ -3345,9 +3357,9 @@ impl<W: LayoutElement> Workspace<W> {
         layer: RenderLayer,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        // The active tile may have rendered above the floating windows already.
-        let part = if layer.is_normal() && self.active_tile_above_floating() {
-            ScrollingPart::AllButActiveTile
+        // The tiles above the floating windows may have rendered already.
+        let part = if layer.is_normal() && self.tiles_above_floating() {
+            self.below_floating_part()
         } else {
             ScrollingPart::All
         };
@@ -3371,7 +3383,7 @@ impl<W: LayoutElement> Workspace<W> {
         focus_ring: bool,
         push: &mut dyn FnMut(WorkspaceRenderElement<R>),
     ) {
-        if !self.active_tile_above_floating() {
+        if !self.tiles_above_floating() {
             return;
         }
 
@@ -3386,7 +3398,7 @@ impl<W: LayoutElement> Workspace<W> {
             xray_pos,
             focus_ring,
             RenderLayer::Normal,
-            ScrollingPart::ActiveTile,
+            self.above_floating_part(),
             &mut |elem| push(elem.into()),
         );
     }
@@ -3405,8 +3417,8 @@ impl<W: LayoutElement> Workspace<W> {
 
         let view_rect = Rectangle::from_size(self.view_size);
 
-        // The closing windows may have rendered above the active scrolling tile already.
-        if layer.is_normal() && !self.active_tile_above_floating() {
+        // The closing windows may have rendered above the scrolling tiles already.
+        if layer.is_normal() && !self.tiles_above_floating() {
             self.floating
                 .render_closing_windows(ctx.r(), view_rect, &mut |elem| push(elem.into()));
         }
@@ -4163,9 +4175,9 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn window_under(&self, pos: Point<f64, Logical>) -> Option<(&W, HitType)> {
         // This logic is consistent with tiles_with_render_positions().
-        let active_above_floating = self.active_tile_above_floating();
-        if active_above_floating {
-            if let Some(rv) = self.scrolling.window_under(pos, ScrollingPart::ActiveTile) {
+        let tiles_above_floating = self.tiles_above_floating();
+        if tiles_above_floating {
+            if let Some(rv) = self.scrolling.window_under(pos, self.above_floating_part()) {
                 return Some(rv);
             }
         }
@@ -4181,8 +4193,8 @@ impl<W: LayoutElement> Workspace<W> {
             }
         }
 
-        let part = if active_above_floating {
-            ScrollingPart::AllButActiveTile
+        let part = if tiles_above_floating {
+            self.below_floating_part()
         } else {
             ScrollingPart::All
         };
@@ -4298,11 +4310,11 @@ impl<W: LayoutElement> Workspace<W> {
                 && self.scrolling.active_window().is_none()
                 && self.floating.active_window().is_some()
             {
-                self.floating_is_active = FloatingActive::Yes;
+                self.activate_floating_space();
             }
         } else if in_floating && self.scrolling.active_window().is_none() {
             // Restoring brought back the only visible floating window.
-            self.floating_is_active = FloatingActive::Yes;
+            self.activate_floating_space();
         } else if !in_floating && self.floating.active_window().is_none() {
             self.floating_is_active = FloatingActive::No;
         }
@@ -4346,7 +4358,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         if self.floating.has_window(window) {
             self.floating.activate_window(window);
-            self.floating_is_active = FloatingActive::Yes;
+            self.activate_floating_space();
             return true;
         }
 
@@ -4371,7 +4383,7 @@ impl<W: LayoutElement> Workspace<W> {
         let previous_view_pos = self.grid_overview.as_ref().map(|go| go.saved_view_offset);
 
         if self.floating.activate_window(window) {
-            self.floating_is_active = FloatingActive::Yes;
+            self.activate_floating_space();
             true
         } else if self.scrolling.activate_window_from_grid(
             window,
@@ -4392,7 +4404,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         if self.floating.activate_window(window) {
-            self.floating_is_active = FloatingActive::Yes;
+            self.activate_floating_space();
             true
         } else if self.scrolling.activate_window(window) {
             self.floating_is_active = FloatingActive::No;
@@ -4409,7 +4421,7 @@ impl<W: LayoutElement> Workspace<W> {
         }
 
         if self.floating.activate_window_without_raising(window) {
-            self.floating_is_active = FloatingActive::Yes;
+            self.activate_floating_space();
             true
         } else if self.scrolling.activate_window(window) {
             self.floating_is_active = match self.floating_is_active {
@@ -4900,10 +4912,60 @@ impl<W: LayoutElement> Workspace<W> {
     /// This is the case with `focused-window-above-floating` when the scrolling space is active.
     /// A scrolling window activated without raising (by focus-follows-mouse) leaves the floating
     /// windows on top.
+    /// Whether the active tiled window is above the floating windows.
     pub fn active_tile_above_floating(&self) -> bool {
         self.options.layout.focused_window_above_floating
             && matches!(self.floating_is_active, FloatingActive::No)
             && self.scrolling.active_window().is_some()
+    }
+
+    /// Whether any tiled window is above the floating windows: with
+    /// `focused-window-above-floating`, the tiled windows focused since a floating window last
+    /// was stay above the floating windows, in focus order.
+    pub fn tiles_above_floating(&self) -> bool {
+        self.options.layout.focused_window_above_floating
+            && (self.active_tile_above_floating()
+                || self.scrolling.tiles().any(|tile| tile.above_floating))
+    }
+
+    /// Which tiles are above the floating windows, for rendering and hit-testing.
+    fn above_floating_part(&self) -> ScrollingPart {
+        ScrollingPart::AboveFloating {
+            active: self.active_tile_above_floating(),
+        }
+    }
+
+    fn below_floating_part(&self) -> ScrollingPart {
+        ScrollingPart::BelowFloating {
+            active: self.active_tile_above_floating(),
+        }
+    }
+
+    /// Makes the floating space active, which brings the floating windows back above all tiled
+    /// windows.
+    fn activate_floating_space(&mut self) {
+        self.floating_is_active = FloatingActive::Yes;
+        self.lower_tiles_below_floating();
+    }
+
+    fn lower_tiles_below_floating(&mut self) {
+        for tile in self.scrolling.tiles_mut() {
+            tile.above_floating = false;
+        }
+    }
+
+    /// Keeps the active tiled window above the floating windows once focus moves on to another
+    /// tiled window.
+    fn remember_tile_above_floating(&mut self) {
+        if !self.options.layout.focused_window_above_floating {
+            self.lower_tiles_below_floating();
+            return;
+        }
+        if self.active_tile_above_floating() {
+            if let Some(tile) = self.scrolling.active_tile_mut() {
+                tile.above_floating = true;
+            }
+        }
     }
 
     pub fn floating_logical_to_size_frac(

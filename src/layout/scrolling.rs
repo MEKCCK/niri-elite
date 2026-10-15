@@ -341,19 +341,22 @@ pub enum MoveTargets {
 pub enum ScrollingPart {
     /// Every tile.
     All,
-    /// Only the active tile, together with the tab indicator of its column and the closing
-    /// windows.
-    ActiveTile,
-    /// Every tile except the active one, without the closing windows.
-    AllButActiveTile,
+    /// The tiles above the floating windows, together with the tab indicators of their columns
+    /// and the closing windows: those focused since a floating window last was, and the active
+    /// tile if `active`.
+    AboveFloating { active: bool },
+    /// The other tiles, without the closing windows.
+    BelowFloating { active: bool },
 }
 
 impl ScrollingPart {
-    fn includes(self, is_active: bool) -> bool {
+    /// Whether the part has a tile, given whether it is above the floating windows on its own
+    /// account and whether it is the active one.
+    fn includes(self, above_floating: bool, is_active: bool) -> bool {
         match self {
             ScrollingPart::All => true,
-            ScrollingPart::ActiveTile => is_active,
-            ScrollingPart::AllButActiveTile => !is_active,
+            ScrollingPart::AboveFloating { active } => above_floating || active && is_active,
+            ScrollingPart::BelowFloating { active } => !(above_floating || active && is_active),
         }
     }
 }
@@ -3860,7 +3863,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
 
         // Draw the closing windows on top of the other windows. When the active tile renders
         // separately above the floating windows, they go on top of it.
-        if layer.is_normal() && part != ScrollingPart::AllButActiveTile {
+        if layer.is_normal() && !matches!(part, ScrollingPart::BelowFloating { .. }) {
             let view_rect = Rectangle::new(Point::from((self.view_pos(), 0.)), self.view_size);
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
@@ -3883,7 +3886,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let is_active_col = col_idx == 0;
 
             // Draw the tab indicator on top.
-            if part.includes(is_active_col) {
+            let col_above_floating = col.tiles.iter().any(|tile| tile.above_floating);
+            if part.includes(col_above_floating, is_active_col) {
                 let pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
                 col.tab_indicator
                     .render(ctx.renderer, pos, &mut |elem| push(elem.into()));
@@ -3892,7 +3896,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             for (tile_idx, (tile, tile_off, visible)) in col.tiles_in_render_order().enumerate() {
                 // The active tile comes first.
                 let is_active_tile = is_active_col && tile_idx == 0;
-                if !part.includes(is_active_tile) {
+                if !part.includes(tile.above_floating, is_active_tile) {
                     continue;
                 }
 
@@ -3936,7 +3940,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             let is_active_col = col_idx == 0;
 
             // Hit the tab indicator.
-            if part.includes(is_active_col)
+            let col_above_floating = col.tiles.iter().any(|tile| tile.above_floating);
+            if part.includes(col_above_floating, is_active_col)
                 && col.display_mode == ColumnDisplay::Tabbed
                 && col.sizing_mode().is_normal()
             {
@@ -3958,7 +3963,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             for (tile_idx, (tile, tile_off, visible)) in col.tiles_in_render_order().enumerate() {
                 // The active tile comes first.
                 let is_active_tile = is_active_col && tile_idx == 0;
-                if !visible || !part.includes(is_active_tile) {
+                if !visible || !part.includes(tile.above_floating, is_active_tile) {
                     continue;
                 }
 

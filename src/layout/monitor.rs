@@ -2119,10 +2119,10 @@ impl<W: LayoutElement> Monitor<W> {
                         let insert_hint_loc = insert_hint_render_loc
                             .filter(|loc| loc.workspace == InsertWorkspace::Existing(ws.id()));
 
-                        // The insert hint goes above the scrolling windows. When the active
-                        // scrolling tile is above the floating windows, put the hint on top of it.
-                        let active_above_floating = ws.active_tile_above_floating();
-                        if active_above_floating {
+                        // The insert hint goes above the scrolling windows. When scrolling tiles
+                        // are above the floating windows, put the hint on top of them.
+                        let tiles_above_floating = ws.tiles_above_floating();
+                        if tiles_above_floating {
                             if let Some(loc) = insert_hint_loc {
                                 self.insert_hint_element.render(
                                     ctx.renderer,
@@ -2147,7 +2147,7 @@ impl<W: LayoutElement> Monitor<W> {
                             push!(),
                         );
 
-                        if !active_above_floating {
+                        if !tiles_above_floating {
                             if let Some(loc) = insert_hint_loc {
                                 self.insert_hint_element.render(
                                     ctx.renderer,
