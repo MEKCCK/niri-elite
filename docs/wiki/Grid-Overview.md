@@ -40,7 +40,8 @@ A band that runs out of room gets another line further out; a window stays in th
 A window on the left or the right can also take the room beside a short row of the block: one at the top beside the first row, one at the bottom beside the last.
 The grid tries three arrangements: windows in the corners above and below the block, windows in the corners beside it, and every window beside it, on its side of the screen, with the block wrapping into more rows; there, a window in the middle goes to the side with less on it, or the side it was on before.
 How wide the rows get and which arrangement it uses are picked to show the windows as large as possible.
-On a workspace with only floating windows, they push each other apart from where they are, like the window overviews of other desktops.
+On a workspace with only floating windows, they go in rows, like in the window overviews of other desktops: top to bottom and left to right by where they are on the screen, every row centered.
+A window stays in the row it was in, and a new one joins the row closest to it, or another row if that shows the windows clearly larger; a row that gets too wide splits in two, and two rows with room merge, before the windows go into new rows altogether.
 
 When windows come and go, the grid keeps the width the rows wrap at and the arrangement as long as they show the windows at least 85% as large as others would, and keeps its scale unless the windows could grow by more than about 7%.
 Opening the grid again starts from what it showed when it closed, the same way, so with nothing changed it shows the same.

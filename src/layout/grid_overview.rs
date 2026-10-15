@@ -4,15 +4,17 @@ use std::time::Duration;
 
 use bands::{Arrangement, BandLine, Bands, ARRANGEMENTS};
 use niri_config::{CornerRadius, GridFocusRingTransition};
+use rows::{Rows, MAX_FLOATING_ROWS};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::{Animation, Clock, LayoutElement, Options, OverviewGesture, OverviewProgress};
-
-mod bands;
 use crate::input::swipe_tracker::SwipeTracker;
 use crate::render_helpers::renderer::NiriRenderer;
+
+mod bands;
+mod rows;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GridDirection {
@@ -1434,6 +1436,8 @@ pub struct GridLayout<W: LayoutElement> {
     arrangement: Option<Arrangement>,
     /// The lines of the floating windows in the bands around the tiled ones.
     lines: Vec<BandLine<W>>,
+    /// Without tiled windows, the row every floating window is in.
+    float_rows: Vec<(W::Id, usize)>,
 }
 
 impl<W: LayoutElement> Clone for GridLayout<W> {
@@ -1445,6 +1449,7 @@ impl<W: LayoutElement> Clone for GridLayout<W> {
             entries: self.entries.clone(),
             arrangement: self.arrangement,
             lines: self.lines.clone(),
+            float_rows: self.float_rows.clone(),
         }
     }
 }
@@ -1475,24 +1480,12 @@ impl<W: LayoutElement> GridLayoutInputs<W> {
 /// Widths, as fractions of the grid's width, that the rows of tiled windows may wrap at. The
 /// layout takes the one that shows the windows the largest.
 const WRAP_WIDTHS: [f64; 5] = [1., 0.85, 0.7, 0.55, 0.42];
-/// The grid keeps the wrap width it had as long as that shows the windows at least this fraction
+/// The grid keeps the wrap width and the arrangement of the bands around the tiled windows, or the
+/// rows of floating windows only, it had as long as that shows the windows at least this fraction
 /// of the largest the others could.
-const KEEP_WRAP_SCALE: f64 = 0.92;
-/// The grid keeps the wrap width and the arrangement of the bands around the tiled windows it had
-/// as long as that shows the windows at least this fraction of the largest the others could.
 const KEEP_ARRANGEMENT_SCALE: f64 = 1. / 1.18;
 /// The grid keeps the scale it had as long as the windows could only grow by less than this.
 const SCALE_GROW_HYSTERESIS: f64 = 1. / 0.93;
-/// How much the block of tiled windows gives way when floating windows push against it, against
-/// 1 for a floating window.
-const BLOCK_MOBILITY: f64 = 0.15;
-/// Rounds of pushing windows apart, and of those, the first ones that also pull every window back
-/// towards where it belongs, by this fraction of the way.
-const PUSH_ROUNDS: usize = 160;
-const PULL_ROUNDS: usize = 96;
-const PULL: f64 = 0.05;
-/// Turning by this angle again and again points every which way without ever lining up.
-const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 /// Windows are never shown larger than they are.
 const MAX_SCALE: f64 = 1.;
 const EPSILON: f64 = 0.000001;
@@ -1506,6 +1499,7 @@ impl<W: LayoutElement> GridLayout<W> {
             entries: Vec::new(),
             arrangement: None,
             lines: Vec::new(),
+            float_rows: Vec::new(),
         }
     }
 
@@ -1542,84 +1536,76 @@ impl<W: LayoutElement> GridLayout<W> {
             .max(0.)
             .min(content.size.w.min(content.size.h) / (items.len() as f64 + 1.));
 
-        let solver = GridSolver::new(items, content, gap);
+        let (groups, floating) = columns_and_floating(items);
         let min_scale = config.min_scale.clamp(0.001, MAX_SCALE);
-        if !solver.groups.is_empty() {
-            let bands = Bands::new(items, area, content, gap, &solver.groups, &solver.floating);
+        if !groups.is_empty() {
+            let bands = Bands::new(items, area, content, gap, &groups, &floating);
             return Self::compute_bands(items, &bands, gap, min_scale, prev);
         }
 
-        // Floating windows only: they push each other apart, shrinking like with tiled windows.
-        let exponents: Vec<f64> = items
-            .iter()
-            .map(|(_, source)| bands::squeeze_exponent(area, source.size))
-            .collect();
-        let mut solver = GridSolver::new(items, content, gap);
-        solver.exponents = exponents.clone();
-        let wraps = if solver.groups.is_empty() {
-            &WRAP_WIDTHS[..1]
-        } else {
-            &WRAP_WIDTHS[..]
-        };
+        let rows = Rows::new(items, area, content, gap);
+        Self::compute_rows(items, &rows, gap, min_scale, prev)
+    }
 
-        // The largest scale for every wrap width; the widest of the largest wins.
-        let results: Vec<(f64, f64, f64)> = wraps
-            .iter()
-            .map(|&wrap| {
-                let (yes, no) = solver.max_scale(wrap, min_scale);
-                (wrap, yes, no)
-            })
-            .collect();
-        let mut best = results[0];
-        for &result in &results {
-            if result.1 > best.1 + EPSILON {
-                best = result;
+    /// Lays out a grid with floating windows only, in rows.
+    ///
+    /// Of every number of rows, the one that shows the windows the largest wins. With `prev`,
+    /// the layout shown before, the windows stay in the rows they were in unless starting over
+    /// shows them clearly larger, and the scale stays unless the windows could grow by more than
+    /// a little.
+    fn compute_rows(
+        items: &[(GridItem<W>, GridSource)],
+        rows: &Rows<W>,
+        gap: f64,
+        min_scale: f64,
+        prev: Option<&GridLayout<W>>,
+    ) -> Self {
+        let mut best: Option<(Vec<Vec<usize>>, f64)> = None;
+        for count in 1..=items.len().min(MAX_FLOATING_ROWS) {
+            let fresh = rows.fresh(count);
+            let scale = rows.max_scale(&fresh, min_scale);
+            if best.as_ref().is_none_or(|(_, b)| scale > b + EPSILON) {
+                best = Some((fresh, scale));
             }
         }
+        let (mut chosen, mut scale) = best.unwrap();
 
-        // Keeping what it showed before unless something else is clearly better, so that small
-        // changes don't rearrange everything.
-        let mut choice = best;
-        let mut kept_scale = false;
+        // The rows the windows were in, or a small change to them, rather than new rows.
         if let Some(prev) = prev {
-            if let Some(&kept) = results
-                .iter()
-                .find(|(wrap, scale, _)| *wrap == prev.wrap && *scale >= best.1 * KEEP_WRAP_SCALE)
-            {
-                choice = kept;
-            }
-            if choice.0 == prev.wrap
-                && prev.scale <= choice.1
-                && choice.1 <= prev.scale * SCALE_GROW_HYSTERESIS
-                && solver.place(choice.0, prev.scale, false).is_some()
-            {
-                choice.1 = prev.scale;
-                kept_scale = true;
+            if let Some(kept) = rows.kept(&prev.float_rows, min_scale) {
+                let mut changes = rows.changes(kept).into_iter();
+                let kept = changes.next().unwrap();
+                let mut near = (rows.max_scale(&kept, min_scale), kept);
+                for change in changes {
+                    let change_scale = rows.max_scale(&change, min_scale);
+                    // Only a change that shows the windows clearly larger.
+                    if change_scale * KEEP_ARRANGEMENT_SCALE > near.0 {
+                        near = (change_scale, change);
+                    }
+                }
+                let (kept_scale, kept) = near;
+                if kept_scale >= scale * KEEP_ARRANGEMENT_SCALE {
+                    chosen = kept;
+                    scale = kept_scale;
+                    if prev.scale <= kept_scale && kept_scale <= prev.scale * SCALE_GROW_HYSTERESIS
+                    {
+                        scale = prev.scale;
+                    }
+                }
             }
         }
-        let (wrap, mut scale, fails) = choice;
-        // The comparison only needed a rough scale; fill the grid exactly.
-        if !kept_scale && fails > scale {
-            scale = solver.narrow_scale(wrap, scale, fails, 14).0;
-        }
 
-        let placed = solver
-            .place(wrap, scale, false)
-            .or_else(|| solver.place(wrap, scale, true))
-            .unwrap_or_default();
-
-        // Every window shows at its own scale, never larger than it is.
+        let placed = rows.place(&chosen, scale);
         let entries = items
             .iter()
             .zip(placed)
-            .zip(&exponents)
-            .map(|(((item, source), (pos, row)), exponent)| {
-                let shown = bands::squeezed_scale(scale, *exponent);
+            .enumerate()
+            .map(|(idx, ((item, _), rect))| {
                 let info = GridEntryInfo {
-                    row,
-                    target_pos: pos,
-                    target_size: source.size.upscale(shown),
-                    target_scale: shown,
+                    row: None,
+                    target_pos: rect.loc,
+                    target_size: rect.size,
+                    target_scale: rows.shown_scale(idx, scale),
                 };
                 (item.clone(), info)
             })
@@ -1627,11 +1613,12 @@ impl<W: LayoutElement> GridLayout<W> {
 
         Self {
             scale,
-            wrap,
+            wrap: 1.,
             gap,
             entries,
             arrangement: None,
             lines: Vec::new(),
+            float_rows: rows.ids(&chosen),
         }
     }
 
@@ -1753,6 +1740,7 @@ impl<W: LayoutElement> GridLayout<W> {
             entries,
             arrangement: Some(arrangement),
             lines: placed.lines,
+            float_rows: Vec::new(),
         }
     }
 
@@ -1798,434 +1786,26 @@ impl<W: LayoutElement> GridLayout<W> {
     }
 }
 
-/// Something being pushed around while placing floating windows: the block of tiled windows, or a
-/// floating window.
-#[derive(Debug, Clone)]
-struct Body {
-    /// Breaks ties in which way two bodies right on top of each other go; the block comes first.
-    id: usize,
-    center: Point<f64, Logical>,
-    size: Size<f64, Logical>,
-    /// Where it belongs, which it is pulled back towards.
-    target: Point<f64, Logical>,
-    /// How much it gives way when pushed.
-    mobility: f64,
-}
-
-impl Body {
-    fn rect(&self) -> Rectangle<f64, Logical> {
-        let half = Point::from((self.size.w / 2., self.size.h / 2.));
-        Rectangle::new(self.center - half, self.size)
-    }
-
-    fn clamp_into(&mut self, area: Rectangle<f64, Logical>) {
-        let middle = rect_center(area);
-        let clamp = |c: f64, half: f64, start: f64, len: f64, middle: f64| {
-            if half * 2. > len {
-                middle
-            } else {
-                c.clamp(start + half, start + len - half)
-            }
+/// The tiled columns among `items`, as ranges of item indices in strip order, a tabbed column with
+/// one item per tab, and the indices of the floating windows.
+fn columns_and_floating<W: LayoutElement>(
+    items: &[(GridItem<W>, GridSource)],
+) -> (Vec<Range<usize>>, Vec<usize>) {
+    let mut groups: Vec<Range<usize>> = Vec::new();
+    let mut floating = Vec::new();
+    for (idx, (item, _)) in items.iter().enumerate() {
+        let Some(col_idx) = item.col_idx() else {
+            floating.push(idx);
+            continue;
         };
-        self.center.x = clamp(
-            self.center.x,
-            self.size.w / 2.,
-            area.loc.x,
-            area.size.w,
-            middle.x,
-        );
-        self.center.y = clamp(
-            self.center.y,
-            self.size.h / 2.,
-            area.loc.y,
-            area.size.h,
-            middle.y,
-        );
-    }
-}
-
-/// How much two rectangles, as (center, size), overlap across and up and down, counting `margin`
-/// around them, if they do.
-fn overlap(
-    a: (Point<f64, Logical>, Size<f64, Logical>),
-    b: (Point<f64, Logical>, Size<f64, Logical>),
-    margin: f64,
-) -> Option<(f64, f64)> {
-    let ox = (a.1.w + b.1.w) / 2. + margin - (b.0.x - a.0.x).abs();
-    let oy = (a.1.h + b.1.h) / 2. + margin - (b.0.y - a.0.y).abs();
-    (ox > 0. && oy > 0.).then_some((ox, oy))
-}
-
-/// Places the items of a [`GridLayout`] for a given wrap width and scale.
-struct GridSolver<'a, W: LayoutElement> {
-    items: &'a [(GridItem<W>, GridSource)],
-    content: Rectangle<f64, Logical>,
-    gap: f64,
-    /// Item indices of the tiled columns, in strip order. A tabbed column has one item per tab.
-    groups: Vec<Range<usize>>,
-    /// Item indices of the floating windows.
-    floating: Vec<usize>,
-    /// How every item shrinks with the scale: it shows at the scale to this power.
-    exponents: Vec<f64>,
-}
-
-impl<'a, W: LayoutElement> GridSolver<'a, W> {
-    fn new(
-        items: &'a [(GridItem<W>, GridSource)],
-        content: Rectangle<f64, Logical>,
-        gap: f64,
-    ) -> Self {
-        let mut groups: Vec<Range<usize>> = Vec::new();
-        let mut floating = Vec::new();
-        for (idx, (item, _)) in items.iter().enumerate() {
-            let Some(col_idx) = item.col_idx() else {
-                floating.push(idx);
-                continue;
-            };
-            match groups.last_mut() {
-                Some(group)
-                    if group.end == idx && items[group.start].0.col_idx() == Some(col_idx) =>
-                {
-                    group.end += 1;
-                }
-                _ => groups.push(idx..idx + 1),
+        match groups.last_mut() {
+            Some(group) if group.end == idx && items[group.start].0.col_idx() == Some(col_idx) => {
+                group.end += 1;
             }
-        }
-        Self {
-            items,
-            content,
-            gap,
-            groups,
-            floating,
-            exponents: vec![1.; items.len()],
+            _ => groups.push(idx..idx + 1),
         }
     }
-
-    /// Roughly the largest scale at which everything fits with the rows wrapping at `wrap`, or
-    /// `min_scale` if nothing does: a scale that fits, and a slightly larger one that doesn't.
-    fn max_scale(&self, wrap: f64, min_scale: f64) -> (f64, f64) {
-        let fits = |scale| self.place(wrap, scale, false).is_some();
-        if fits(MAX_SCALE) {
-            return (MAX_SCALE, MAX_SCALE);
-        }
-        if !fits(min_scale) {
-            return (min_scale, min_scale);
-        }
-        self.narrow_scale(wrap, min_scale, MAX_SCALE, 16)
-    }
-
-    /// Narrows down, in `steps` halvings, the largest scale that fits between `yes`, one that
-    /// does, and `no`, one that doesn't.
-    fn narrow_scale(&self, wrap: f64, mut yes: f64, mut no: f64, steps: u32) -> (f64, f64) {
-        for _ in 0..steps {
-            let mid = (yes + no) / 2.;
-            if self.place(wrap, mid, false).is_some() {
-                yes = mid;
-            } else {
-                no = mid;
-            }
-        }
-        (yes, no)
-    }
-
-    /// The free spot for a window of `size` closest to `target`.
-    ///
-    /// The closest free spot is the target itself, or as close to it as something in the way or
-    /// an edge of the grid lets it get, across or up and down. So the candidates across are the
-    /// target, the edges of the grid, and every position that touches something already placed
-    /// on its left or right; at each of those, up and down likewise.
-    fn find_spot(
-        &self,
-        size: Size<f64, Logical>,
-        target: Point<f64, Logical>,
-        obstacles: &[Rectangle<f64, Logical>],
-    ) -> Option<Point<f64, Logical>> {
-        let content = self.content;
-        if size.w > content.size.w + EPSILON || size.h > content.size.h + EPSILON {
-            return None;
-        }
-
-        let gap = self.gap;
-        let max_x = content.loc.x + content.size.w - size.w;
-        let max_y = content.loc.y + content.size.h - size.h;
-        let mut xs = vec![target.x, content.loc.x, max_x];
-        for r in obstacles {
-            xs.extend([r.loc.x - gap - size.w, r.loc.x + r.size.w + gap]);
-        }
-        // Clamped into the grid, sorted by distance from the target, and without the repeats that
-        // lined-up rows make.
-        let clamp = |coords: &mut Vec<f64>, min: f64, max: f64, target: f64| {
-            for c in coords.iter_mut() {
-                *c = c.clamp(min, max.max(min));
-            }
-            coords.sort_by(f64::total_cmp);
-            coords.dedup_by(|a, b| (*a - *b).abs() < EPSILON);
-            coords.sort_by(|a, b| (*a - target).abs().total_cmp(&(*b - target).abs()));
-        };
-        clamp(&mut xs, content.loc.x, max_x, target.x);
-
-        // Going outwards from the target, so that both loops can stop once nothing closer is
-        // left.
-        let mut best: Option<(f64, Point<f64, Logical>)> = None;
-        let mut blocked: Vec<(f64, f64)> = Vec::new();
-        let mut ys: Vec<f64> = Vec::new();
-        for &x in &xs {
-            let dx = (x - target.x).powi(2);
-            if best.is_some_and(|(best_d, _)| dx >= best_d) {
-                break;
-            }
-
-            // The tops the window can't have at this x: between the ones that just touch each
-            // thing in the way from above and from below.
-            blocked.clear();
-            blocked.extend(
-                obstacles
-                    .iter()
-                    .filter(|r| {
-                        !(x + size.w + gap <= r.loc.x + EPSILON
-                            || r.loc.x + r.size.w + gap <= x + EPSILON)
-                    })
-                    .map(|r| (r.loc.y - gap - size.h, r.loc.y + r.size.h + gap)),
-            );
-            let is_free = |y: f64| {
-                blocked
-                    .iter()
-                    .all(|&(above, below)| y <= above + EPSILON || below <= y + EPSILON)
-            };
-            ys.clear();
-            ys.extend([target.y, content.loc.y, max_y]);
-            for &(above, below) in &blocked {
-                ys.extend([above, below]);
-            }
-            clamp(&mut ys, content.loc.y, max_y, target.y);
-
-            for &y in &ys {
-                let d = dx + (y - target.y).powi(2);
-                if best.is_some_and(|(best_d, _)| d >= best_d) {
-                    break;
-                }
-                if is_free(y) {
-                    best = Some((d, Point::from((x, y))));
-                    break;
-                }
-            }
-        }
-        best.map(|(_, p)| p)
-    }
-
-    /// The top-left corner of every item, and the row of every tiled one, with the rows wrapping
-    /// at `wrap` and everything at `scale`.
-    ///
-    /// `None` if they don't fit. With `force` they are placed anyway, overlapping where they must.
-    #[allow(clippy::type_complexity)]
-    fn place(
-        &self,
-        wrap: f64,
-        scale: f64,
-        force: bool,
-    ) -> Option<Vec<(Point<f64, Logical>, Option<usize>)>> {
-        let content = self.content;
-        let gap = self.gap;
-        let size = |idx: usize| {
-            self.items[idx]
-                .1
-                .size
-                .upscale(bands::squeezed_scale(scale, self.exponents[idx]))
-        };
-        let mut placed = vec![(content.loc, None); self.items.len()];
-
-        let mut bodies = Vec::new();
-
-        // The tiled windows: rows filled in strip order, every row centered, the block in the
-        // middle. A column's tabs stay together, so a row breaks only between columns.
-        let mut cells = Vec::new();
-        if !self.groups.is_empty() {
-            let wrap_width = content.size.w * wrap;
-            let mut rows: Vec<(Range<usize>, f64, f64)> = Vec::new();
-            for (group_idx, group) in self.groups.iter().enumerate() {
-                let width = group.clone().map(|idx| size(idx).w).sum::<f64>()
-                    + gap * (group.len() - 1) as f64;
-                let height = group.clone().map(|idx| size(idx).h).fold(0., f64::max);
-                match rows.last_mut() {
-                    Some((groups, row_width, row_height))
-                        if *row_width + gap + width <= wrap_width + EPSILON =>
-                    {
-                        groups.end = group_idx + 1;
-                        *row_width += gap + width;
-                        *row_height = row_height.max(height);
-                    }
-                    _ => rows.push((group_idx..group_idx + 1, width, height)),
-                }
-            }
-            let block_width = rows.iter().map(|(_, width, _)| *width).fold(0., f64::max);
-            let block_height = rows.iter().map(|(_, _, height)| *height).sum::<f64>()
-                + gap * (rows.len() - 1) as f64;
-            if !force
-                && (block_width > content.size.w + EPSILON
-                    || block_height > content.size.h + EPSILON)
-            {
-                return None;
-            }
-
-            let mut y = 0.;
-            for (row_idx, (groups, row_width, row_height)) in rows.into_iter().enumerate() {
-                let mut x = (block_width - row_width) / 2.;
-                for idx in groups.flat_map(|group_idx| self.groups[group_idx].clone()) {
-                    let size = size(idx);
-                    let pos = Point::from((x, y + (row_height - size.h) / 2.));
-                    cells.push((idx, row_idx, Rectangle::new(pos, size)));
-                    x += size.w + gap;
-                }
-                y += row_height + gap;
-            }
-
-            let middle = rect_center(content);
-            bodies.push(Body {
-                id: 0,
-                center: middle,
-                size: Size::from((block_width, block_height)),
-                target: middle,
-                mobility: BLOCK_MOBILITY,
-            });
-        }
-
-        // The floating windows, starting out where they are on the workspace.
-        for &idx in &self.floating {
-            let size = size(idx);
-            if !force && (size.w > content.size.w + EPSILON || size.h > content.size.h + EPSILON) {
-                return None;
-            }
-            let source = self.items[idx].1;
-            let center = source.pos.map_or_else(
-                || rect_center(content),
-                |pos| pos + Point::from((source.size.w / 2., source.size.h / 2.)),
-            );
-            bodies.push(Body {
-                id: idx + 1,
-                center,
-                size,
-                target: center,
-                mobility: 1.,
-            });
-        }
-
-        // Push everything apart, pulling it back towards where it belongs at first.
-        for body in &mut bodies {
-            body.clamp_into(content);
-        }
-        for round in 0..PUSH_ROUNDS {
-            if round < PULL_ROUNDS {
-                for body in &mut bodies {
-                    body.center += (body.target - body.center).upscale(PULL);
-                }
-            }
-            for i in 0..bodies.len() {
-                for j in i + 1..bodies.len() {
-                    let (head, tail) = bodies.split_at_mut(j);
-                    let (a, b) = (&mut head[i], &mut tail[0]);
-                    let share_a = a.mobility / (a.mobility + b.mobility);
-                    let share_b = 1. - share_a;
-                    let Some((ox, oy)) = overlap((a.center, a.size), (b.center, b.size), gap)
-                    else {
-                        continue;
-                    };
-                    // Two floating windows mostly on top of each other, like ones that opened in
-                    // the same spot, go apart each pair its own way, so that a pile of them
-                    // spreads out all around rather than into one tall column.
-                    let piled = a.id != 0
-                        && b.id != 0
-                        && ox - gap > a.size.w.min(b.size.w) * 0.5
-                        && oy - gap > a.size.h.min(b.size.h) * 0.5;
-                    // Otherwise along the way they overlap less, away from each other.
-                    let tie = if a.id < b.id { 1. } else { -1. };
-                    if piled {
-                        let k = (a.id.min(b.id) * 31 + a.id.max(b.id)) as f64;
-                        let angle = k * GOLDEN_ANGLE;
-                        let (ux, uy) = (angle.cos(), angle.sin());
-                        let t = (ox / ux.abs().max(0.05)).min(oy / uy.abs().max(0.05));
-                        a.center.x -= ux * t * share_a;
-                        a.center.y -= uy * t * share_a;
-                        b.center.x += ux * t * share_b;
-                        b.center.y += uy * t * share_b;
-                    } else if ox < oy {
-                        let d = b.center.x - a.center.x;
-                        let dir = if d != 0. { d.signum() } else { tie };
-                        a.center.x -= dir * ox * share_a;
-                        b.center.x += dir * ox * share_b;
-                    } else {
-                        let d = b.center.y - a.center.y;
-                        let dir = if d != 0. { d.signum() } else { tie };
-                        a.center.y -= dir * oy * share_a;
-                        b.center.y += dir * oy * share_b;
-                    }
-                }
-            }
-            for body in &mut bodies {
-                body.clamp_into(content);
-            }
-        }
-
-        if !force {
-            for i in 0..bodies.len() {
-                for j in i + 1..bodies.len() {
-                    let (a, b) = (&bodies[i], &bodies[j]);
-                    if overlap((a.center, a.size), (b.center, b.size), gap * 0.4).is_some() {
-                        return None;
-                    }
-                }
-            }
-        }
-
-        let mut bodies = bodies.into_iter();
-        let mut obstacles = Vec::new();
-        if !cells.is_empty() {
-            let block = bodies.next().unwrap();
-            let top_left = block.center - Point::from((block.size.w / 2., block.size.h / 2.));
-            for (idx, row, r) in cells {
-                placed[idx] = (top_left + r.loc, Some(row));
-                obstacles.push(Rectangle::new(top_left + r.loc, r.size));
-            }
-        }
-        let mut floating: Vec<Body> = bodies.collect();
-        for body in &floating {
-            obstacles.push(body.rect());
-        }
-
-        // Pushed out of the block, a floating window may have gone further than a gap the block
-        // leaves, like beside a short row, that is closer to where it belongs: then it takes the
-        // gap, the largest windows first.
-        let mut order: Vec<usize> = (0..floating.len()).collect();
-        order.sort_by(|&a, &b| {
-            let area = |body: &Body| body.size.w * body.size.h;
-            area(&floating[b]).total_cmp(&area(&floating[a]))
-        });
-        let first_floating = obstacles.len() - floating.len();
-        for i in order {
-            let body = &floating[i];
-            let others: Vec<_> = obstacles
-                .iter()
-                .enumerate()
-                .filter(|(k, _)| *k != first_floating + i)
-                .map(|(_, r)| *r)
-                .collect();
-            let half = Point::from((body.size.w / 2., body.size.h / 2.));
-            let distance = |center: Point<f64, Logical>| {
-                (center.x - body.target.x).hypot(center.y - body.target.y)
-            };
-            let Some(spot) = self.find_spot(body.size, body.target - half, &others) else {
-                continue;
-            };
-            if distance(spot + half) + EPSILON < distance(body.center) {
-                floating[i].center = spot + half;
-                obstacles[first_floating + i] = floating[i].rect();
-            }
-        }
-
-        for body in floating {
-            placed[body.id - 1] = (body.rect().loc, None);
-        }
-        Some(placed)
-    }
+    (groups, floating)
 }
 
 /// Narrows down, in `steps` halvings, the largest value that `fits` between `yes`, one that does,

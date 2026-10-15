@@ -11336,3 +11336,64 @@ fn grid_gesture_stops_at_closed_and_at_open() {
     let shown = grid_window_visual_rect(&layout, 2);
     assert!((shown.size.w - cell.w).abs() < 0.5, "{shown:?} vs {cell:?}");
 }
+
+#[test]
+fn grid_floating_only_windows_stay_in_their_rows() {
+    use super::grid_overview::{GridItem, GridLayout, GridSource};
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1920., 1080.)));
+    let item = |id: usize, x: f64, y: f64| {
+        (
+            GridItem::Floating { window_id: id },
+            GridSource {
+                size: Size::from((500., 300.)),
+                pos: Some(Point::from((x, y))),
+            },
+        )
+    };
+    // Three windows at the top, three in the middle, three at the bottom.
+    let mut items = Vec::new();
+    for (row, y) in [50., 400., 750.].into_iter().enumerate() {
+        for (col, x) in [50., 700., 1350.].into_iter().enumerate() {
+            items.push(item(row * 3 + col + 1, x, y));
+        }
+    }
+    let middle_y = |layout: &GridLayout<TestWindow>, id: usize| {
+        layout
+            .entries
+            .iter()
+            .find(|(item, _)| *item.window_id() == id)
+            .map(|(_, info)| info.target_pos.y + info.target_size.h / 2.)
+            .unwrap()
+    };
+    // Pairs of windows in the same row.
+    let same_row = |layout: &GridLayout<TestWindow>, ids: &[usize]| {
+        let mut pairs = Vec::new();
+        for &a in ids {
+            for &b in ids {
+                if a < b && (middle_y(layout, a) - middle_y(layout, b)).abs() < 0.5 {
+                    pairs.push((a, b));
+                }
+            }
+        }
+        pairs
+    };
+    let all: Vec<usize> = (1..=9).collect();
+    let before = GridLayout::compute(&items, area, &config, None);
+    let rows = same_row(&before, &all);
+    assert_eq!(rows.len(), 9, "{rows:?}");
+
+    // One more opens at the top: it joins the top row, and the others stay in theirs.
+    items.push(item(10, 400., 60.));
+    let opened = GridLayout::compute(&items, area, &config, Some(&before));
+    assert_eq!(same_row(&opened, &all), rows);
+    assert!((middle_y(&opened, 10) - middle_y(&opened, 1)).abs() < 0.5);
+
+    // One closes in the middle: the others stay in their rows, but for the one that made the
+    // top row long, which may take the room.
+    items.retain(|(item, _)| *item.window_id() != 5);
+    let closed = GridLayout::compute(&items, area, &config, Some(&opened));
+    let left: Vec<usize> = (1..=9).filter(|&id| id != 5).collect();
+    assert_eq!(same_row(&closed, &left), same_row(&opened, &left));
+}
