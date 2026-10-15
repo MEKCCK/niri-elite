@@ -1549,28 +1549,13 @@ impl<W: LayoutElement> GridLayout<W> {
             return Self::compute_bands(items, &bands, gap, min_scale, prev);
         }
 
-        // Floating windows only: they push each other apart, at their sizes squeezed like with
-        // tiled windows, each staying centered where it is.
-        let factors: Vec<f64> = items
+        // Floating windows only: they push each other apart, shrinking like with tiled windows.
+        let exponents: Vec<f64> = items
             .iter()
-            .map(|(_, source)| bands::squeeze_factor(area, source.size))
+            .map(|(_, source)| bands::squeeze_exponent(area, source.size))
             .collect();
-        let squeezed: Vec<_> = items
-            .iter()
-            .zip(&factors)
-            .map(|((item, source), k)| {
-                let size = source.size.upscale(*k);
-                let pos = source.pos.map(|pos| {
-                    pos + Point::from((
-                        (source.size.w - size.w) / 2.,
-                        (source.size.h - size.h) / 2.,
-                    ))
-                });
-                (item.clone(), GridSource { size, pos })
-            })
-            .collect();
-        let mut solver = GridSolver::new(&squeezed, content, gap);
-        solver.max_scales = factors.iter().map(|k| MAX_SCALE / k).collect();
+        let mut solver = GridSolver::new(items, content, gap);
+        solver.exponents = exponents.clone();
         let wraps = if solver.groups.is_empty() {
             &WRAP_WIDTHS[..1]
         } else {
@@ -1627,9 +1612,9 @@ impl<W: LayoutElement> GridLayout<W> {
         let entries = items
             .iter()
             .zip(placed)
-            .zip(&factors)
-            .map(|(((item, source), (pos, row)), k)| {
-                let shown = (scale * k).min(MAX_SCALE);
+            .zip(&exponents)
+            .map(|(((item, source), (pos, row)), exponent)| {
+                let shown = bands::squeezed_scale(scale, *exponent);
                 let info = GridEntryInfo {
                     row,
                     target_pos: pos,
@@ -1750,7 +1735,7 @@ impl<W: LayoutElement> GridLayout<W> {
             .zip(placed.slots)
             .enumerate()
             .map(|(idx, ((item, source), (slot, row)))| {
-                let shown = (scale * bands.factor(idx)).min(MAX_SCALE);
+                let shown = bands.shown_scale(idx, scale);
                 let info = GridEntryInfo {
                     row,
                     target_pos: slot.loc,
@@ -1880,8 +1865,8 @@ struct GridSolver<'a, W: LayoutElement> {
     groups: Vec<Range<usize>>,
     /// Item indices of the floating windows.
     floating: Vec<usize>,
-    /// The largest scale every item shows at, whatever the scale of the others.
-    max_scales: Vec<f64>,
+    /// How every item shrinks with the scale: it shows at the scale to this power.
+    exponents: Vec<f64>,
 }
 
 impl<'a, W: LayoutElement> GridSolver<'a, W> {
@@ -1912,7 +1897,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             gap,
             groups,
             floating,
-            max_scales: vec![f64::INFINITY; items.len()],
+            exponents: vec![1.; items.len()],
         }
     }
 
@@ -2045,7 +2030,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             self.items[idx]
                 .1
                 .size
-                .upscale(scale.min(self.max_scales[idx]))
+                .upscale(bands::squeezed_scale(scale, self.exponents[idx]))
         };
         let mut placed = vec![(content.loc, None); self.items.len()];
 

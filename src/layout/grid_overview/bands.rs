@@ -1,10 +1,11 @@
 //! Where the windows of a grid with tiled windows go: the tiled windows in a block in the
 //! middle, and the floating windows in bands around it, on the side of the screen they are on.
 //!
-//! Every window is laid out at a size squeezed towards the others' first, the way window
-//! overviews of other desktops do it: a big window shows smaller and a small one larger than one
-//! scale for all would show them. How much depends on the window's own size only, so windows
-//! coming and going don't change it.
+//! The more the windows shrink, the less small windows shrink than big ones, the way window
+//! overviews of other desktops keep small windows readable: with room to spare, every window
+//! shows at the same scale, and only as it gets tight do sizes squeeze towards each other. How a
+//! window shrinks depends on its own size and the scale only, so windows coming and going don't
+//! change it but by the scale. The tiled windows shrink alike, as they are alike in height.
 
 use std::ops::Range;
 
@@ -13,9 +14,9 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 use super::{rect_center, GridItem, GridSource, EPSILON};
 use crate::layout::LayoutElement;
 
-/// How much windows are squeezed towards each other's size: a window with 4 times the area of
-/// another shows with 4^(1 - SQUEEZE) times its area.
-const SQUEEZE: f64 = 0.5;
+/// How much less small windows shrink: with everything at `scale`, a window with a fraction `a`
+/// of the screen's area shows at `scale ^ (a ^ SQUEEZE)`.
+const SQUEEZE: f64 = 0.25;
 
 /// Where in thirds of the screen a floating window has to be, across or up and down, to count as
 /// on that side.
@@ -34,11 +35,16 @@ pub(super) enum Arrangement {
     Beside,
 }
 
-/// How much larger than its real `size` a window is laid out on a screen of `area`.
-pub(super) fn squeeze_factor(area: Rectangle<f64, Logical>, size: Size<f64, Logical>) -> f64 {
+/// How a window of `size` on a screen of `area` shrinks: see [`SQUEEZE`].
+pub(super) fn squeeze_exponent(area: Rectangle<f64, Logical>, size: Size<f64, Logical>) -> f64 {
     let screen = (area.size.w * area.size.h).max(1.);
     let own = (size.w * size.h).max(1.);
-    (screen / own).powf(SQUEEZE / 2.)
+    (own / screen).clamp(0.000001, 1.).powf(SQUEEZE)
+}
+
+/// The scale a window with `exponent` shows at with everything at `scale`.
+pub(super) fn squeezed_scale(scale: f64, exponent: f64) -> f64 {
+    scale.min(1.).powf(exponent)
 }
 
 pub(super) const ARRANGEMENTS: [Arrangement; 3] = [
@@ -134,10 +140,8 @@ pub(super) struct Bands<'a, W: LayoutElement> {
     content: Rectangle<f64, Logical>,
     gap: f64,
     groups: &'a [Range<usize>],
-    /// Every item's size squeezed, which it's laid out at, before the scale.
-    sizes: Vec<Size<f64, Logical>>,
-    /// How much larger than its real size every item is laid out.
-    factors: Vec<f64>,
+    /// How every item shrinks with the scale: see [`SQUEEZE`].
+    exponents: Vec<f64>,
     floating: Vec<Floating>,
     /// The middle of the screen.
     middle: Point<f64, Logical>,
@@ -152,14 +156,28 @@ impl<'a, W: LayoutElement> Bands<'a, W> {
         groups: &'a [Range<usize>],
         floating: &[usize],
     ) -> Self {
-        let factors: Vec<f64> = items
+        // The tiled windows shrink alike, by their average size, so that they stay alike in
+        // height.
+        let tiled: Vec<usize> = groups.iter().flat_map(|g| g.clone()).collect();
+        let tiled_size = if tiled.is_empty() {
+            Size::from((1., 1.))
+        } else {
+            let area_sum: f64 = tiled
+                .iter()
+                .map(|&idx| items[idx].1.size.w * items[idx].1.size.h)
+                .sum();
+            let side = (area_sum / tiled.len() as f64).sqrt();
+            Size::from((side, side))
+        };
+        let exponents = items
             .iter()
-            .map(|(_, source)| squeeze_factor(area, source.size))
-            .collect();
-        let sizes = items
-            .iter()
-            .zip(&factors)
-            .map(|((_, source), k)| source.size.upscale(*k))
+            .map(|(item, source)| {
+                if item.col_idx().is_some() {
+                    squeeze_exponent(area, tiled_size)
+                } else {
+                    squeeze_exponent(area, source.size)
+                }
+            })
             .collect();
 
         // Which third of the screen a window is in.
@@ -201,22 +219,20 @@ impl<'a, W: LayoutElement> Bands<'a, W> {
             content,
             gap,
             groups,
-            sizes,
-            factors,
+            exponents,
             floating,
             middle,
         }
     }
 
-    /// How much larger than its real size item `idx` is laid out.
-    pub fn factor(&self, idx: usize) -> f64 {
-        self.factors[idx]
+    /// The scale item `idx` shows at with everything at `scale`.
+    pub fn shown_scale(&self, idx: usize, scale: f64) -> f64 {
+        squeezed_scale(scale, self.exponents[idx])
     }
 
-    /// The size item `idx` shows at with everything at `scale`: squeezed, but never larger than
-    /// it is.
+    /// The size item `idx` shows at with everything at `scale`.
     fn size(&self, idx: usize, scale: f64) -> Size<f64, Logical> {
-        self.sizes[idx].upscale(scale.min(1. / self.factors[idx]))
+        self.items[idx].1.size.upscale(self.shown_scale(idx, scale))
     }
 
     /// The side of the block a floating window goes to.
@@ -364,9 +380,33 @@ impl<'a, W: LayoutElement> Bands<'a, W> {
             Side::Left => 2,
             Side::Right => 3,
         };
+        // With every window beside the block, one in the middle across goes to the side with
+        // less on it, or the side it was on before.
+        let mut beside_area = [0., 0.];
         for (float, f) in self.floating.iter().enumerate() {
             let size = size(f);
-            let side = self.side_of(f, arrangement);
+            let side = if arrangement == Arrangement::Beside && f.across.is_none() {
+                let id = self.items[f.idx].0.window_id();
+                let kept_side = kept.and_then(|kept| {
+                    kept.iter()
+                        .find(|l| &l.id == id && matches!(l.side, Side::Left | Side::Right))
+                        .map(|l| l.side)
+                });
+                kept_side.unwrap_or(if beside_area[0] < beside_area[1] - EPSILON {
+                    Side::Left
+                } else if beside_area[1] < beside_area[0] - EPSILON {
+                    Side::Right
+                } else {
+                    self.side_of(f, arrangement)
+                })
+            } else {
+                self.side_of(f, arrangement)
+            };
+            match side {
+                Side::Left => beside_area[0] += size.w * size.h,
+                Side::Right => beside_area[1] += size.w * size.h,
+                _ => (),
+            }
             let mut best: Option<(usize, (f64, f64, bool))> = None;
             for (pocket_idx, p) in pockets.iter().enumerate() {
                 let row_ok = match (f.up, p.edge) {

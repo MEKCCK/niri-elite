@@ -27,9 +27,9 @@ grid-overview {
 
 ### Layout
 
-Like the window overviews of other desktops, the grid squeezes window sizes towards each other: a big window shows smaller and a small one larger than one scale for all would show them, so that small windows like terminals and dialogs stay readable.
-A window with 4 times the area of another shows with 2 times its area.
-How much a window is squeezed depends only on its own size, so windows coming and going don't change it, and no window shows larger than it is.
+With room to spare, every window shows at the same scale, so windows keep their sizes relative to each other.
+As it gets tight, small windows shrink less than big ones, like in the window overviews of other desktops, so that terminals and dialogs stay readable: a window with a fraction `a` of the screen's area shows at `scale ^ (a ^ 0.25)`.
+The tiled windows shrink alike, so they stay alike in height; and no window shows larger than it is.
 
 Tiled windows form a block in the middle of the grid, in the order of the scrolling layout, left to right, wrapped into rows like text.
 The tabs of a tabbed column stay together in one row.
@@ -38,7 +38,7 @@ Floating windows go around the block in bands, on the side of the screen they ar
 In a band, they keep their order on the screen, each as close to where it is as the others let it.
 A band that runs out of room gets another line further out; a window stays in the line it was in for as long as there's room for it there, so a new window never moves an older one to another line.
 A window on the left or the right can also take the room beside a short row of the block: one at the top beside the first row, one at the bottom beside the last.
-The grid tries three arrangements: windows in the corners above and below the block, windows in the corners beside it, and every window beside it, on its side of the screen, with the block wrapping into more rows.
+The grid tries three arrangements: windows in the corners above and below the block, windows in the corners beside it, and every window beside it, on its side of the screen, with the block wrapping into more rows; there, a window in the middle goes to the side with less on it, or the side it was on before.
 How wide the rows get and which arrangement it uses are picked to show the windows as large as possible.
 On a workspace with only floating windows, they push each other apart from where they are, like the window overviews of other desktops.
 
