@@ -1296,7 +1296,8 @@ impl<W: LayoutElement> Workspace<W> {
 
         go.advance_animations();
         if go.progress.is_none() && !go.open {
-            self.last_grid_layout = go.save_layout();
+            let items = self.grid_overview_items();
+            self.last_grid_layout = Some(go.save_layout(items, self.working_area));
             return;
         }
 

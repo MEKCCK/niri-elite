@@ -306,7 +306,19 @@ impl<W: LayoutElement> GridOverview<W> {
             area,
             config: self.options.grid_overview,
         };
-        let new_layout = if self
+        // Opening again with the same windows as when the grid closed, it shows what it did then,
+        // or keeps what it can of it.
+        let resumed = self
+            .resume_from
+            .take()
+            .and_then(|saved| saved.layout_for(&inputs));
+        let new_layout = if let Some((layout, unchanged)) = resumed {
+            if unchanged {
+                layout
+            } else {
+                GridLayout::compute(items, area, &self.options.grid_overview, Some(&layout))
+            }
+        } else if self
             .layout_inputs
             .as_ref()
             .is_some_and(|old| old.same(&inputs))
@@ -315,17 +327,8 @@ impl<W: LayoutElement> GridOverview<W> {
         } else {
             // While the grid stays open, the new layout starts from the current one, so that it
             // keeps what it can (scale, row wrapping, spots of floating windows) instead of
-            // reshuffling for every small change. Opening again, it starts from what it showed
-            // when it closed the same way, so that it shows the windows where it did then.
-            let resumed = self
-                .resume_from
-                .take()
-                .and_then(|saved| saved.prev_for(items));
-            let prev = if self.open && !old_layout.entries.is_empty() {
-                Some(&old_layout)
-            } else {
-                resumed.as_ref()
-            };
+            // reshuffling for every small change.
+            let prev = (self.open && !old_layout.entries.is_empty()).then_some(&old_layout);
             GridLayout::compute(items, area, &self.options.grid_overview, prev)
         };
         self.layout_inputs = Some(inputs);
@@ -1382,13 +1385,21 @@ impl<W: LayoutElement> GridOverview<W> {
         self.flying_in_windows.clear();
     }
 
-    /// What the grid shows, for the next grid on this workspace to pick up from: see
-    /// [`SavedGridLayout`].
-    pub(super) fn save_layout(self) -> Option<SavedGridLayout<W>> {
-        Some(SavedGridLayout {
-            items: self.layout_inputs?.items,
+    /// What the grid shows, with `items` and `area` as they are as it closes, for the next grid on
+    /// this workspace to pick up from: see [`SavedGridLayout`].
+    pub(super) fn save_layout(
+        self,
+        items: Vec<(GridItem<W>, GridSource)>,
+        area: Rectangle<f64, Logical>,
+    ) -> SavedGridLayout<W> {
+        SavedGridLayout {
+            inputs: GridLayoutInputs {
+                items,
+                area,
+                config: self.options.grid_overview,
+            },
             layout: self.layout,
-        })
+        }
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
@@ -1486,51 +1497,47 @@ impl<W: LayoutElement> Clone for GridLayout<W> {
 
 /// What a grid showed when it closed, and what from.
 ///
-/// Opening the grid again picks up from there like after a change while it stays open, rather
-/// than laying everything out anew: a window that opened while the grid showed took the room that
-/// was left, and laid out anew, it could end up somewhere else entirely.
+/// Opening the grid again with the same windows picks up from there like after a change while it
+/// stays open, rather than laying everything out anew: a window that opened while the grid
+/// showed took the room that was left, and laid out anew, it could end up somewhere else
+/// entirely. With windows opened or closed since, the grid lays everything out anew, like it would
+/// have opening the first time.
 #[derive(Debug)]
 pub(super) struct SavedGridLayout<W: LayoutElement> {
     layout: GridLayout<W>,
-    items: Vec<(GridItem<W>, GridSource)>,
+    inputs: GridLayoutInputs<W>,
 }
 
 impl<W: LayoutElement> SavedGridLayout<W> {
-    /// The layout to keep what it can of for `items`.
+    /// The saved layout, to show as it is if it was computed from the same as `inputs`, or else
+    /// to keep what it can of if it shows the same windows in the same order.
     ///
-    /// Floating windows that moved or changed size since are left out, so that they take the spot
-    /// closest to where they are now like newly opened ones. `None` if none of the windows it
-    /// showed are left.
-    fn prev_for(mut self, items: &[(GridItem<W>, GridSource)]) -> Option<GridLayout<W>> {
-        let saved = self.items;
-        let now = |item: &GridItem<W>| {
-            items
+    /// Floating windows that moved or changed size since are left out of it, so that they take
+    /// the spot closest to where they are now like newly opened ones.
+    fn layout_for(self, inputs: &GridLayoutInputs<W>) -> Option<(GridLayout<W>, bool)> {
+        if self.inputs.same(inputs) {
+            return Some((self.layout, true));
+        }
+        let saved = &self.inputs.items;
+        let same_windows = saved.len() == inputs.items.len()
+            && saved
                 .iter()
-                .find(|(other, _)| other.same_animation_identity(item))
-        };
-        if !self
-            .layout
-            .entries
-            .iter()
-            .any(|(item, _)| now(item).is_some())
-        {
+                .zip(&inputs.items)
+                .all(|((a, _), (b, _))| a.same_item_and_window(b));
+        if !same_windows {
             return None;
         }
-        self.layout.entries.retain(|(item, _)| {
-            if !matches!(item, GridItem::Floating { .. }) {
-                return true;
-            }
-            let then = saved
-                .iter()
-                .find(|(other, _)| other.same_animation_identity(item));
-            match (then, now(item)) {
-                (Some((_, then)), Some((_, now))) => then == now,
-                // Gone since: kept, like a window that closes while the grid shows.
-                (_, None) => true,
-                (None, Some(_)) => false,
-            }
+        let mut layout = self.layout;
+        layout.entries.retain(|(item, _)| {
+            let source = |items: &[(GridItem<W>, GridSource)]| {
+                items
+                    .iter()
+                    .find(|(other, _)| other.same_animation_identity(item))
+                    .map(|(_, source)| *source)
+            };
+            !matches!(item, GridItem::Floating { .. }) || source(saved) == source(&inputs.items)
         });
-        Some(self.layout)
+        Some((layout, false))
     }
 }
 
@@ -1576,6 +1583,9 @@ const SIDE_THRESHOLD: f64 = 0.25;
 /// Floating windows keep to their side of the screen unless that would show the windows smaller
 /// than this fraction of how large they could be otherwise.
 const KEEP_SIDES_SCALE: f64 = 0.6;
+/// While the grid stays open, it keeps what it shows as long as laying everything out anew
+/// wouldn't show the windows more than 25% larger.
+const KEEP_FRESH_SCALE: f64 = 0.8;
 /// Windows are never shown larger than they are.
 const MAX_SCALE: f64 = 1.;
 /// How much a floating window smaller than the largest window is spared from shrinking with it,
@@ -1813,12 +1823,14 @@ impl<W: LayoutElement> GridLayout<W> {
             ))
         });
 
-        // Wrapping the rows anew must leave the floating windows the grid shows where they are, or
-        // where they go zooming out along with everything else; otherwise everything shrinks in
-        // place instead.
+        // For floating windows alone coming and going, wrapping the rows anew must leave the
+        // floating windows the grid shows where they are, or where they go zooming out along with
+        // everything else; otherwise everything shrinks in place instead. Tiled windows coming,
+        // going or moving change the rows anyway, and a row getting too long has to wrap.
         let (arrangement, scale) = match (kept, best) {
             (Some(kept), Some(best))
-                if kept.1 >= best.1 * KEEP_WRAP_SCALE || !solver.keeps_floating(best.0, best.1) =>
+                if kept.1 >= best.1 * KEEP_WRAP_SCALE
+                    || (!solver.tiled_changed && !solver.keeps_floating(best.0, best.1)) =>
             {
                 kept
             }
@@ -1870,7 +1882,7 @@ impl<W: LayoutElement> GridLayout<W> {
             })
             .collect();
 
-        Self {
+        let layout = Self {
             scale,
             wrap: arrangement.wrap,
             floating_order: arrangement.order,
@@ -1878,7 +1890,24 @@ impl<W: LayoutElement> GridLayout<W> {
             side_rule: arrangement.sides,
             gap,
             entries,
+        };
+
+        // Keeping what the grid shows never gets far worse than laying everything out anew: after
+        // windows came and went, it can get stuck, say with the block in the middle and floating
+        // windows above it that it can't grow past. Then it lays everything out anew. With less to
+        // show, as soon as that shows the windows as much larger as the scale grows by anyway.
+        if let Some(prev) = prev {
+            let fresh = Self::compute(items, area, config, None);
+            let keep = if solver.total_area() < prev.total_area() - EPSILON {
+                1. / SCALE_GROW_HYSTERESIS
+            } else {
+                KEEP_FRESH_SCALE
+            };
+            if layout.scale < fresh.scale * keep {
+                return fresh;
+            }
         }
+        layout
     }
 
     /// The area of all the windows, at their size on the workspace.
@@ -1971,8 +2000,10 @@ struct GridSolver<'a, W: LayoutElement> {
     /// The row of every group in the layout the grid shows now: a column that was there keeps
     /// its row, and a new one joins the row of the column before it.
     kept_rows: Option<Vec<usize>>,
-    /// Where each of the kept rows started on the left and at the top, if it was there.
-    kept_row_spots: Vec<(Option<f64>, Option<f64>)>,
+    /// Where each of the kept rows was, if it was there: its left and right edges, and its top.
+    kept_row_spots: Vec<Option<(f64, f64, f64)>>,
+    /// Whether tiled windows came, went or moved since the layout the grid shows now.
+    tiled_changed: bool,
     /// How much larger than the common scale each item shows, by item index: see
     /// [`SMALL_FLOATING_BOOST`].
     boosts: Vec<f64>,
@@ -2128,22 +2159,36 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                 let row_count = compact.last().map_or(0, |last| last + 1);
                 (0..row_count)
                     .map(|c| {
-                        let Some(i) = compact.iter().position(|row| *row == c) else {
-                            return (None, None);
-                        };
+                        let i = compact.iter().position(|row| *row == c)?;
                         let shown = prev
                             .entries
                             .iter()
                             .filter(|(_, info)| info.row == Some(rows[i]))
-                            .map(|(_, info)| info.target_pos);
-                        let left = shown.clone().map(|pos| pos.x).reduce(f64::min);
-                        let top = shown.map(|pos| pos.y).reduce(f64::min);
-                        (left, top)
+                            .map(|(_, info)| info.rect());
+                        let left = shown.clone().map(|r| r.loc.x).reduce(f64::min)?;
+                        let right = shown.clone().map(|r| r.loc.x + r.size.w).reduce(f64::max)?;
+                        let top = shown.map(|r| r.loc.y).reduce(f64::min)?;
+                        Some((left, right, top))
                     })
                     .collect()
             })
             .unwrap_or_default();
         let kept_rows = kept_rows.map(|(compact, _)| compact);
+        // The tiled windows in strip order, column by column, now and in the layout shown.
+        let tiled_now: Vec<(usize, &W::Id)> = items
+            .iter()
+            .filter_map(|(item, _)| Some((item.col_idx()?, item.window_id())))
+            .collect();
+        let tiled_shown: Vec<(usize, &W::Id)> = prev
+            .map(|prev| {
+                prev.entries
+                    .iter()
+                    .filter(|(_, info)| info.row.is_some())
+                    .filter_map(|(item, _)| Some((item.col_idx()?, item.window_id())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tiled_changed = tiled_now != tiled_shown;
 
         Self {
             items,
@@ -2158,6 +2203,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             showing: prev.is_some(),
             kept_rows,
             kept_row_spots,
+            tiled_changed,
             boosts,
         }
     }
@@ -2586,13 +2632,13 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             let content_bottom = content.loc.y + content.size.h;
             let mut y = content.loc.y + (content.size.h - block_height) * y_fraction;
             for (row_idx, (groups, row_width, row_height)) in rows.into_iter().enumerate() {
-                let (left, top) = self
+                let spot = self
                     .kept_row_spots
                     .get(row_idx)
                     .copied()
-                    .filter(|_| stay)
-                    .unwrap_or((None, None));
-                if let Some(top) = top {
+                    .flatten()
+                    .filter(|_| stay);
+                if let Some((_, _, top)) = spot {
                     // Below the row before it, and in the grid if it can be.
                     let lowest = if row_idx == 0 { content.loc.y } else { y };
                     y = top.min(content_bottom - row_height).max(lowest);
@@ -2600,11 +2646,16 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                 if !force && y + row_height > content_bottom + EPSILON {
                     return None;
                 }
-                let row_x = match left {
-                    Some(left) => left.clamp(
-                        content.loc.x,
-                        (content.loc.x + content.size.w - row_width).max(content.loc.x),
-                    ),
+                let row_x = match spot {
+                    // Lined up the way the block is: a row in the middle keeps its middle, getting
+                    // narrower or wider on both sides.
+                    Some((left, right, _)) => {
+                        let anchor = left + (right - left) * x_fraction;
+                        (anchor - row_width * x_fraction).clamp(
+                            content.loc.x,
+                            (content.loc.x + content.size.w - row_width).max(content.loc.x),
+                        )
+                    }
                     None => content.loc.x + (content.size.w - row_width) * x_fraction,
                 };
                 let mut x = row_x;

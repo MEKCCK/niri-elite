@@ -11041,3 +11041,120 @@ fn grid_dropping_a_floating_window_moves_it_on_from_where_it_was_dropped() {
         "{dropped:?} {moving:?} {settled:?}"
     );
 }
+
+/// A layout like a screenshot of the problem: a few tiled windows, and two small floating windows
+/// in the top corners.
+fn grid_corner_floats_layout(tiled: usize) -> Layout<TestWindow> {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=tiled {
+        ops.push(Op::AddWindow {
+            params: half_width_window(id),
+        });
+    }
+    for (id, x) in [(100, 40.), (101, 1000.)] {
+        let mut params = TestWindowParams::new(id);
+        params.is_floating = true;
+        params.bbox = Rectangle::from_size(Size::from((240, 180)));
+        ops.push(Op::AddWindow { params });
+        ops.push(Op::MoveFloatingWindow {
+            id: Some(id),
+            x: PositionChange::SetFixed(x),
+            y: PositionChange::SetFixed(40.),
+            animate: false,
+        });
+    }
+    check_ops(ops)
+}
+
+/// A tiled window about half as wide as the output, like a terminal in a half-width column.
+fn half_width_window(id: usize) -> TestWindowParams {
+    let mut params = TestWindowParams::new(id);
+    params.bbox = Rectangle::from_size(Size::from((620, 680)));
+    params
+}
+
+fn grid_rows(layout: &Layout<TestWindow>) -> usize {
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    go.layout
+        .entries
+        .iter()
+        .filter_map(|(_, info)| info.row)
+        .max()
+        .map_or(0, |row| row + 1)
+}
+
+fn grid_scale(layout: &Layout<TestWindow>) -> f64 {
+    layout
+        .active_workspace()
+        .unwrap()
+        .grid_overview()
+        .unwrap()
+        .layout
+        .scale
+}
+
+#[test]
+fn grid_wraps_windows_opened_while_it_was_closed() {
+    let mut layout = grid_corner_floats_layout(2);
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
+    // Many more tiled windows open while the grid is closed.
+    for id in 3..=14 {
+        check_ops_on_layout(
+            &mut layout,
+            [Op::AddWindow {
+                params: half_width_window(id),
+            }],
+        );
+    }
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleGridOverview, Op::CompleteAnimations],
+    );
+
+    // Opening the grid, they wrap into rows as if it opened the first time, rather than all
+    // joining the one row the grid showed last time.
+    let mut fresh = grid_corner_floats_layout(14);
+    check_ops_on_layout(&mut fresh, [Op::ToggleGridOverview, Op::CompleteAnimations]);
+    assert!(grid_rows(&layout) > 1);
+    approx::assert_abs_diff_eq!(grid_scale(&layout), grid_scale(&fresh), epsilon = 0.001);
+}
+
+#[test]
+fn grid_wraps_windows_opening_while_it_shows() {
+    let mut layout = grid_corner_floats_layout(2);
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleGridOverview, Op::CompleteAnimations],
+    );
+    for id in 3..=14 {
+        check_ops_on_layout(
+            &mut layout,
+            [
+                Op::AddWindow {
+                    params: half_width_window(id),
+                },
+                Op::CompleteAnimations,
+            ],
+        );
+    }
+
+    // The rows wrap anew once one row gets too long, rather than all windows ending up in one
+    // tiny row.
+    let mut fresh = grid_corner_floats_layout(14);
+    check_ops_on_layout(&mut fresh, [Op::ToggleGridOverview, Op::CompleteAnimations]);
+    assert!(grid_rows(&layout) > 1, "one row at {}", grid_scale(&layout));
+    assert!(
+        grid_scale(&layout) >= grid_scale(&fresh) / 1.15 - 0.001,
+        "{} vs {} fresh",
+        grid_scale(&layout),
+        grid_scale(&fresh)
+    );
+}
