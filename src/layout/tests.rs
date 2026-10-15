@@ -11122,3 +11122,20 @@ fn grid_spreads_floating_windows_that_opened_on_top_of_each_other() {
         }
     }
 }
+
+#[test]
+fn minimized_window_moved_away_while_the_grid_closes_shows_at_once() {
+    let mut params = TestWindowParams::new(2);
+    params.bbox = Rectangle::from_size(Size::from((1, 1)));
+    check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow { params },
+        Op::MinimizeWindow(2),
+        Op::ToggleGridOverview,
+        Op::CloseGridOverview,
+        Op::MoveWindowToWorkspace {
+            window_id: Some(2),
+            workspace_idx: 1,
+        },
+    ]);
+}

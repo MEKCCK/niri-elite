@@ -2324,6 +2324,8 @@ impl<W: LayoutElement> Workspace<W> {
             removed.tile.window_mut().set_minimized(false);
             removed.tile.window_mut().set_suspended(false);
             removed.tile.minimized_at = None;
+            // It may be fading out with the grid closing; restored, it shows right away.
+            removed.tile.ensure_alpha_animates_to_1();
         }
 
         if let Some(output) = &self.output {
