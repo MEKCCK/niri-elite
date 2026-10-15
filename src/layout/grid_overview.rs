@@ -129,6 +129,8 @@ pub struct GridOverview<W: LayoutElement> {
     pub layout: GridLayout<W>,
     /// What the layout was last computed from, to skip recomputing an unchanged one.
     layout_inputs: Option<GridLayoutInputs<W>>,
+    /// What the grid showed when it last closed on this workspace, for this one to pick up from.
+    pub(super) resume_from: Option<SavedGridLayout<W>>,
     /// Index of the focused cell in `layout.entries`.
     pub focus: usize,
     /// Whether `focus` is only the first cell because nothing else was there to focus.
@@ -201,6 +203,7 @@ impl<W: LayoutElement> GridOverview<W> {
             progress: None,
             layout: GridLayout::empty(),
             layout_inputs: None,
+            resume_from: None,
             focus: 0,
             focus_is_fallback: false,
             focused_window: None,
@@ -312,8 +315,17 @@ impl<W: LayoutElement> GridOverview<W> {
         } else {
             // While the grid stays open, the new layout starts from the current one, so that it
             // keeps what it can (scale, row wrapping, spots of floating windows) instead of
-            // reshuffling for every small change.
-            let prev = (self.open && !old_layout.entries.is_empty()).then_some(&old_layout);
+            // reshuffling for every small change. Opening again, it starts from what it showed
+            // when it closed the same way, so that it shows the windows where it did then.
+            let resumed = self
+                .resume_from
+                .take()
+                .and_then(|saved| saved.prev_for(items));
+            let prev = if self.open && !old_layout.entries.is_empty() {
+                Some(&old_layout)
+            } else {
+                resumed.as_ref()
+            };
             GridLayout::compute(items, area, &self.options.grid_overview, prev)
         };
         self.layout_inputs = Some(inputs);
@@ -1370,6 +1382,15 @@ impl<W: LayoutElement> GridOverview<W> {
         self.flying_in_windows.clear();
     }
 
+    /// What the grid shows, for the next grid on this workspace to pick up from: see
+    /// [`SavedGridLayout`].
+    pub(super) fn save_layout(self) -> Option<SavedGridLayout<W>> {
+        Some(SavedGridLayout {
+            items: self.layout_inputs?.items,
+            layout: self.layout,
+        })
+    }
+
     pub fn are_animations_ongoing(&self) -> bool {
         self.progress.as_ref().map_or(false, |p| p.is_animation())
             || self.rearrange_anim.is_some()
@@ -1444,6 +1465,56 @@ impl<W: LayoutElement> Clone for GridLayout<W> {
             gap: self.gap,
             entries: self.entries.clone(),
         }
+    }
+}
+
+/// What a grid showed when it closed, and what from.
+///
+/// Opening the grid again picks up from there like after a change while it stays open, rather
+/// than laying everything out anew: a window that opened while the grid showed took the room that
+/// was left, and laid out anew, it could end up somewhere else entirely.
+#[derive(Debug)]
+pub(super) struct SavedGridLayout<W: LayoutElement> {
+    layout: GridLayout<W>,
+    items: Vec<(GridItem<W>, GridSource)>,
+}
+
+impl<W: LayoutElement> SavedGridLayout<W> {
+    /// The layout to keep what it can of for `items`.
+    ///
+    /// Floating windows that moved or changed size since are left out, so that they take the spot
+    /// closest to where they are now like newly opened ones. `None` if none of the windows it
+    /// showed are left.
+    fn prev_for(mut self, items: &[(GridItem<W>, GridSource)]) -> Option<GridLayout<W>> {
+        let saved = self.items;
+        let now = |item: &GridItem<W>| {
+            items
+                .iter()
+                .find(|(other, _)| other.same_animation_identity(item))
+        };
+        if !self
+            .layout
+            .entries
+            .iter()
+            .any(|(item, _)| now(item).is_some())
+        {
+            return None;
+        }
+        self.layout.entries.retain(|(item, _)| {
+            if !matches!(item, GridItem::Floating { .. }) {
+                return true;
+            }
+            let then = saved
+                .iter()
+                .find(|(other, _)| other.same_animation_identity(item));
+            match (then, now(item)) {
+                (Some((_, then)), Some((_, now))) => then == now,
+                // Gone since: kept, like a window that closes while the grid shows.
+                (_, None) => true,
+                (None, Some(_)) => false,
+            }
+        });
+        Some(self.layout)
     }
 }
 

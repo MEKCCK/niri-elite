@@ -10782,3 +10782,74 @@ fn floating_focus_left_goes_to_the_window_alongside() {
     layout.focus_down();
     assert_eq!(layout.focus().map(|win| *win.id()), Some(3));
 }
+
+#[test]
+fn grid_opens_again_the_way_it_closed() {
+    let mut floating = TestWindowParams::new(4);
+    floating.is_floating = true;
+    floating.bbox = Rectangle::from_size(Size::from((900, 700)));
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(3),
+        },
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+        // A floating window opens while the grid shows: it takes the room that is left.
+        Op::AddWindow { params: floating },
+        Op::CompleteAnimations,
+    ]);
+    let cells = |layout: &Layout<TestWindow>| {
+        let ws = layout.active_workspace().unwrap();
+        let go = ws.grid_overview().unwrap();
+        let mut cells: Vec<_> = go
+            .layout
+            .entries
+            .iter()
+            .map(|(item, info)| (*item.window_id(), info.rect()))
+            .collect();
+        cells.sort_by_key(|(id, _)| *id);
+        cells
+    };
+    let shown = cells(&layout);
+
+    // Opened again, everything is where it was, rather than laid out anew, which can put the
+    // floating window somewhere else.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
+    assert_eq!(cells(&layout), shown);
+
+    // A floating window moved in the meantime takes the spot closest to where it is now.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+            Op::MoveFloatingWindow {
+                id: Some(4),
+                x: PositionChange::SetFixed(0.),
+                y: PositionChange::SetFixed(0.),
+                animate: false,
+            },
+            Op::ToggleGridOverview,
+            Op::CompleteAnimations,
+        ],
+    );
+    let moved = cells(&layout);
+    let (_, before) = shown.iter().find(|(id, _)| *id == 4).unwrap();
+    let (_, after) = moved.iter().find(|(id, _)| *id == 4).unwrap();
+    assert_ne!(after, before);
+}

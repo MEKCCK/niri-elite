@@ -23,7 +23,7 @@ use super::floating::{FloatingSpace, FloatingSpaceRenderElement};
 use super::focus_ring::FocusRingRenderElement;
 use super::grid_overview::{
     GridDirection, GridEntryInfo, GridItem, GridOverview, GridRingTarget, GridSource,
-    GridTabTarget, MinimizedHighlightEntry,
+    GridTabTarget, MinimizedHighlightEntry, SavedGridLayout,
 };
 use super::scrolling::{
     Column, ColumnWidth, MoveTargets, ScrollDirection, ScrollingPart, ScrollingSpace,
@@ -134,6 +134,8 @@ pub struct Workspace<W: LayoutElement> {
 
     /// Grid overview state for this workspace.
     pub(super) grid_overview: Option<GridOverview<W>>,
+    /// What the grid overview showed when it last closed, for the next one to pick up from.
+    last_grid_layout: Option<SavedGridLayout<W>>,
 
     /// Unique ID of this workspace.
     id: WorkspaceId,
@@ -312,6 +314,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             grid_overview: None,
+            last_grid_layout: None,
             id: WorkspaceId::next(),
         }
     }
@@ -375,6 +378,7 @@ impl<W: LayoutElement> Workspace<W> {
             name: config.map(|c| c.name.0),
             layout_config,
             grid_overview: None,
+            last_grid_layout: None,
             id: WorkspaceId::next(),
         }
     }
@@ -498,6 +502,7 @@ impl<W: LayoutElement> Workspace<W> {
                 }
             } else {
                 let mut go = GridOverview::new(self.clock.clone(), self.options.clone());
+                go.resume_from = self.last_grid_layout.take();
                 go.saved_active_window_id = self.active_window().map(|w| w.id().clone());
                 go.saved_view_offset = self.scrolling.view_pos();
 
@@ -1260,6 +1265,7 @@ impl<W: LayoutElement> Workspace<W> {
 
         go.advance_animations();
         if go.progress.is_none() && !go.open {
+            self.last_grid_layout = go.save_layout();
             return;
         }
 

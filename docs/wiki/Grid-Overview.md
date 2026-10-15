@@ -47,7 +47,8 @@ While the grid stays open, it keeps what it can when windows come and go:
 - The block of tiled windows stays on its side of the grid.
 - The scale doesn't grow while windows open, and only grows noticeably when windows close; floating windows then move out along with the block.
 
-Closing and opening the grid lays everything out afresh.
+Opening the grid again picks up from where it was when it closed, the same way: windows show where they did then, windows that opened or closed in the meantime come and go like they would have with the grid open, and a floating window that moved or changed size takes the free spot closest to where it is now.
+The very first time on a workspace, the grid lays everything out afresh.
 
 Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
 Dragging a floating window moves it on the screen.
