@@ -10907,3 +10907,92 @@ fn toggle_window_floating_switches_the_focused_cell_in_the_grid() {
     assert!(layout.is_grid_overview_open());
     assert_eq!(layout.grid_focused_window_id(), Some(1));
 }
+
+#[test]
+fn grid_dropping_a_floating_window_moves_it_on_from_where_it_was_dropped() {
+    let mut floating = TestWindowParams::new(3);
+    floating.is_floating = true;
+    floating.bbox = Rectangle::from_size(Size::from((500, 300)));
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        Op::AddWindow {
+            params: TestWindowParams::new(1),
+        },
+        Op::AddWindow {
+            params: TestWindowParams::new(2),
+        },
+        Op::AddWindow { params: floating },
+        Op::ToggleGridOverview,
+        Op::CompleteAnimations,
+    ]);
+
+    // The tiled windows show in the middle and the floating window right of them. Grab the
+    // floating window in the middle and drop it into the room on the left, a bit lower.
+    let (output, start, _) = grid_window_point(&layout, 3, 0.5, 0.5);
+    let before = grid_window_visual_rect(&layout, 3);
+    let delta = Point::from((-650., 100.));
+    assert!(layout.interactive_move_begin(3, &output, start));
+    // Past the threshold the grab turns into a move, then the window follows the pointer.
+    let nudge = Point::from((-30., 0.));
+    assert!(layout.interactive_move_update(&3, nudge, output.clone(), start + nudge));
+    assert!(layout.interactive_move_update(&3, delta - nudge, output.clone(), start + delta));
+    let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move else {
+        panic!("expected an interactive move");
+    };
+    let let_go = Rectangle::new(
+        move_.tile_render_location(1.),
+        move_.tile.tile_size().upscale(move_.total_scale(1.)),
+    );
+    layout.interactive_move_end(&3);
+
+    // It lands where it was let go of, rather than wherever its top left corner would put its
+    // middle, and it shows there right away.
+    let center = |r: Rectangle<f64, Logical>| r.loc + r.size.downscale(2.).to_point();
+    let dropped = grid_window_visual_rect(&layout, 3);
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    let settled = grid_window_visual_rect(&layout, 3);
+    let moved = center(settled) - center(before);
+    assert!(moved.x < -500. && moved.y > 50., "{before:?} {settled:?}");
+    for (what, rect) in [("shows", dropped), ("lands", settled)] {
+        let off = center(rect) - center(let_go);
+        assert!(
+            off.x.abs() < 2. && off.y.abs() < 2.,
+            "let go at {let_go:?}, but {what} at {rect:?}"
+        );
+    }
+
+    // Dropped onto the tiled windows, it can't stay there: it moves on to the closest free spot
+    // from where it was let go of, rather than jumping there.
+    let (output, start, _) = grid_window_point(&layout, 3, 0.5, 0.5);
+    let tiled = grid_window_visual_rect(&layout, 1);
+    let delta = center(tiled) - start;
+    let nudge = Point::from((30., 0.));
+    assert!(layout.interactive_move_begin(3, &output, start));
+    assert!(layout.interactive_move_update(&3, nudge, output.clone(), start + nudge));
+    assert!(layout.interactive_move_update(&3, delta - nudge, output.clone(), start + delta));
+    let Some(InteractiveMoveState::Moving(move_)) = &layout.interactive_move else {
+        panic!("expected an interactive move");
+    };
+    let let_go = Rectangle::new(
+        move_.tile_render_location(1.),
+        move_.tile.tile_size().upscale(move_.total_scale(1.)),
+    );
+    layout.interactive_move_end(&3);
+    let dropped = grid_window_visual_rect(&layout, 3);
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 50 }]);
+    let moving = grid_window_visual_rect(&layout, 3);
+    check_ops_on_layout(&mut layout, [Op::CompleteAnimations]);
+    let settled = grid_window_visual_rect(&layout, 3);
+    let off = center(dropped) - center(let_go);
+    assert!(
+        off.x.abs() < 2. && off.y.abs() < 2.,
+        "{let_go:?} {dropped:?}"
+    );
+    assert!(!tiled.overlaps(settled), "{tiled:?} {settled:?}");
+    let way = center(settled) - center(dropped);
+    let gone = center(moving) - center(dropped);
+    assert!(
+        gone.x * way.x + gone.y * way.y > 0. && moving != settled,
+        "{dropped:?} {moving:?} {settled:?}"
+    );
+}

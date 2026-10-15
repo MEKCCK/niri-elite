@@ -5246,6 +5246,7 @@ impl<W: LayoutElement> Layout<W> {
                 let win_id = move_.tile.window().id().clone();
                 let tile_render_loc = move_.tile_render_location(zoom);
                 let restore_to_floating = move_.tile.restore_to_floating;
+                let visual_scale = move_.visual_scale;
 
                 let ws_idx = match insert_ws {
                     InsertWorkspace::Existing(ws_id) => mon.idx_of_ws(ws_id).unwrap(),
@@ -5298,7 +5299,17 @@ impl<W: LayoutElement> Layout<W> {
                         match insert_ws {
                             InsertWorkspace::Existing(_) => {
                                 if let Some(offset) = offset {
-                                    let pos = (tile_render_loc - offset).downscale(zoom);
+                                    let mut pos = (tile_render_loc - offset).downscale(zoom);
+                                    // The grid shows a floating window around where its middle
+                                    // is, at a smaller scale: put the middle where it was let go.
+                                    if mon.workspaces[ws_idx].is_grid_overview_open() {
+                                        let size = tile.tile_size();
+                                        let shown = size.upscale(visual_scale);
+                                        pos += Point::from((
+                                            (shown.w - size.w) / 2.,
+                                            (shown.h - size.h) / 2.,
+                                        ));
+                                    }
                                     let pos =
                                         mon.workspaces[ws_idx].floating_logical_to_size_frac(pos);
                                     tile.floating_pos = Some(pos);
@@ -5343,6 +5354,13 @@ impl<W: LayoutElement> Layout<W> {
                     // maximized. Its own state only says fullscreen, so restore the column's.
                     if move_.is_maximized && matches!(position, InsertPosition::NewColumn(_)) {
                         ws.set_maximized(&win_id, true);
+                    }
+
+                    // The grid moves the window on from where it was let go of, rather than showing
+                    // it in its spot right away.
+                    if let Some(offset) = offset {
+                        let pos = (tile_render_loc - offset).downscale(zoom);
+                        ws.start_grid_cell_at(&win_id, pos, visual_scale);
                     }
 
                     if preserve_grid_move_animations {

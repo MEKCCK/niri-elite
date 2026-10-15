@@ -1162,6 +1162,37 @@ impl<W: LayoutElement> Workspace<W> {
         }
     }
 
+    /// Makes the cell of `window`, which is about to join the open grid, start out at `pos` and
+    /// `scale`, like where it was dropped, rather than right in its spot. A window that joins a
+    /// cell the grid shows already moves along with that cell instead.
+    pub(super) fn start_grid_cell_at(
+        &mut self,
+        window: &W::Id,
+        pos: Point<f64, Logical>,
+        scale: f64,
+    ) {
+        let Some(item) = self.grid_item_for_window(window) else {
+            return;
+        };
+        let Some(go) = self.grid_overview.as_mut().filter(|go| go.open) else {
+            return;
+        };
+        if go
+            .layout
+            .entries
+            .iter()
+            .any(|(entry, _)| entry.same_animation_identity(&item))
+        {
+            return;
+        }
+        go.entry_positions
+            .retain(|(entry, _)| !entry.same_animation_identity(&item));
+        go.entry_scales
+            .retain(|(entry, _)| !entry.same_animation_identity(&item));
+        go.entry_positions.push((item.clone(), pos));
+        go.entry_scales.push((item, scale));
+    }
+
     pub fn grid_window_was_added_while_open(&self, id: &W::Id) -> bool {
         self.grid_overview
             .as_ref()
