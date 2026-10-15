@@ -2322,9 +2322,10 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
 
     /// The free spot for a window of `size` closest to `target`.
     ///
-    /// The candidates are the target itself, the edges of the grid, and every position that
-    /// touches or lines up with something already placed: the closest free spot is always one of
-    /// those.
+    /// The closest free spot is the target itself, or as close to it as something in the way or
+    /// an edge of the grid lets it get, across or up and down. So the candidates across are the
+    /// target, the edges of the grid, and every position that touches something already placed
+    /// on its left or right; at each of those, up and down likewise.
     fn find_spot(
         &self,
         size: Size<f64, Logical>,
@@ -2337,28 +2338,11 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
         }
 
         let gap = self.gap;
-        let is_free = |p: Point<f64, Logical>| {
-            obstacles.iter().all(|r| {
-                p.x + size.w + gap <= r.loc.x + EPSILON
-                    || r.loc.x + r.size.w + gap <= p.x + EPSILON
-                    || p.y + size.h + gap <= r.loc.y + EPSILON
-                    || r.loc.y + r.size.h + gap <= p.y + EPSILON
-            })
-        };
-
         let max_x = content.loc.x + content.size.w - size.w;
         let max_y = content.loc.y + content.size.h - size.h;
         let mut xs = vec![target.x, content.loc.x, max_x];
-        let mut ys = vec![target.y, content.loc.y, max_y];
         for r in obstacles {
-            let (right, bottom) = (r.loc.x + r.size.w, r.loc.y + r.size.h);
-            xs.extend([r.loc.x - gap - size.w, right + gap, r.loc.x, right - size.w]);
-            ys.extend([
-                r.loc.y - gap - size.h,
-                bottom + gap,
-                r.loc.y,
-                bottom - size.h,
-            ]);
+            xs.extend([r.loc.x - gap - size.w, r.loc.x + r.size.w + gap]);
         }
         // Clamped into the grid, sorted by distance from the target, and without the repeats that
         // lined-up rows make.
@@ -2371,24 +2355,49 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             coords.sort_by(|a, b| (*a - target).abs().total_cmp(&(*b - target).abs()));
         };
         clamp(&mut xs, content.loc.x, max_x, target.x);
-        clamp(&mut ys, content.loc.y, max_y, target.y);
 
         // Going outwards from the target, so that both loops can stop once nothing closer is
         // left.
         let mut best: Option<(f64, Point<f64, Logical>)> = None;
+        let mut blocked: Vec<(f64, f64)> = Vec::new();
+        let mut ys: Vec<f64> = Vec::new();
         for &x in &xs {
             let dx = (x - target.x).powi(2);
             if best.is_some_and(|(best_d, _)| dx >= best_d) {
                 break;
             }
+
+            // The tops the window can't have at this x: between the ones that just touch each
+            // thing in the way from above and from below.
+            blocked.clear();
+            blocked.extend(
+                obstacles
+                    .iter()
+                    .filter(|r| {
+                        !(x + size.w + gap <= r.loc.x + EPSILON
+                            || r.loc.x + r.size.w + gap <= x + EPSILON)
+                    })
+                    .map(|r| (r.loc.y - gap - size.h, r.loc.y + r.size.h + gap)),
+            );
+            let is_free = |y: f64| {
+                blocked
+                    .iter()
+                    .all(|&(above, below)| y <= above + EPSILON || below <= y + EPSILON)
+            };
+            ys.clear();
+            ys.extend([target.y, content.loc.y, max_y]);
+            for &(above, below) in &blocked {
+                ys.extend([above, below]);
+            }
+            clamp(&mut ys, content.loc.y, max_y, target.y);
+
             for &y in &ys {
                 let d = dx + (y - target.y).powi(2);
                 if best.is_some_and(|(best_d, _)| d >= best_d) {
                     break;
                 }
-                let p = Point::from((x, y));
-                if is_free(p) {
-                    best = Some((d, p));
+                if is_free(y) {
+                    best = Some((d, Point::from((x, y))));
                     break;
                 }
             }
