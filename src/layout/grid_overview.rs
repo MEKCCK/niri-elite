@@ -1394,9 +1394,12 @@ impl<W: LayoutElement> GridOverview<W> {
 
 #[derive(Debug)]
 pub struct GridLayout<W: LayoutElement> {
-    /// The scale all windows are shown at. It is the same for every window, so that their sizes
-    /// compare like they do on the workspace.
+    /// The scale the tiled windows are shown at, all of them alike, so that their sizes compare
+    /// like they do on the workspace.
     pub scale: f64,
+    /// The scale the floating windows are shown at, all of them alike too. With room around the
+    /// tiled windows, it is larger than theirs.
+    pub floating_scale: f64,
     /// The width the rows of tiled windows wrap at, as a fraction of the grid's width.
     pub wrap: f64,
     pub gap: f64,
@@ -1407,6 +1410,7 @@ impl<W: LayoutElement> Clone for GridLayout<W> {
     fn clone(&self) -> Self {
         Self {
             scale: self.scale,
+            floating_scale: self.floating_scale,
             wrap: self.wrap,
             gap: self.gap,
             entries: self.entries.clone(),
@@ -1464,6 +1468,7 @@ impl<W: LayoutElement> GridLayout<W> {
     pub fn empty() -> Self {
         Self {
             scale: 1.,
+            floating_scale: 1.,
             wrap: 1.,
             gap: 0.,
             entries: Vec::new(),
@@ -1476,8 +1481,9 @@ impl<W: LayoutElement> GridLayout<W> {
     /// a block in the middle in strip order, wrapped into rows, with the tabs of a column kept in
     /// one row. Floating windows start out where they are on the workspace, and push each other
     /// and the block apart until nothing overlaps; one that is in a gap the block leaves, like
-    /// beside a short row, stays there. With `prev`, the layout shown before, the new one keeps
-    /// its wrap width and scale unless another one is clearly better.
+    /// beside a short row, stays there. Then the floating windows grow, all alike, as far as the
+    /// room around the block lets them. With `prev`, the layout shown before, the new one keeps
+    /// its wrap width and scales unless others are clearly better.
     pub fn compute(
         items: &[(GridItem<W>, GridSource)],
         area: Rectangle<f64, Logical>,
@@ -1540,7 +1546,9 @@ impl<W: LayoutElement> GridLayout<W> {
             if choice.0 == prev.wrap
                 && prev.scale <= choice.1
                 && choice.1 <= prev.scale * SCALE_GROW_HYSTERESIS
-                && solver.place(choice.0, prev.scale, false).is_some()
+                && solver
+                    .place(choice.0, prev.scale, prev.scale, false)
+                    .is_some()
             {
                 choice.1 = prev.scale;
                 kept_scale = true;
@@ -1552,15 +1560,41 @@ impl<W: LayoutElement> GridLayout<W> {
             scale = solver.narrow_scale(wrap, scale, fails, 14).0;
         }
 
+        // Floating windows show larger where the room the tiled ones leave lets them.
+        let mut floating_scale = scale;
+        let fits = |floating_scale| solver.place(wrap, scale, floating_scale, false).is_some();
+        if !solver.groups.is_empty() && !solver.floating.is_empty() && fits(scale) {
+            floating_scale = if fits(MAX_SCALE) {
+                MAX_SCALE
+            } else {
+                bisect(scale, MAX_SCALE, 14, fits).0
+            };
+            if let Some(prev) = prev {
+                if prev.wrap == wrap
+                    && prev.scale == scale
+                    && prev.floating_scale <= floating_scale
+                    && floating_scale <= prev.floating_scale * SCALE_GROW_HYSTERESIS
+                    && fits(prev.floating_scale)
+                {
+                    floating_scale = prev.floating_scale;
+                }
+            }
+        }
+
         let placed = solver
-            .place(wrap, scale, false)
-            .or_else(|| solver.place(wrap, scale, true))
+            .place(wrap, scale, floating_scale, false)
+            .or_else(|| solver.place(wrap, scale, floating_scale, true))
             .unwrap_or_default();
 
         let entries = items
             .iter()
             .zip(placed)
             .map(|((item, source), (pos, row))| {
+                let scale = if item.col_idx().is_some() {
+                    scale
+                } else {
+                    floating_scale
+                };
                 let info = GridEntryInfo {
                     row,
                     target_pos: pos,
@@ -1573,6 +1607,7 @@ impl<W: LayoutElement> GridLayout<W> {
 
         Self {
             scale,
+            floating_scale,
             wrap,
             gap,
             entries,
@@ -1724,7 +1759,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
     /// Roughly the largest scale at which everything fits with the rows wrapping at `wrap`, or
     /// `min_scale` if nothing does: a scale that fits, and a slightly larger one that doesn't.
     fn max_scale(&self, wrap: f64, min_scale: f64) -> (f64, f64) {
-        let fits = |scale| self.place(wrap, scale, false).is_some();
+        let fits = |scale| self.place(wrap, scale, scale, false).is_some();
         if fits(MAX_SCALE) {
             return (MAX_SCALE, MAX_SCALE);
         }
@@ -1736,16 +1771,10 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
 
     /// Narrows down, in `steps` halvings, the largest scale that fits between `yes`, one that
     /// does, and `no`, one that doesn't.
-    fn narrow_scale(&self, wrap: f64, mut yes: f64, mut no: f64, steps: u32) -> (f64, f64) {
-        for _ in 0..steps {
-            let mid = (yes + no) / 2.;
-            if self.place(wrap, mid, false).is_some() {
-                yes = mid;
-            } else {
-                no = mid;
-            }
-        }
-        (yes, no)
+    fn narrow_scale(&self, wrap: f64, yes: f64, no: f64, steps: u32) -> (f64, f64) {
+        bisect(yes, no, steps, |scale| {
+            self.place(wrap, scale, scale, false).is_some()
+        })
     }
 
     /// The free spot for a window of `size` closest to `target`.
@@ -1846,7 +1875,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
     }
 
     /// The top-left corner of every item, and the row of every tiled one, with the rows wrapping
-    /// at `wrap` and everything at `scale`.
+    /// at `wrap`, the tiled windows at `scale` and the floating ones at `floating_scale`.
     ///
     /// `None` if they don't fit. With `force` they are placed anyway, overlapping where they must.
     #[allow(clippy::type_complexity)]
@@ -1854,6 +1883,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
         &self,
         wrap: f64,
         scale: f64,
+        floating_scale: f64,
         force: bool,
     ) -> Option<Vec<(Point<f64, Logical>, Option<usize>)>> {
         let content = self.content;
@@ -1918,7 +1948,7 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
 
         // The floating windows, starting out where they are on the workspace.
         for &idx in &self.floating {
-            let size = size(idx);
+            let size = self.items[idx].1.size.upscale(floating_scale);
             if !force && (size.w > content.size.w + EPSILON || size.h > content.size.h + EPSILON) {
                 return None;
             }
@@ -2068,6 +2098,20 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
         }
         Some(placed)
     }
+}
+
+/// Narrows down, in `steps` halvings, the largest value that `fits` between `yes`, one that does,
+/// and `no`, one that doesn't.
+fn bisect(mut yes: f64, mut no: f64, steps: u32, fits: impl Fn(f64) -> bool) -> (f64, f64) {
+    for _ in 0..steps {
+        let mid = (yes + no) / 2.;
+        if fits(mid) {
+            yes = mid;
+        } else {
+            no = mid;
+        }
+    }
+    (yes, no)
 }
 
 fn rect_center(r: Rectangle<f64, Logical>) -> Point<f64, Logical> {

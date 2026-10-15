@@ -368,8 +368,9 @@ fn main() -> anyhow::Result<()> {
         let ws = layout.active_workspace().unwrap();
         if let Some(go) = ws.grid_overview() {
             eprintln!(
-                "== {name}: scale {:.3}, wrap {}, grid focus {:?}, active {:?}",
+                "== {name}: scale {:.3}, floating {:.3}, wrap {}, grid focus {:?}, active {:?}",
                 go.layout.scale,
+                go.layout.floating_scale,
                 go.layout.wrap,
                 layout.grid_focused_window_id(),
                 ws.active_window().map(|win| win.id()),
