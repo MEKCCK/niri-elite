@@ -214,6 +214,14 @@ fn main() -> anyhow::Result<()> {
         ],
         // Like the user's screen recording: ten half-width columns, four small terminals across
         // the top and two larger floating windows lower right.
+        // Like a screenshot of the problem: two tiled windows and two small floating windows in
+        // the top corners, which the "flow" mode then opens many more tiled windows next to.
+        "corner" => vec![
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Floating((40, 40), (420, 300)),
+            Spec::Floating((820, 30), (420, 300)),
+        ],
         "busy" => vec![
             Spec::Tiled(0.5),
             Spec::Tiled(0.5),
@@ -502,6 +510,104 @@ fn main() -> anyhow::Result<()> {
                 &mut |layout| layout.move_left(),
             )?;
         }
+        return Ok(());
+    }
+
+    if mode == "flow" {
+        // What using the grid is like: windows opening while it's closed and while it shows,
+        // closing, and opening it again.
+        let next_id = std::cell::Cell::new(specs.len());
+        let open_tiled = |layout: &mut niri::layout::Layout<TestWindow>| {
+            let id = next_id.get();
+            next_id.set(id + 1);
+            let mut window = TestWindow::freeform(id);
+            window.set_color(colors[id % colors.len()]);
+            let width = PresetSize::Proportion(0.5);
+            let ws = layout.active_workspace().unwrap();
+            let size = ws.new_window_size(
+                Some(width),
+                None,
+                false,
+                window.rules(),
+                (window.min_size(), window.max_size()),
+            );
+            window.request_size(size, SizingMode::Normal, false, None);
+            window.communicate();
+            layout.add_window(
+                window,
+                AddWindowTarget::Auto,
+                Some(width),
+                None,
+                false,
+                false,
+                ActivateWindow::Yes,
+            );
+        };
+        let toggle = |layout: &mut niri::layout::Layout<TestWindow>| layout.toggle_grid_overview();
+        step(&mut layout, &mut renderer, "2_closed", &mut |l| toggle(l))?;
+        step(
+            &mut layout,
+            &mut renderer,
+            "3_opened_12_outside",
+            &mut |l| {
+                for _ in 0..12 {
+                    open_tiled(l);
+                }
+            },
+        )?;
+        step(&mut layout, &mut renderer, "4_grid_again", &mut |l| {
+            toggle(l)
+        })?;
+        step(&mut layout, &mut renderer, "5_closed", &mut |l| toggle(l))?;
+        step(&mut layout, &mut renderer, "6_grid_unchanged", &mut |l| {
+            toggle(l)
+        })?;
+        for n in 0..3 {
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("7_open_tiled_{n}"),
+                &mut |l| open_tiled(l),
+            )?;
+        }
+        for n in 0..8 {
+            let id = 4 + n * 2;
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("8_close_{id}"),
+                &mut |l| {
+                    l.remove_window(&id, Transaction::new());
+                },
+            )?;
+        }
+        step(&mut layout, &mut renderer, "9_open_floating", &mut |l| {
+            let id = next_id.get();
+            next_id.set(id + 1);
+            let mut window = TestWindow::freeform(id);
+            window.set_color(colors[id % colors.len()]);
+            window.request_size(Size::from((500, 360)), SizingMode::Normal, false, None);
+            window.communicate();
+            l.add_window(
+                window,
+                AddWindowTarget::Auto,
+                None,
+                None,
+                false,
+                true,
+                ActivateWindow::Yes,
+            );
+            l.move_floating_window(
+                Some(&id),
+                PositionChange::SetFixed(700.),
+                PositionChange::SetFixed(20.),
+                false,
+            );
+        })?;
+        step(&mut layout, &mut renderer, "10_closed", &mut |l| toggle(l))?;
+        step(&mut layout, &mut renderer, "11_grid_unchanged", &mut |l| {
+            toggle(l)
+        })?;
         return Ok(());
     }
 
