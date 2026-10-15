@@ -390,6 +390,8 @@ pub struct Layout<W: LayoutElement> {
     grid_overview_open_count: u64,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
+    /// Ongoing touchpad gesture opening or closing the grid overview.
+    grid_gesture: Option<OverviewGesture>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -735,6 +737,14 @@ impl OverviewProgress {
     fn is_animation(&self) -> bool {
         matches!(self, OverviewProgress::Animation(_))
     }
+
+    /// Whether it's on its way somewhere, by an animation or by a gesture.
+    fn is_moving(&self) -> bool {
+        matches!(
+            self,
+            OverviewProgress::Animation(_) | OverviewProgress::Gesture(_)
+        )
+    }
 }
 
 impl RenderLayer {
@@ -764,6 +774,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             grid_overview_open_count: 0,
             overview_progress: None,
+            grid_gesture: None,
             options: Rc::new(options),
         }
     }
@@ -790,6 +801,7 @@ impl<W: LayoutElement> Layout<W> {
             overview_open: false,
             grid_overview_open_count: 0,
             overview_progress: None,
+            grid_gesture: None,
             options: opts,
         }
     }
@@ -4776,6 +4788,110 @@ impl<W: LayoutElement> Layout<W> {
         self.set_monitors_overview_state();
 
         true
+    }
+
+    /// Starts a touchpad gesture that opens the grid overview, or closes it if it's open, with
+    /// the fingers.
+    pub fn grid_gesture_begin(&mut self) {
+        let opening = !self.grid_overview_open_in_scope();
+        if opening {
+            self.set_grid_overview_open_in_scope(true);
+        } else {
+            self.close_grid_overview();
+        }
+
+        // Opening or closing started an animation from where the grid was; the gesture takes
+        // over from there.
+        let start = self
+            .grid_overviews_in_scope()
+            .find_map(|go| go.progress.as_ref().map(|p| p.value()))
+            .unwrap_or(if opening { 0. } else { 1. });
+        for go in self.grid_overviews_in_scope() {
+            go.set_gesture_progress(start);
+        }
+        self.grid_gesture = Some(OverviewGesture {
+            tracker: SwipeTracker::new(),
+            start,
+            value: start,
+        });
+    }
+
+    pub fn grid_gesture_update(&mut self, delta_y: f64, timestamp: Duration) -> Option<bool> {
+        let gesture = self.grid_gesture.as_mut()?;
+        gesture.tracker.push(delta_y, timestamp);
+
+        let pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let new_value = OVERVIEW_GESTURE_RUBBER_BAND.clamp(0., 1., gesture.start + pos);
+        if gesture.value == new_value {
+            return Some(false);
+        }
+        gesture.value = new_value;
+
+        for go in self.grid_overviews_in_scope() {
+            go.set_gesture_progress(new_value);
+        }
+        Some(true)
+    }
+
+    pub fn grid_gesture_end(&mut self) -> bool {
+        let Some(mut gesture) = self.grid_gesture.take() else {
+            return false;
+        };
+
+        // Take into account any idle time between the last event and now.
+        gesture.tracker.push(0., self.clock.now_unadjusted());
+
+        let mut velocity = gesture.tracker.velocity() / OVERVIEW_GESTURE_MOVEMENT;
+        let current_pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let pos = gesture.tracker.projected_end_pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let open = (gesture.start + pos).clamp(0., 1.).round() == 1.;
+        velocity *=
+            OVERVIEW_GESTURE_RUBBER_BAND.clamp_derivative(0., 1., gesture.start + current_pos);
+
+        let mut from = gesture.value;
+        if open != self.grid_overview_open_in_scope() {
+            // Ending the other way than the gesture started goes the usual way of opening or
+            // closing: closing confirms the focused cell, and opening again starts from where
+            // the windows are now.
+            if open {
+                self.set_grid_overview_open_in_scope(true);
+                from = 0.;
+            } else {
+                self.close_grid_overview();
+            }
+        }
+        let to = if open { 1. } else { 0. };
+        for go in self.grid_overviews_in_scope() {
+            go.end_gesture(from, to, velocity);
+        }
+
+        true
+    }
+
+    /// The grids of the workspaces that the grid overview opens and closes on.
+    fn grid_overviews_in_scope(
+        &mut self,
+    ) -> impl Iterator<Item = &mut grid_overview::GridOverview<W>> + '_ {
+        let all_monitors = self.grid_all_monitors();
+        let monitors: &mut [Monitor<W>] = match &mut self.monitor_set {
+            MonitorSet::Normal {
+                monitors,
+                active_monitor_idx,
+                ..
+            } => {
+                if all_monitors {
+                    &mut monitors[..]
+                } else {
+                    let idx = *active_monitor_idx;
+                    &mut monitors[idx..=idx]
+                }
+            }
+            MonitorSet::NoOutputs { .. } => &mut [],
+        };
+        monitors
+            .iter_mut()
+            .flat_map(|mon| mon.workspaces.iter_mut())
+            .filter_map(|ws| ws.grid_overview_mut())
     }
 
     pub fn interactive_move_begin(

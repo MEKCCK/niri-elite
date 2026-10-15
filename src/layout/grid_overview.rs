@@ -7,7 +7,8 @@ use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
-use super::{Animation, Clock, LayoutElement, Options, OverviewProgress};
+use super::{Animation, Clock, LayoutElement, Options, OverviewGesture, OverviewProgress};
+use crate::input::swipe_tracker::SwipeTracker;
 use crate::render_helpers::renderer::NiriRenderer;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +249,27 @@ impl<W: LayoutElement> GridOverview<W> {
     }
 
     pub fn is_animation(&self) -> bool {
-        self.progress.as_ref().map_or(false, |p| p.is_animation()) || self.rearrange_anim.is_some()
+        self.progress.as_ref().map_or(false, |p| p.is_moving()) || self.rearrange_anim.is_some()
+    }
+
+    /// Shows the grid `value` of the way open, following a touchpad gesture.
+    pub(super) fn set_gesture_progress(&mut self, value: f64) {
+        self.progress = Some(OverviewProgress::Gesture(OverviewGesture {
+            tracker: SwipeTracker::new(),
+            start: value,
+            value,
+        }));
+    }
+
+    /// Finishes a touchpad gesture, going on from `from` to `to` with the gesture's `velocity`.
+    pub(super) fn end_gesture(&mut self, from: f64, to: f64, velocity: f64) {
+        self.progress = Some(OverviewProgress::Animation(Animation::new(
+            self.clock.clone(),
+            from,
+            to,
+            velocity,
+            self.options.animations.grid_overview_open_close.0,
+        )));
     }
 
     pub fn toggle(&mut self) {
@@ -563,7 +584,7 @@ impl<W: LayoutElement> GridOverview<W> {
             && self
                 .progress
                 .as_ref()
-                .is_some_and(|progress| progress.is_animation());
+                .is_some_and(|progress| progress.is_moving());
 
         let normal_pos = Self::matching_value(&self.entry_positions, item)
             .copied()

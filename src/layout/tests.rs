@@ -738,6 +738,13 @@ enum Op {
         timestamp: Duration,
     },
     OverviewGestureEnd,
+    GridGestureBegin,
+    GridGestureUpdate {
+        #[proptest(strategy = "-400f64..400f64")]
+        delta: f64,
+        timestamp: Duration,
+    },
+    GridGestureEnd,
     InteractiveMoveBegin {
         #[proptest(strategy = "1..=5usize")]
         window: usize,
@@ -1633,6 +1640,15 @@ impl Op {
             }
             Op::OverviewGestureEnd => {
                 layout.overview_gesture_end();
+            }
+            Op::GridGestureBegin => {
+                layout.grid_gesture_begin();
+            }
+            Op::GridGestureUpdate { delta, timestamp } => {
+                layout.grid_gesture_update(delta, timestamp);
+            }
+            Op::GridGestureEnd => {
+                layout.grid_gesture_end();
             }
             Op::InteractiveMoveBegin {
                 window,
@@ -11121,6 +11137,153 @@ fn grid_spreads_floating_windows_that_opened_on_top_of_each_other() {
             assert!(r.loc.y + r.size.h / 2. < 360., "{id}: {r:?}");
         }
     }
+}
+
+fn grid_gesture_layout() -> Layout<TestWindow> {
+    let mut ops = vec![Op::AddOutput(1)];
+    for id in 1..=3 {
+        ops.push(Op::AddWindow {
+            params: half_width_window(id),
+        });
+    }
+    ops.push(Op::FocusColumnLeft);
+    check_ops(ops)
+}
+
+fn grid_progress(layout: &Layout<TestWindow>) -> Option<f64> {
+    let go = layout.active_workspace().unwrap().grid_overview()?;
+    go.progress.is_some().then(|| go.progress_value())
+}
+
+fn gesture(layout: &mut Layout<TestWindow>, deltas: &[f64]) {
+    let mut ops = vec![Op::GridGestureBegin];
+    for (n, &delta) in deltas.iter().enumerate() {
+        ops.push(Op::GridGestureUpdate {
+            delta,
+            timestamp: Duration::from_millis(16 * (n as u64 + 1)),
+        });
+    }
+    check_ops_on_layout(layout, ops);
+}
+
+#[test]
+fn grid_gesture_opens_the_grid_as_far_as_the_fingers_go() {
+    let mut layout = grid_gesture_layout();
+    let active = layout
+        .active_workspace()
+        .unwrap()
+        .active_window()
+        .map(|w| w.id().clone());
+
+    gesture(&mut layout, &[50., 50., 50.]);
+    // Halfway, and it stays there while the fingers rest.
+    let p = grid_progress(&layout).unwrap();
+    assert!((p - 0.5).abs() < 0.01, "{p}");
+    let shown = grid_window_visual_rect(&layout, 2);
+    let cell = grid_entry_target_size(&layout, 2);
+    assert!(
+        cell.w + 1. < shown.size.w && shown.size.w < 620. - 1.,
+        "{shown:?} between {cell:?} and full size"
+    );
+    check_ops_on_layout(&mut layout, [Op::AdvanceAnimations { msec_delta: 500 }]);
+    assert_eq!(grid_progress(&layout), Some(p));
+
+    // Further up, then let go: it opens the rest of the way.
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::GridGestureUpdate {
+                delta: 200.,
+                timestamp: Duration::from_millis(600),
+            },
+            Op::GridGestureEnd,
+            Op::CompleteAnimations,
+        ],
+    );
+    let ws = layout.active_workspace().unwrap();
+    assert!(ws.grid_overview().unwrap().is_fully_open());
+    assert_eq!(ws.active_window().map(|w| w.id().clone()), active);
+}
+
+#[test]
+fn grid_gesture_that_turns_back_leaves_the_grid_closed() {
+    let mut layout = grid_gesture_layout();
+    let active = layout
+        .active_workspace()
+        .unwrap()
+        .active_window()
+        .map(|w| w.id().clone());
+
+    gesture(&mut layout, &[60., 60., -60., -60., -30.]);
+    check_ops_on_layout(&mut layout, [Op::GridGestureEnd, Op::CompleteAnimations]);
+    let ws = layout.active_workspace().unwrap();
+    assert!(!ws.is_grid_overview_open());
+    assert!(ws.grid_overview().is_none());
+    assert_eq!(ws.active_window().map(|w| w.id().clone()), active);
+}
+
+#[test]
+fn grid_gesture_closes_an_open_grid() {
+    let mut layout = grid_gesture_layout();
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleGridOverview, Op::CompleteAnimations],
+    );
+
+    gesture(&mut layout, &[-60., -60.]);
+    let p = grid_progress(&layout).unwrap();
+    assert!((p - 0.6).abs() < 0.01, "{p}");
+    // On its way closed, the grid still shows.
+    assert!(layout
+        .active_workspace()
+        .unwrap()
+        .is_grid_overview_animation());
+
+    check_ops_on_layout(
+        &mut layout,
+        [
+            Op::GridGestureUpdate {
+                delta: -200.,
+                timestamp: Duration::from_millis(100),
+            },
+            Op::GridGestureEnd,
+            Op::CompleteAnimations,
+        ],
+    );
+    let ws = layout.active_workspace().unwrap();
+    assert!(!ws.is_grid_overview_open());
+    assert!(ws.grid_overview().is_none());
+}
+
+#[test]
+fn grid_gesture_that_turns_back_keeps_the_grid_open() {
+    let mut layout = grid_gesture_layout();
+    check_ops_on_layout(
+        &mut layout,
+        [Op::ToggleGridOverview, Op::CompleteAnimations],
+    );
+    let cells: Vec<_> = layout
+        .active_workspace()
+        .unwrap()
+        .grid_overview()
+        .unwrap()
+        .layout
+        .entries
+        .iter()
+        .map(|(_, info)| info.rect())
+        .collect();
+
+    gesture(&mut layout, &[-80., -80., 80., 80., 20.]);
+    check_ops_on_layout(&mut layout, [Op::GridGestureEnd, Op::CompleteAnimations]);
+    let go = layout.active_workspace().unwrap().grid_overview().unwrap();
+    assert!(go.is_fully_open());
+    let again: Vec<_> = go
+        .layout
+        .entries
+        .iter()
+        .map(|(_, info)| info.rect())
+        .collect();
+    assert_eq!(cells, again);
 }
 
 #[test]

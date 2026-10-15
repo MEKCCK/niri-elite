@@ -3472,7 +3472,7 @@ impl<W: LayoutElement> Workspace<W> {
         let is_opening = go
             .progress
             .as_ref()
-            .is_some_and(|progress| go.open && progress.is_animation());
+            .is_some_and(|progress| go.open && progress.is_moving());
         let should_render_grid_item =
             |item: &GridItem<W>| !is_closing || self.grid_item_visible_when_closing(item);
 
@@ -4988,6 +4988,10 @@ impl<W: LayoutElement> Workspace<W> {
 
     pub fn grid_overview(&self) -> Option<&GridOverview<W>> {
         self.grid_overview.as_ref()
+    }
+
+    pub(super) fn grid_overview_mut(&mut self) -> Option<&mut GridOverview<W>> {
+        self.grid_overview.as_mut()
     }
 
     pub fn scrolling(&self) -> &ScrollingSpace<W> {
