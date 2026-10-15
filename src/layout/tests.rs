@@ -11111,9 +11111,9 @@ fn grid_stacked_floats_layout(cascade: bool) -> Layout<TestWindow> {
 fn grid_spreads_floating_windows_that_opened_on_top_of_each_other() {
     for cascade in [false, true] {
         let layout = grid_stacked_floats_layout(cascade);
-        // Pushing alone doesn't get them apart; rather than shrinking everything until it does,
-        // they take free spots near where they are.
-        assert!(grid_scale(&layout) > 0.3, "{}", grid_scale(&layout));
+        // They spread out all around rather than into one tall column that everything has to
+        // shrink for (they showed at 0.14 and 0.23 that way).
+        assert!(grid_scale(&layout) > 0.25, "{}", grid_scale(&layout));
         // The ones along the top stay in the upper half.
         let go = layout.active_workspace().unwrap().grid_overview().unwrap();
         for id in 100..103 {

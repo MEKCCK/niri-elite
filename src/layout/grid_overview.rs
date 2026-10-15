@@ -1453,11 +1453,10 @@ const BLOCK_MOBILITY: f64 = 0.15;
 const PUSH_ROUNDS: usize = 160;
 const PULL_ROUNDS: usize = 96;
 const PULL: f64 = 0.05;
+/// Turning by this angle again and again points every which way without ever lining up.
+const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 /// Windows are never shown larger than they are.
 const MAX_SCALE: f64 = 1.;
-/// A floating window further off the middle of the grid than this fraction of the way to an edge
-/// only ever takes a free spot on that side of it.
-const SIDE: f64 = 1. / 3.;
 const EPSILON: f64 = 0.000001;
 
 impl<W: LayoutElement> GridLayout<W> {
@@ -1833,18 +1832,6 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
         best.map(|(_, p)| p)
     }
 
-    /// Whether `center` is on the same side of the grid as `target`, across and up and down,
-    /// where `target` is clearly off the middle.
-    fn on_its_side(&self, target: Point<f64, Logical>, center: Point<f64, Logical>) -> bool {
-        let middle = rect_center(self.content);
-        let side = |target: f64, center: f64, middle: f64, half: f64| {
-            let off = (target - middle) / half;
-            !(off < -SIDE && center > middle || off > SIDE && center < middle)
-        };
-        side(target.x, center.x, middle.x, self.content.size.w / 2.)
-            && side(target.y, center.y, middle.y, self.content.size.h / 2.)
-    }
-
     /// The top-left corner of every item, and the row of every tiled one, with the rows wrapping
     /// at `wrap` and everything at `scale`.
     ///
@@ -1956,9 +1943,25 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                     else {
                         continue;
                     };
-                    // Along the way they overlap less, away from each other.
+                    // Two floating windows mostly on top of each other, like ones that opened in
+                    // the same spot, go apart each pair its own way, so that a pile of them
+                    // spreads out all around rather than into one tall column.
+                    let piled = a.id != 0
+                        && b.id != 0
+                        && ox - gap > a.size.w.min(b.size.w) * 0.5
+                        && oy - gap > a.size.h.min(b.size.h) * 0.5;
+                    // Otherwise along the way they overlap less, away from each other.
                     let tie = if a.id < b.id { 1. } else { -1. };
-                    if ox < oy {
+                    if piled {
+                        let k = (a.id.min(b.id) * 31 + a.id.max(b.id)) as f64;
+                        let angle = k * GOLDEN_ANGLE;
+                        let (ux, uy) = (angle.cos(), angle.sin());
+                        let t = (ox / ux.abs().max(0.05)).min(oy / uy.abs().max(0.05));
+                        a.center.x -= ux * t * share_a;
+                        a.center.y -= uy * t * share_a;
+                        b.center.x += ux * t * share_b;
+                        b.center.y += uy * t * share_b;
+                    } else if ox < oy {
                         let d = b.center.x - a.center.x;
                         let dir = if d != 0. { d.signum() } else { tie };
                         a.center.x -= dir * ox * share_a;
@@ -1976,9 +1979,19 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
             }
         }
 
+        if !force {
+            for i in 0..bodies.len() {
+                for j in i + 1..bodies.len() {
+                    let (a, b) = (&bodies[i], &bodies[j]);
+                    if overlap((a.center, a.size), (b.center, b.size), gap * 0.4).is_some() {
+                        return None;
+                    }
+                }
+            }
+        }
+
         let mut bodies = bodies.into_iter();
         let mut obstacles = Vec::new();
-        let mut block_body = None;
         if !cells.is_empty() {
             let block = bodies.next().unwrap();
             let top_left = block.center - Point::from((block.size.w / 2., block.size.h / 2.));
@@ -1986,52 +1999,11 @@ impl<'a, W: LayoutElement> GridSolver<'a, W> {
                 placed[idx] = (top_left + r.loc, Some(row));
                 obstacles.push(Rectangle::new(top_left + r.loc, r.size));
             }
-            block_body = Some((block.center, block.size));
         }
         let mut floating: Vec<Body> = bodies.collect();
-
-        // Pushing doesn't always get windows apart, like ones that start out on top of each
-        // other. Those still in the way of the block or of one another take the free spot closest
-        // to where they belong instead, the largest first; they only don't fit if one has none.
-        let mut kept: Vec<usize> = Vec::new();
-        let mut stray: Vec<usize> = Vec::new();
-        for (i, body) in floating.iter().enumerate() {
-            let clear = |other: (Point<f64, Logical>, Size<f64, Logical>)| {
-                overlap(other, (body.center, body.size), gap * 0.4).is_none()
-            };
-            if block_body.is_none_or(clear)
-                && kept
-                    .iter()
-                    .all(|&k| clear((floating[k].center, floating[k].size)))
-            {
-                kept.push(i);
-            } else {
-                stray.push(i);
-            }
+        for body in &floating {
+            obstacles.push(body.rect());
         }
-        for &k in &kept {
-            obstacles.push(floating[k].rect());
-        }
-        stray.sort_by(|&a, &b| {
-            let area = |body: &Body| body.size.w * body.size.h;
-            area(&floating[b]).total_cmp(&area(&floating[a]))
-        });
-        for &i in &stray {
-            let body = &floating[i];
-            let half = Point::from((body.size.w / 2., body.size.h / 2.));
-            match self.find_spot(body.size, body.target - half, &obstacles) {
-                Some(spot) if self.on_its_side(body.target, spot + half) => {
-                    floating[i].center = spot + half;
-                }
-                _ if force => (),
-                _ => return None,
-            }
-            obstacles.push(floating[i].rect());
-        }
-        // Back in the order of the windows.
-        let first_floating = obstacles.len() - floating.len();
-        obstacles.truncate(first_floating);
-        obstacles.extend(floating.iter().map(Body::rect));
 
         // Pushed out of the block, a floating window may have gone further than a gap the block
         // leaves, like beside a short row, that is closer to where it belongs: then it takes the

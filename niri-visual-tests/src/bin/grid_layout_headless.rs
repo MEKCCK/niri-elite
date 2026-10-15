@@ -89,6 +89,7 @@ fn render_frame(
 }
 
 /// A window to add: tiled with a column width, or floating at a position with a size.
+#[derive(Clone, Copy)]
 enum Spec {
     Tiled(f64),
     Floating((i32, i32), (i32, i32)),
@@ -240,6 +241,18 @@ fn main() -> anyhow::Result<()> {
             Spec::Floating((620, 330), (520, 340)),
             Spec::Floating((760, 280), (480, 400)),
         ],
+        // Like a screenshot of the problem: five tiled windows, three terminals along the top
+        // and seven file managers that all opened in the middle of the screen.
+        "stacked" => {
+            let mut specs = vec![Spec::Tiled(0.5); 5];
+            for n in 0..3 {
+                specs.push(Spec::Floating((200 + 300 * n, 30), (360, 220)));
+            }
+            for _ in 0..7 {
+                specs.push(Spec::Floating((415, 200), (450, 320)));
+            }
+            specs
+        }
         "tiled" => vec![
             Spec::Tiled(0.5),
             Spec::Tiled(1. / 3.),
