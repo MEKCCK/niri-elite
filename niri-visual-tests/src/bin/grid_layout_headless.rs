@@ -96,7 +96,8 @@ enum Spec {
 
 /// Grid overview layout scenarios, one PNG per step plus the cell geometry on stderr.
 ///
-/// Usage: grid-layout-headless OUT_DIR [mixed|five|allfloat|wechat|tiled] [drag|close|add]
+/// Usage: grid-layout-headless OUT_DIR [mixed|five|allfloat|wechat|three|tiled]
+/// [drag|close|add|move]
 ///
 /// `drag` (the default) drags windows into and out of tiling; `close` closes the tiled windows
 /// one after another, and `add` opens floating windows one after another, printing how far every
@@ -193,6 +194,15 @@ fn main() -> anyhow::Result<()> {
             Spec::Floating((560, 40), (260, 190)),
             Spec::Floating((420, 520), (380, 180)),
         ],
+        // Two tiled windows, a small floating window top left, a large one top right and another
+        // one along the bottom.
+        "three" => vec![
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Floating((30, 15), (150, 210)),
+            Spec::Floating((560, 20), (600, 380)),
+            Spec::Floating((230, 420), (700, 290)),
+        ],
         // Five tiled windows and a small floating one in the middle of the screen.
         "wechat" => vec![
             Spec::Tiled(0.5),
@@ -201,6 +211,26 @@ fn main() -> anyhow::Result<()> {
             Spec::Tiled(0.5),
             Spec::Tiled(0.5),
             Spec::Floating((569, 264), (142, 192)),
+        ],
+        // Like the user's screen recording: ten half-width columns, four small terminals across
+        // the top and two larger floating windows lower right.
+        "busy" => vec![
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Tiled(0.5),
+            Spec::Floating((200, 40), (320, 260)),
+            Spec::Floating((380, 50), (320, 260)),
+            Spec::Floating((560, 40), (320, 260)),
+            Spec::Floating((740, 50), (320, 260)),
+            Spec::Floating((620, 330), (520, 340)),
+            Spec::Floating((760, 280), (480, 400)),
         ],
         "tiled" => vec![
             Spec::Tiled(0.5),
@@ -376,6 +406,22 @@ fn main() -> anyhow::Result<()> {
             if !moves.is_empty() {
                 eprintln!("   floating windows moved by {}", moves.join(", "));
             }
+            let mut tiled_moves = Vec::new();
+            for (item, info) in &go.layout.entries {
+                if matches!(item, GridItem::Floating { .. }) || *item.window_id() == 0 {
+                    continue;
+                }
+                let id = *item.window_id();
+                let r = info.rect();
+                if let Some((_, old)) = last_rects.iter().find(|(old_id, _)| *old_id == id) {
+                    let dx = (r.loc.x + r.size.w / 2.) - (old.loc.x + old.size.w / 2.);
+                    let dy = (r.loc.y + r.size.h / 2.) - (old.loc.y + old.size.h / 2.);
+                    tiled_moves.push(format!("{id}: {:.0}", dx.hypot(dy)));
+                }
+            }
+            if !tiled_moves.is_empty() {
+                eprintln!("   other tiled windows moved by {}", tiled_moves.join(", "));
+            }
             last_rects = go
                 .layout
                 .entries
@@ -437,6 +483,50 @@ fn main() -> anyhow::Result<()> {
     step(&mut layout, &mut renderer, "1_grid", &mut |layout| {
         layout.toggle_grid_overview()
     })?;
+    if mode == "move" {
+        // Window 0's column, focused, moves right through the strip one step at a time, then
+        // back.
+        for n in 0..5 {
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("move_right_{n}"),
+                &mut |layout| layout.move_right(),
+            )?;
+        }
+        for n in 0..5 {
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("move_left_{n}"),
+                &mut |layout| layout.move_left(),
+            )?;
+        }
+        return Ok(());
+    }
+
+    if mode == "reopen" {
+        // Closing and opening the grid again, with a focus change outside it in between.
+        for n in 0..3 {
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("closed_{n}"),
+                &mut |layout| {
+                    layout.toggle_grid_overview();
+                    layout.focus_right();
+                },
+            )?;
+            step(
+                &mut layout,
+                &mut renderer,
+                &format!("reopened_{n}"),
+                &mut |layout| layout.toggle_grid_overview(),
+            )?;
+        }
+        return Ok(());
+    }
+
     if mode == "add" {
         let spots = [
             ((700, 120), (420, 300)),
