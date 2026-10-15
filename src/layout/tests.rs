@@ -10746,3 +10746,39 @@ fn grid_moves_a_focused_ignored_window_like_without_the_grid() {
     assert_eq!(layout.grid_focused_window_id(), Some(1));
     assert!(layout.is_grid_overview_open());
 }
+
+#[test]
+fn floating_focus_left_goes_to_the_window_alongside() {
+    let floating = |id: usize, (w, h): (i32, i32)| {
+        let mut params = TestWindowParams::new(id);
+        params.is_floating = true;
+        params.bbox = Rectangle::from_size(Size::from((w, h)));
+        Op::AddWindow { params }
+    };
+    let place = |id: usize, x: f64, y: f64| Op::MoveFloatingWindow {
+        id: Some(id),
+        x: PositionChange::SetFixed(x),
+        y: PositionChange::SetFixed(y),
+        animate: false,
+    };
+    // A small window top left, a large one top right, and a wide one along the bottom whose
+    // center is much closer to the top right one's horizontally.
+    let mut layout = check_ops([
+        Op::AddOutput(1),
+        floating(1, (200, 300)),
+        floating(2, (600, 500)),
+        floating(3, (800, 300)),
+        place(1, 20., 20.),
+        place(2, 1000., 20.),
+        place(3, 450., 700.),
+        Op::FocusWindow(2),
+    ]);
+
+    // It used to go by horizontal distance alone, to the window along the bottom.
+    layout.focus_left();
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(1));
+
+    // And down from there to the one along the bottom.
+    layout.focus_down();
+    assert_eq!(layout.focus().map(|win| *win.id()), Some(3));
+}
