@@ -37,16 +37,25 @@ niri msg agent launch -- chromium --user-data-dir="$HOME/.local/share/niri-agent
 - 是受限的：不能截屏、不能读写用户的剪贴板，也没有 `NIRI_SOCKET`。
 - 继承的是 niri 的环境变量，不是你这个 shell 的。要设环境变量，写成 `launch -- env FOO=bar 应用`。
 
-浏览器和其他"单实例"应用一定要用单独的 profile 或实例参数，否则请求会转交给用户已经开着的那个进程，`launch` 等 30 秒后报错：
+**上网用 Firefox，而且一律通过这个脚本启动**（它和本文件在同一个目录）：
+
+```sh
+~/.claude/skills/niri-agent/agent-firefox https://example.com
+```
+
+它在启动前把用户 Firefox 里当前的登录状态（cookies、网站存储、保存的密码）复制到你专用的 profile，然后用 `launch` 启动，打印同样的 JSON。用户登录过的网站，你这边也是登录状态，不要向用户要密码。你的 Firefox 已经开着时，它在里面开一个新窗口，这时不复制。只复制一个方向：你在里面登录、退出，都影响不到用户的 Firefox，下次启动还会被覆盖。
+
+这些登录是用户的账号：只做用户要你做的事，不要替用户发帖、发消息、下单、改账号设置。
+
+其他浏览器和"单实例"应用一定要用单独的 profile 或实例参数，否则请求会转交给用户已经开着的那个进程，`launch` 等 30 秒后报错：
 
 | 应用 | 参数 |
 |---|---|
 | Chromium / Chrome | `--user-data-dir="$HOME/.local/share/niri-agent/chromium"` |
-| Firefox | `--no-remote --profile "$HOME/.local/share/niri-agent/firefox"`（先 `mkdir -p` 这个目录） |
 | VS Code | `--user-data-dir="$HOME/.local/share/niri-agent/vscode"` |
 | Mousepad | `--disable-server` |
 
-这些 profile 里没有用户的登录状态。需要登录的网站，请用户在这个 profile 里自己登录一次，不要向用户要密码。
+这些 profile 里没有用户的登录状态。
 
 ## 标准循环：截图 → 看图 → 动作 → 看回执
 
@@ -115,6 +124,6 @@ niri msg agent key    --id 7 Return
 |---|---|
 | `doesn't listen to the agent pointer/keyboard: its app only handles one seat` | 这个应用只认一个 seat。用 `launch` 另开一个实例 |
 | `window N was not found` | 窗口关了或 id 变了，重新 `niri msg -j windows` |
-| `no window appeared within 30 s` | 应用把请求交给了已经开着的实例，加上上表里的 profile 参数 |
+| `no window appeared within 30 s` | 应用把请求交给了已经开着的实例，加上上表里的 profile 参数；Firefox 用 `agent-firefox` |
 | `"x.png" is a capture of window A, not window B` | 截图和窗口对不上，给这个窗口重新截图 |
 | `the agent seat is off` | 用户关掉了这个功能，告诉用户 |

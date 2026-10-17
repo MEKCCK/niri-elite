@@ -537,8 +537,9 @@ impl State {
         };
 
         // The launch id in the environment is exact, but some apps (Chromium) overwrite their
-        // environment block with the process title. Then fall back to the oldest launch, for
-        // windows that aren't dialogs of another window.
+        // environment block with the process title, and an app launched earlier may open the
+        // window for a later launch that handed off to it (`firefox --new-window`). Then fall
+        // back to the oldest launch, for windows that aren't dialogs of another window.
         let pid = client
             .get_credentials(&self.niri.display_handle)
             .ok()
@@ -546,10 +547,9 @@ impl State {
         let launch_id = pid.and_then(launch_id_of);
 
         let agent = self.agent();
-        let idx = match launch_id {
-            Some(launch_id) => agent.launches.iter().position(|(i, _)| *i == launch_id),
-            None => (info.parent_id.is_none() && !agent.launches.is_empty()).then_some(0),
-        };
+        let exact = launch_id.and_then(|id| agent.launches.iter().position(|(i, _)| *i == id));
+        let idx =
+            exact.or_else(|| (info.parent_id.is_none() && !agent.launches.is_empty()).then_some(0));
         if let Some(idx) = idx {
             let (_, reply) = agent.launches.remove(idx);
             let _ = reply.try_send(Ok(Response::AgentLaunched(info)));
