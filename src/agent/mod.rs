@@ -72,6 +72,13 @@ const LAUNCH_ENV: &str = "NIRI_AGENT_LAUNCH";
 /// How long a click waits after the pointer entered a new surface.
 const ENTER_DELAY: Duration = Duration::from_millis(50);
 
+/// How long after a popup grab started a click in the popup waits.
+///
+/// GTK 3 menus ignore a button release within 500 ms of the press that opened them
+/// (`MENU_SHELL_TIMEOUT`), so that press-drag-release works. An agent clicking an item right
+/// after opening the menu would otherwise hit nothing.
+const POPUP_SETTLE: Duration = Duration::from_millis(550);
+
 /// How often the agent cursor is redrawn while it animates.
 const CURSOR_TICK: Duration = Duration::from_millis(16);
 
@@ -97,6 +104,8 @@ const HIDE_SEAT_FROM: &[&str] = &[
 pub struct AgentState {
     seat: Seat<State>,
     popup_grab: Option<(WlSurface, PopupGrab<State>)>,
+    /// When the current popup grab started.
+    popup_grab_since: Instant,
     /// Actions waiting for their window to settle.
     watches: Vec<Watch>,
     next_watch_id: u64,
@@ -151,6 +160,7 @@ impl AgentState {
         Self {
             seat,
             popup_grab: None,
+            popup_grab_since: Instant::now(),
             watches: Vec::new(),
             next_watch_id: 0,
             frame_output,
@@ -379,16 +389,25 @@ impl State {
         );
         let focused = presses && self.agent_focus(&target);
 
+        // GTK 3 drops a button press that comes in the same batch as the second seat's pointer
+        // entering one of its windows, or its keyboard focus arriving, as with the first click in
+        // a dialog that just opened. Give the client a moment, then move again in place so that
+        // the press comes with a motion like a normal click.
+        let mut delay = (entered || focused).then_some(ENTER_DELAY);
+        // A click in a menu that just opened needs to wait until the menu takes clicks.
+        if presses && self.agent_popup_grab_on(&target.toplevel) {
+            let since = self.agent().popup_grab_since.elapsed();
+            if let Some(left) = POPUP_SETTLE.checked_sub(since) {
+                delay = Some(delay.map_or(left, |d| d.max(left)));
+            }
+        }
+
         match pointer_input {
-            // GTK 3 drops a button press that comes in the same batch as the second seat's pointer
-            // entering one of its windows, or its keyboard focus arriving, as with the first click
-            // in a dialog that just opened. Give the client a moment, then move again in place so
-            // that the press comes with a motion like a normal click.
-            Some(input) if entered || focused => {
+            Some(input) if delay.is_some() => {
                 let mut pending = Some((target, input, before, reply));
                 self.niri
                     .event_loop
-                    .insert_source(Timer::from_duration(ENTER_DELAY), move |_, _, state| {
+                    .insert_source(Timer::from_duration(delay.unwrap()), move |_, _, state| {
                         if let Some((target, input, before, reply)) = pending.take() {
                             state.agent_pointer_move(&target, Point::from(pos));
                             state.agent_finish(id, &target, Some(input), before, Ok(()), reply);
@@ -986,7 +1005,9 @@ impl State {
 
         keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
-        self.agent().popup_grab = Some((root, grab));
+        let agent = self.agent();
+        agent.popup_grab = Some((root, grab));
+        agent.popup_grab_since = Instant::now();
         true
     }
 
