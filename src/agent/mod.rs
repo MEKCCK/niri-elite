@@ -29,7 +29,7 @@ use smithay::desktop::{
     find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window,
     WindowSurfaceType,
 };
-use smithay::input::keyboard::{xkb, FilterResult, Keysym};
+use smithay::input::keyboard::{xkb, FilterResult, Keycode, Keysym};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorIcon, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
@@ -40,7 +40,8 @@ use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource as _};
 use smithay::utils::{IsAlive, Physical, Point, Rectangle, Scale, Size, Transform, SERIAL_COUNTER};
-use smithay::wayland::shell::xdg::{PopupSurface, ToplevelSurface};
+use smithay::wayland::compositor::get_role;
+use smithay::wayland::shell::xdg::{PopupSurface, ToplevelSurface, XDG_POPUP_ROLE};
 use smithay::wayland::socket::ListeningSocketSource;
 
 use crate::cursor::XCursor;
@@ -62,11 +63,15 @@ const BTN_MIDDLE: u32 = 0x112;
 /// Logical pixels per wheel notch, for the discrete scroll value.
 const WHEEL_STEP: f64 = 15.;
 
-/// Most keysyms `inject_text_keysyms()` can bind in one keymap.
-const TYPE_CHUNK: usize = 200;
+/// Range of keycodes that xkb keymaps can hold.
+const MIN_KEYCODE: u32 = 8;
+const MAX_KEYCODE: u32 = 255;
 
 /// Environment variable that tells which launch an agent app came from.
 const LAUNCH_ENV: &str = "NIRI_AGENT_LAUNCH";
+
+/// How long a click waits after the pointer entered a new surface.
+const ENTER_DELAY: Duration = Duration::from_millis(50);
 
 /// How often the agent cursor is redrawn while it animates.
 const CURSOR_TICK: Duration = Duration::from_millis(16);
@@ -77,11 +82,17 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Windows that the user's apps open this soon after an agent action don't take focus.
 const RECENT_ACTION: Duration = Duration::from_secs(5);
 
-/// Executable names of clients that switch to the last seat they see, taking the user's keyboard,
-/// pointer and input method away when the agent seat appears.
+/// Executable names of clients that must not see the agent seat.
 const HIDE_SEAT_FROM: &[&str] = &[
-    // gpui keeps the seat whose capabilities arrive last.
+    // gpui keeps the seat whose capabilities arrive last, taking the user's keyboard, pointer and
+    // input method away when the agent seat appears.
     "zed-editor",
+    // Input methods bind every seat. On the agent seat, they grab its keyboard as soon as an agent
+    // app focuses a text field, swallowing agent keys and sending unhandled ones back through a
+    // virtual keyboard that niri treats as the user's. The agent types without an input method
+    // anyway.
+    "fcitx5",
+    "ibus-wayland",
 ];
 
 pub struct AgentState {
@@ -234,6 +245,22 @@ fn client_executable_name(stream: &UnixStream) -> Option<String> {
     Some(name.trim_end_matches(" (deleted)").to_owned())
 }
 
+/// What a pointer action does once the pointer is at its point.
+enum PointerInput {
+    Click {
+        button: AgentButton,
+        count: u8,
+    },
+    Button {
+        button: AgentButton,
+        state: ButtonState,
+    },
+    Scroll {
+        dx: f64,
+        dy: f64,
+    },
+}
+
 struct Target {
     window: Window,
     toplevel: WlSurface,
@@ -299,26 +326,18 @@ impl State {
             agent.recent_clients.push((client.id(), Instant::now()));
         }
 
-        let result = match action {
+        // Pointer actions first move the pointer; what they do at the destination may have to
+        // wait for the client to take in the pointer entering a new surface.
+        let (pos, pointer_input) = match action {
             AgentAction::Launch { .. } | AgentAction::Capture { .. } => unreachable!(),
-            AgentAction::Move { x, y, .. } => {
-                self.agent_pointer_move(&target, Point::from((x, y)));
-                Ok(())
-            }
+            AgentAction::Move { x, y, .. } => ((x, y), None),
             AgentAction::Click {
                 x,
                 y,
                 button,
                 count,
                 ..
-            } => {
-                self.agent_pointer_move(&target, Point::from((x, y)));
-                for _ in 0..count.max(1) {
-                    self.agent_button(&target, button, ButtonState::Pressed);
-                    self.agent_button(&target, button, ButtonState::Released);
-                }
-                Ok(())
-            }
+            } => ((x, y), Some(PointerInput::Click { button, count })),
             AgentAction::Button {
                 x,
                 y,
@@ -326,28 +345,87 @@ impl State {
                 pressed,
                 ..
             } => {
-                self.agent_pointer_move(&target, Point::from((x, y)));
                 let state = if pressed {
                     ButtonState::Pressed
                 } else {
                     ButtonState::Released
                 };
-                self.agent_button(&target, button, state);
-                Ok(())
+                ((x, y), Some(PointerInput::Button { button, state }))
             }
             AgentAction::Scroll { x, y, dx, dy, .. } => {
-                self.agent_pointer_move(&target, Point::from((x, y)));
-                self.agent_scroll(dx, dy);
-                Ok(())
+                ((x, y), Some(PointerInput::Scroll { dx, dy }))
             }
-            AgentAction::Key { keys, .. } => self.agent_key(&target, &keys),
+            AgentAction::Key { keys, .. } => {
+                let result = self.agent_key(&target, &keys);
+                self.agent_finish(id, &target, None, before, result, reply);
+                return;
+            }
             AgentAction::Type { text, .. } => {
                 self.agent_type(&target, &text);
-                Ok(())
+                self.agent_finish(id, &target, None, before, Ok(()), reply);
+                return;
             }
         };
 
-        // Reply with a receipt once the window settles.
+        let entered = self.agent_pointer_move(&target, Point::from(pos));
+
+        // A click also moves the keyboard focus. Do that now rather than together with the press.
+        let presses = matches!(
+            pointer_input,
+            Some(PointerInput::Click { .. })
+                | Some(PointerInput::Button {
+                    state: ButtonState::Pressed,
+                    ..
+                })
+        );
+        let focused = presses && self.agent_focus(&target);
+
+        match pointer_input {
+            // GTK 3 drops a button press that comes in the same batch as the second seat's pointer
+            // entering one of its windows, or its keyboard focus arriving, as with the first click
+            // in a dialog that just opened. Give the client a moment, then move again in place so
+            // that the press comes with a motion like a normal click.
+            Some(input) if entered || focused => {
+                let mut pending = Some((target, input, before, reply));
+                self.niri
+                    .event_loop
+                    .insert_source(Timer::from_duration(ENTER_DELAY), move |_, _, state| {
+                        if let Some((target, input, before, reply)) = pending.take() {
+                            state.agent_pointer_move(&target, Point::from(pos));
+                            state.agent_finish(id, &target, Some(input), before, Ok(()), reply);
+                        }
+                        TimeoutAction::Drop
+                    })
+                    .unwrap();
+            }
+            input => self.agent_finish(id, &target, input, before, Ok(()), reply),
+        }
+    }
+
+    /// Delivers the rest of an action, then replies with a receipt once the window settles.
+    fn agent_finish(
+        &mut self,
+        id: u64,
+        target: &Target,
+        input: Option<PointerInput>,
+        before: Option<receipt::Snapshot>,
+        result: Result<(), String>,
+        reply: Sender<Reply>,
+    ) {
+        match input {
+            None => (),
+            Some(PointerInput::Click { button, count }) => {
+                for _ in 0..count.max(1) {
+                    self.agent_button(target, button, ButtonState::Pressed);
+                    self.agent_button(target, button, ButtonState::Released);
+                }
+            }
+            Some(PointerInput::Button { button, state }) => {
+                self.agent_button(target, button, state);
+            }
+            Some(PointerInput::Scroll { dx, dy }) => self.agent_scroll(dx, dy),
+        }
+
         let wait = Wait::Receipt {
             before,
             reply: reply.clone(),
@@ -527,9 +605,16 @@ impl State {
     }
 
     /// Moves the agent pointer to `pos` in window coordinates.
-    fn agent_pointer_move(&mut self, target: &Target, pos: Point<f64, smithay::utils::Logical>) {
+    ///
+    /// Returns whether the pointer entered a surface it wasn't on before, other than a popup.
+    fn agent_pointer_move(
+        &mut self,
+        target: &Target,
+        pos: Point<f64, smithay::utils::Logical>,
+    ) -> bool {
         let seat = self.agent_seat();
         let pointer = seat.get_pointer().unwrap();
+        let previous = pointer.current_focus();
 
         // The agent pointer uses the window's buffer coordinates as its global space.
         let location = pos + target.window.geometry().loc.to_f64();
@@ -550,6 +635,10 @@ impl State {
         pointer.frame(self);
 
         self.agent_update_cursor(&target.toplevel, |cursor| cursor.move_to(pos));
+
+        // Entering popups is part of using menus, where clicks have always worked right away.
+        let focus = pointer.current_focus();
+        focus != previous && focus.is_some_and(|surface| get_role(&surface) != Some(XDG_POPUP_ROLE))
     }
 
     /// Shows the agent cursor on the window, moving it off the window it was on before.
@@ -741,28 +830,86 @@ impl State {
 
         self.agent_focus(target);
 
+        // Type through a temporary keymap that puts the text's keysyms on keycodes that the
+        // regular layout leaves empty. GTK matches shortcuts by keycode against the regular layout
+        // too, so reusing ordinary keycodes would turn some letters into F1, F11 or Delete.
         let seat = self.agent_seat();
         let keyboard = seat.get_keyboard().unwrap();
-        for chunk in syms.chunks(TYPE_CHUNK) {
-            keyboard.inject_text_keysyms(self, chunk);
+        let (original, free) = keyboard.with_xkb_state(self, |context| {
+            let xkb = context.xkb().lock().unwrap();
+            let free: Vec<Keycode> = (MIN_KEYCODE..=MAX_KEYCODE)
+                .map(Keycode::new)
+                .filter(|code| {
+                    xkb.layouts()
+                        .all(|layout| xkb.raw_syms_for_key_in_layout(*code, layout).is_empty())
+                })
+                .collect();
+            (xkb.keymap_as_string(), free)
+        });
+        if free.is_empty() {
+            warn!("no free keycodes to type with");
+            return;
+        }
+
+        let mut rest = &syms[..];
+        while !rest.is_empty() {
+            // Take as much text as has at most one keysym per free keycode.
+            let mut distinct: Vec<Keysym> = Vec::new();
+            let mut len = 0;
+            for sym in rest {
+                if !distinct.contains(sym) {
+                    if distinct.len() == free.len() {
+                        break;
+                    }
+                    distinct.push(*sym);
+                }
+                len += 1;
+            }
+            let (chunk, tail) = rest.split_at(len);
+            rest = tail;
+
+            let keymap = injection_keymap(&distinct, &free);
+            if let Err(err) = keyboard.set_keymap_from_string(self, keymap) {
+                warn!("error setting the agent typing keymap: {err:?}");
+                break;
+            }
+            for sym in chunk {
+                let idx = distinct.iter().position(|s| s == sym).unwrap();
+                for state in [KeyState::Pressed, KeyState::Released] {
+                    keyboard.input(
+                        self,
+                        free[idx],
+                        state,
+                        SERIAL_COUNTER.next_serial(),
+                        InputTime::now(),
+                        |_, _, _| FilterResult::<()>::Forward,
+                    );
+                }
+            }
+        }
+
+        if let Err(err) = keyboard.set_keymap_from_string(self, original) {
+            warn!("error restoring the agent keymap: {err:?}");
         }
     }
 
     /// Gives agent keyboard focus to the target window, unless one of its popups holds it.
-    fn agent_focus(&mut self, target: &Target) {
+    ///
+    /// Returns whether the focus changed.
+    fn agent_focus(&mut self, target: &Target) -> bool {
         if self.agent_popup_grab_on(&target.toplevel) {
-            return;
+            return false;
         }
 
         let seat = self.agent_seat();
         let keyboard = seat.get_keyboard().unwrap();
-        if keyboard.current_focus().as_ref() != Some(&target.toplevel) {
-            keyboard.set_focus(
-                self,
-                Some(target.toplevel.clone()),
-                SERIAL_COUNTER.next_serial(),
-            );
+        if keyboard.current_focus().as_ref() == Some(&target.toplevel) {
+            return false;
         }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        keyboard.set_focus(self, Some(target.toplevel.clone()), serial);
+        true
     }
 
     fn agent_popup_grab_on(&mut self, root: &WlSurface) -> bool {
@@ -963,6 +1110,28 @@ impl State {
             scale,
         })
     }
+}
+
+/// A keymap with each keysym on its own keycode at the base level, so no modifiers are needed.
+fn injection_keymap(syms: &[Keysym], codes: &[Keycode]) -> String {
+    let mut keycodes = String::new();
+    let mut symbols = String::new();
+    for (sym, code) in syms.iter().zip(codes) {
+        let code = code.raw();
+        keycodes.push_str(&format!("    <K{code}> = {code};\n"));
+        symbols.push_str(&format!(
+            "    key <K{code}> {{ [ {} ] }};\n",
+            xkb::keysym_get_name(*sym)
+        ));
+    }
+    format!(
+        "xkb_keymap {{\n\
+         xkb_keycodes \"agent\" {{\n    minimum = {MIN_KEYCODE};\n    maximum = {MAX_KEYCODE};\n{keycodes}}};\n\
+         xkb_types \"agent\" {{ include \"complete\" }};\n\
+         xkb_compatibility \"agent\" {{ include \"complete\" }};\n\
+         xkb_symbols \"agent\" {{\n{symbols}}};\n\
+         }};\n"
+    )
 }
 
 /// Parses a combination like `ctrl+shift+t` into keysyms, modifiers first.
