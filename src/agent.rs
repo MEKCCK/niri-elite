@@ -26,7 +26,7 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
 use smithay::reexports::rustix::net::sockopt::socket_peercred;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::reexports::wayland_server::{DisplayHandle, Resource as _};
 use smithay::utils::{Point, Scale, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::PopupSurface;
 
@@ -100,8 +100,8 @@ pub fn hides_agent_seat(stream: &UnixStream, config: &Config) -> bool {
         return false;
     };
 
-    let hide = HIDE_SEAT_FROM.contains(&name.as_str())
-        || config.agent.hide_seat_from.contains(&name);
+    let hide =
+        HIDE_SEAT_FROM.contains(&name.as_str()) || config.agent.hide_seat_from.contains(&name);
     if hide {
         debug!("hiding the agent seat from {name}");
     }
@@ -122,11 +122,22 @@ struct Target {
     toplevel: WlSurface,
 }
 
+/// Agent input device an action needs the target's client to listen to.
+#[derive(Clone, Copy)]
+enum Device {
+    Pointer,
+    Keyboard,
+}
+
 impl State {
     pub fn agent_action(&mut self, action: AgentAction, reply: Sender<Reply>) {
         if self.niri.agent.is_none() {
             let err = String::from("the agent seat is off, see `agent` in the config");
             let _ = reply.try_send(Err(err));
+            return;
+        }
+        if self.niri.is_locked() {
+            let _ = reply.try_send(Err(String::from("the session is locked")));
             return;
         }
 
@@ -138,16 +149,18 @@ impl State {
                 }
                 return;
             }
-            AgentAction::Move { id, x, y } => self.agent_target(id).map(|target| {
-                self.agent_pointer_move(&target, Point::from((x, y)));
-            }),
+            AgentAction::Move { id, x, y } => {
+                self.agent_target(id, Device::Pointer).map(|target| {
+                    self.agent_pointer_move(&target, Point::from((x, y)));
+                })
+            }
             AgentAction::Click {
                 id,
                 x,
                 y,
                 button,
                 count,
-            } => self.agent_target(id).map(|target| {
+            } => self.agent_target(id, Device::Pointer).map(|target| {
                 self.agent_pointer_move(&target, Point::from((x, y)));
                 for _ in 0..count.max(1) {
                     self.agent_button(&target, button, ButtonState::Pressed);
@@ -160,7 +173,7 @@ impl State {
                 y,
                 button,
                 pressed,
-            } => self.agent_target(id).map(|target| {
+            } => self.agent_target(id, Device::Pointer).map(|target| {
                 self.agent_pointer_move(&target, Point::from((x, y)));
                 let state = if pressed {
                     ButtonState::Pressed
@@ -169,16 +182,20 @@ impl State {
                 };
                 self.agent_button(&target, button, state);
             }),
-            AgentAction::Scroll { id, x, y, dx, dy } => self.agent_target(id).map(|target| {
-                self.agent_pointer_move(&target, Point::from((x, y)));
-                self.agent_scroll(dx, dy);
-            }),
+            AgentAction::Scroll { id, x, y, dx, dy } => {
+                self.agent_target(id, Device::Pointer).map(|target| {
+                    self.agent_pointer_move(&target, Point::from((x, y)));
+                    self.agent_scroll(dx, dy);
+                })
+            }
             AgentAction::Key { id, keys } => self
-                .agent_target(id)
+                .agent_target(id, Device::Keyboard)
                 .and_then(|target| self.agent_key(&target, &keys)),
-            AgentAction::Type { id, text } => self.agent_target(id).map(|target| {
-                self.agent_type(&target, &text);
-            }),
+            AgentAction::Type { id, text } => {
+                self.agent_target(id, Device::Keyboard).map(|target| {
+                    self.agent_type(&target, &text);
+                })
+            }
         };
 
         let _ = reply.try_send(result.map(|()| Response::Handled));
@@ -193,18 +210,74 @@ impl State {
         self.agent().seat.clone()
     }
 
-    fn agent_target(&mut self, id: u64) -> Result<Target, String> {
+    fn agent_target(&mut self, id: u64, device: Device) -> Result<Target, String> {
         let (_, mapped) = self
             .niri
             .layout
             .windows()
             .find(|(_, mapped)| mapped.id().get() == id)
             .ok_or_else(|| format!("window {id} was not found"))?;
-
-        Ok(Target {
+        let target = Target {
             window: mapped.window.clone(),
             toplevel: mapped.toplevel().wl_surface().clone(),
-        })
+        };
+
+        // Clients that only handle one seat never bind the agent's pointer or keyboard; input sent
+        // to them would silently go nowhere.
+        let seat = self.agent_seat();
+        let listens = self
+            .niri
+            .display_handle
+            .get_client(target.toplevel.id())
+            .is_ok_and(|client| match device {
+                Device::Pointer => {
+                    let pointer = seat.get_pointer().unwrap();
+                    let listens = pointer.client_pointers(&client).next().is_some();
+                    listens
+                }
+                Device::Keyboard => {
+                    let keyboard = seat.get_keyboard().unwrap();
+                    let listens = keyboard.client_keyboards(&client).next().is_some();
+                    listens
+                }
+            });
+        if !listens {
+            let device = match device {
+                Device::Pointer => "pointer",
+                Device::Keyboard => "keyboard",
+            };
+            return Err(format!(
+                "window {id} doesn't listen to the agent {device}: its app only handles one seat"
+            ));
+        }
+
+        Ok(target)
+    }
+
+    /// Drops agent focus and grabs, for example when the session locks.
+    pub fn agent_release(&mut self) {
+        if self.niri.agent.is_none() {
+            return;
+        }
+
+        if let Some((_, mut grab)) = self.agent().popup_grab.take() {
+            grab.ungrab(smithay::desktop::PopupUngrabStrategy::All);
+        }
+
+        let seat = self.agent_seat();
+        let serial = SERIAL_COUNTER.next_serial();
+        seat.get_keyboard().unwrap().set_focus(self, None, serial);
+        let pointer = seat.get_pointer().unwrap();
+        pointer.motion(
+            self,
+            None,
+            &MotionEvent {
+                location: Point::from((0., 0.)),
+                serial,
+                time: InputTime::now(),
+            },
+        );
+        pointer.frame(self);
     }
 
     /// Moves the agent pointer to `pos` in window coordinates.

@@ -479,6 +479,8 @@ impl SessionLockHandler for State {
     }
 
     fn lock(&mut self, confirmation: SessionLocker) {
+        #[cfg(feature = "agent")]
+        self.agent_release();
         self.niri.lock(confirmation);
     }
 
