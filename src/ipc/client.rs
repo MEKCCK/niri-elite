@@ -18,8 +18,11 @@ use crate::cli::Msg;
 use crate::utils::version;
 
 pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Result<()> {
-    // Shells that niri didn't start, like a coding agent's, don't have NIRI_SOCKET.
-    if env::var_os(SOCKET_PATH_ENV).is_none() {
+    // Shells that niri didn't start, like a coding agent's, don't have NIRI_SOCKET, and long-lived
+    // programs keep the one of a niri that has since restarted.
+    let socket_exists = env::var_os(SOCKET_PATH_ENV)
+        .is_some_and(|path| !path.is_empty() && Path::new(&path).exists());
+    if !socket_exists {
         if let Some(path) = find_niri_socket() {
             env::set_var(SOCKET_PATH_ENV, path);
         }
