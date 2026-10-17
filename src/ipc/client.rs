@@ -58,7 +58,7 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
-        Msg::Agent { action, image } => Request::Agent(prepare_agent_action(action, image)?),
+        Msg::Agent { action, image, .. } => Request::Agent(prepare_agent_action(action, image)?),
         Msg::RawRequest => {
             let mut buf = Vec::new();
             let mut stdin = std::io::stdin().lock();
@@ -373,6 +373,25 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                 let output =
                     serde_json::to_string(&receipt).context("error formatting response")?;
                 println!("{output}");
+
+                let unchanged = receipt.changed.is_empty()
+                    && receipt.popups_opened.is_empty()
+                    && receipt.popups_closed.is_empty()
+                    && receipt.windows_opened.is_empty()
+                    && receipt.windows_closed.is_empty()
+                    && receipt.title.is_none();
+                if unchanged
+                    && matches!(
+                        msg,
+                        Msg::Agent {
+                            require_change: true,
+                            ..
+                        }
+                    )
+                {
+                    eprintln!("nothing changed");
+                    std::process::exit(3);
+                }
             }
             Response::AgentLaunched(window) => {
                 let output = serde_json::to_string(&window).context("error formatting response")?;

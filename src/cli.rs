@@ -122,6 +122,10 @@ pub enum Msg {
         /// Treat the points of pointer actions as pixels of this image from `capture --path`.
         #[arg(long, global = true)]
         image: Option<PathBuf>,
+        /// Fail (exit code 3, after printing the receipt) if the action changed nothing: no
+        /// pixels, popups, windows or title. Stops `&&` chains at a click that missed.
+        #[arg(long, global = true)]
+        require_change: bool,
         #[command(subcommand)]
         action: AgentAction,
     },
