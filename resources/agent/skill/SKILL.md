@@ -40,7 +40,7 @@ check box '使用系统等宽字体' @ 119.5,368.5 (197x27) [checked]
 spin button @ 299,216 (128x34) [disabled; text='80'; value=80]
 ```
 
-`@ X,Y` 是窗口坐标，直接 `click --id 7 X Y`，不加 `--image`。kitty、Alacritty、游戏没有无障碍树，会报错；要看颜色、布局、图片内容时也要截图。
+`@ X,Y` 是窗口坐标，直接 `click --id 7 X Y`，不加 `--image`。网页里滚动到视野外的控件默认只计数，`--find` 会搜到并标 `offscreen below/above`：先 scroll 再重新 `agent-ui` 取坐标。数标题、找链接不用滚屏截图，直接 `--find "heading 2"`。kitty、Alacritty、游戏没有无障碍树，会报错；要看颜色、布局、图片内容时也要截图。
 
 **截图**，再用 Read 看：
 
