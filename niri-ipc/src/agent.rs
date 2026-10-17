@@ -144,3 +144,80 @@ pub struct AgentCapture {
     /// Image pixel `(px, py)` is at window point `(origin.0 + px / scale, origin.1 + py / scale)`.
     pub scale: f64,
 }
+
+/// What an agent action caused, observed until the window settled.
+///
+/// Every input action replies with a receipt once the target window stops presenting new frames
+/// (or after a time limit), so the caller knows whether anything happened without capturing and
+/// comparing whole images.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct AgentReceipt {
+    /// Whether the window stopped presenting new frames before the time limit.
+    ///
+    /// `false` means it kept changing, for example while a page is loading or a video plays.
+    pub settled: bool,
+    /// Time from the action until the receipt was made, in milliseconds.
+    pub elapsed_ms: u64,
+    /// Areas of the window whose pixels changed, in window coordinates.
+    ///
+    /// Empty if nothing visible changed, for example after a click that hit nothing.
+    pub changed: Vec<AgentRect>,
+    /// New window size in logical pixels, if the window was resized.
+    pub resized: Option<(f64, f64)>,
+    /// Popups (menus, dropdowns, tooltips) of the window that opened, in window coordinates.
+    pub popups_opened: Vec<AgentRect>,
+    /// Popups of the window that closed, in window coordinates.
+    pub popups_closed: Vec<AgentRect>,
+    /// Windows that opened.
+    pub windows_opened: Vec<AgentWindow>,
+    /// Ids of windows that closed, including the target if it closed.
+    pub windows_closed: Vec<u64>,
+    /// New title of the window, if it changed.
+    pub title: Option<String>,
+    /// Where the agent keyboard focus is after the action.
+    pub focus: AgentFocus,
+}
+
+/// Rectangle in window coordinates, in logical pixels.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct AgentRect {
+    /// X coordinate of the left edge.
+    pub x: f64,
+    /// Y coordinate of the top edge.
+    pub y: f64,
+    /// Width.
+    pub w: f64,
+    /// Height.
+    pub h: f64,
+}
+
+/// Window that opened during an agent action.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct AgentWindow {
+    /// Id of the window.
+    pub id: u64,
+    /// Application id of the window.
+    pub app_id: Option<String>,
+    /// Title of the window.
+    pub title: Option<String>,
+    /// Id of the window's parent, for example the window a dialog belongs to.
+    pub parent_id: Option<u64>,
+}
+
+/// Agent keyboard focus.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFocus {
+    /// No surface has the agent keyboard focus.
+    None,
+    /// The target window has the agent keyboard focus.
+    Window,
+    /// A popup of the target window has the agent keyboard focus, for example an open menu.
+    Popup,
+    /// Some other surface has the agent keyboard focus.
+    Other,
+}

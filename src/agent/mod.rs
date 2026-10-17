@@ -7,6 +7,8 @@
 //! and the agent pointer lives in the target window's buffer coordinate space rather than in the
 //! global space, so actions don't depend on where the window is on screen.
 
+mod receipt;
+
 use std::os::unix::net::UnixStream;
 use std::{fs, thread};
 
@@ -15,8 +17,10 @@ use base64::Engine as _;
 use niri_config::Config;
 use niri_ipc::agent::{AgentAction, AgentButton, AgentCapture};
 use niri_ipc::{Reply, Response};
+use receipt::{Wait, Watch};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::input::{Axis, AxisSource, ButtonState, InputTime, KeyState};
+use smithay::backend::renderer::element::utils::{Relocate, RelocateRenderElement};
 use smithay::desktop::{
     find_popup_root_surface, PopupGrab, PopupKeyboardGrab, PopupKind, PopupPointerGrab, Window,
     WindowSurfaceType,
@@ -24,10 +28,11 @@ use smithay::desktop::{
 use smithay::input::keyboard::{xkb, FilterResult, Keysym};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
+use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::reexports::rustix::net::sockopt::socket_peercred;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{DisplayHandle, Resource as _};
-use smithay::utils::{Point, Scale, Transform, SERIAL_COUNTER};
+use smithay::utils::{IsAlive, Physical, Point, Rectangle, Scale, Size, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::PopupSurface;
 
 use crate::layout::LayoutElement as _;
@@ -60,6 +65,11 @@ const HIDE_SEAT_FROM: &[&str] = &[
 pub struct AgentState {
     seat: Seat<State>,
     popup_grab: Option<(WlSurface, PopupGrab<State>)>,
+    /// Actions waiting for their window to settle.
+    watches: Vec<Watch>,
+    next_watch_id: u64,
+    /// Output for frame callbacks to windows that aren't on any output.
+    frame_output: Output,
 }
 
 impl AgentState {
@@ -83,9 +93,23 @@ impl AgentState {
         }
         seat.add_pointer();
 
+        let frame_output = Output::new(
+            String::new(),
+            PhysicalProperties {
+                size: Size::from((0, 0)),
+                subpixel: Subpixel::Unknown,
+                make: String::new(),
+                model: String::new(),
+                serial_number: String::new(),
+            },
+        );
+
         Self {
             seat,
             popup_grab: None,
+            watches: Vec::new(),
+            next_watch_id: 0,
+            frame_output,
         }
     }
 
@@ -122,6 +146,14 @@ struct Target {
     toplevel: WlSurface,
 }
 
+/// Window rendered to RGBA pixels.
+struct Rendered {
+    /// Rendered area in window coordinates.
+    area: Rectangle<i32, Physical>,
+    pixels: Vec<u8>,
+    scale: Scale<f64>,
+}
+
 /// Agent input device an action needs the target's client to listen to.
 #[derive(Clone, Copy)]
 enum Device {
@@ -141,39 +173,56 @@ impl State {
             return;
         }
 
-        let result = match action {
+        let (id, device) = match &action {
             AgentAction::Capture { id } => {
-                // Replies from the encoding thread.
-                if let Err(err) = self.agent_capture(id, reply.clone()) {
+                if let Err(err) = self.agent_wait(*id, Wait::Capture(reply.clone())) {
                     let _ = reply.try_send(Err(err));
                 }
                 return;
             }
-            AgentAction::Move { id, x, y } => {
-                self.agent_target(id, Device::Pointer).map(|target| {
-                    self.agent_pointer_move(&target, Point::from((x, y)));
-                })
+            AgentAction::Move { id, .. }
+            | AgentAction::Click { id, .. }
+            | AgentAction::Button { id, .. }
+            | AgentAction::Scroll { id, .. } => (*id, Device::Pointer),
+            AgentAction::Key { id, .. } | AgentAction::Type { id, .. } => (*id, Device::Keyboard),
+        };
+
+        let target = match self.agent_target(id, device) {
+            Ok(target) => target,
+            Err(err) => {
+                let _ = reply.try_send(Err(err));
+                return;
+            }
+        };
+        let before = self.agent_snapshot(id);
+
+        let result = match action {
+            AgentAction::Capture { .. } => unreachable!(),
+            AgentAction::Move { x, y, .. } => {
+                self.agent_pointer_move(&target, Point::from((x, y)));
+                Ok(())
             }
             AgentAction::Click {
-                id,
                 x,
                 y,
                 button,
                 count,
-            } => self.agent_target(id, Device::Pointer).map(|target| {
+                ..
+            } => {
                 self.agent_pointer_move(&target, Point::from((x, y)));
                 for _ in 0..count.max(1) {
                     self.agent_button(&target, button, ButtonState::Pressed);
                     self.agent_button(&target, button, ButtonState::Released);
                 }
-            }),
+                Ok(())
+            }
             AgentAction::Button {
-                id,
                 x,
                 y,
                 button,
                 pressed,
-            } => self.agent_target(id, Device::Pointer).map(|target| {
+                ..
+            } => {
                 self.agent_pointer_move(&target, Point::from((x, y)));
                 let state = if pressed {
                     ButtonState::Pressed
@@ -181,24 +230,28 @@ impl State {
                     ButtonState::Released
                 };
                 self.agent_button(&target, button, state);
-            }),
-            AgentAction::Scroll { id, x, y, dx, dy } => {
-                self.agent_target(id, Device::Pointer).map(|target| {
-                    self.agent_pointer_move(&target, Point::from((x, y)));
-                    self.agent_scroll(dx, dy);
-                })
+                Ok(())
             }
-            AgentAction::Key { id, keys } => self
-                .agent_target(id, Device::Keyboard)
-                .and_then(|target| self.agent_key(&target, &keys)),
-            AgentAction::Type { id, text } => {
-                self.agent_target(id, Device::Keyboard).map(|target| {
-                    self.agent_type(&target, &text);
-                })
+            AgentAction::Scroll { x, y, dx, dy, .. } => {
+                self.agent_pointer_move(&target, Point::from((x, y)));
+                self.agent_scroll(dx, dy);
+                Ok(())
+            }
+            AgentAction::Key { keys, .. } => self.agent_key(&target, &keys),
+            AgentAction::Type { text, .. } => {
+                self.agent_type(&target, &text);
+                Ok(())
             }
         };
 
-        let _ = reply.try_send(result.map(|()| Response::Handled));
+        // Reply with a receipt once the window settles.
+        let wait = Wait::Receipt {
+            before,
+            reply: reply.clone(),
+        };
+        if let Err(err) = result.and_then(|()| self.agent_wait(id, wait)) {
+            let _ = reply.try_send(Err(err));
+        }
     }
 
     fn agent(&mut self) -> &mut AgentState {
@@ -211,12 +264,7 @@ impl State {
     }
 
     fn agent_target(&mut self, id: u64, device: Device) -> Result<Target, String> {
-        let (_, mapped) = self
-            .niri
-            .layout
-            .windows()
-            .find(|(_, mapped)| mapped.id().get() == id)
-            .ok_or_else(|| format!("window {id} was not found"))?;
+        let mapped = self.agent_mapped(id)?;
         let target = Target {
             window: mapped.window.clone(),
             toplevel: mapped.toplevel().wl_surface().clone(),
@@ -429,8 +477,16 @@ impl State {
             .as_ref()
             .is_some_and(|(_, grab)| grab.has_ended())
         {
-            agent.popup_grab = None;
+            let (grab_root, _) = agent.popup_grab.take().unwrap();
+
+            // The keyboard focus stays on the closed popup; give it back to its window.
+            let keyboard = agent.seat.get_keyboard().unwrap();
+            if keyboard.current_focus().is_none_or(|focus| !focus.alive()) && grab_root.alive() {
+                keyboard.set_focus(self, Some(grab_root), SERIAL_COUNTER.next_serial());
+            }
         }
+
+        let agent = self.agent();
         agent
             .popup_grab
             .as_ref()
@@ -495,14 +551,53 @@ impl State {
 
     /// Renders the window with its popups and replies with the PNG from a thread.
     fn agent_capture(&mut self, id: u64, reply: Sender<Reply>) -> Result<(), String> {
-        let (monitor, mapped) = self
+        let Rendered {
+            area: geo,
+            pixels,
+            scale,
+        } = self.agent_render(id, false)?;
+
+        let origin = geo.loc.to_f64().to_logical(scale);
+        let scale = scale.x;
+        thread::spawn(move || {
+            let mut png = Vec::new();
+            let result = write_png_rgba8(&mut png, geo.size.w as u32, geo.size.h as u32, &pixels)
+                .map(|()| {
+                    Response::AgentCapture(AgentCapture {
+                        png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
+                        origin: (origin.x, origin.y),
+                        scale,
+                    })
+                })
+                .map_err(|err| format!("error encoding image: {err:?}"));
+            let _ = reply.send_blocking(result);
+        });
+
+        Ok(())
+    }
+
+    /// Scale of the output the window is on.
+    fn agent_window_scale(&self, id: u64) -> f64 {
+        let mut windows = self.niri.layout.windows();
+        let monitor = windows.find(|(_, mapped)| mapped.id().get() == id);
+        monitor
+            .and_then(|(monitor, _)| monitor)
+            .map_or(1., |mon| mon.output().current_scale().fractional_scale())
+    }
+
+    /// Renders the window to RGBA pixels, returning the rendered area in window coordinates.
+    ///
+    /// With `geometry_only`, the area is just the window geometry; otherwise it also covers
+    /// client-side shadows and popups.
+    fn agent_render(&mut self, id: u64, geometry_only: bool) -> Result<Rendered, String> {
+        let scale = Scale::from(self.agent_window_scale(id));
+        let mapped = self
             .niri
             .layout
             .windows()
             .find(|(_, mapped)| mapped.id().get() == id)
+            .map(|(_, mapped)| mapped)
             .ok_or_else(|| format!("window {id} was not found"))?;
-        let scale = monitor.map_or(1., |mon| mon.output().current_scale().fractional_scale());
-        let scale = Scale::from(scale);
 
         let result = self.backend.with_primary_renderer(|renderer| {
             let mut elements = Vec::new();
@@ -523,13 +618,14 @@ impl State {
                 &mut |elem| elements.push(elem),
             );
 
-            let geo = encompassing_geo(scale, elements.iter());
+            let geo = if geometry_only {
+                let size = mapped.window.geometry().size;
+                Rectangle::from_size(size.to_physical_precise_round(scale))
+            } else {
+                encompassing_geo(scale, elements.iter())
+            };
             let elements = elements.iter().rev().map(|elem| {
-                smithay::backend::renderer::element::utils::RelocateRenderElement::from_element(
-                    elem,
-                    geo.loc.upscale(-1),
-                    smithay::backend::renderer::element::utils::Relocate::Relative,
-                )
+                RelocateRenderElement::from_element(elem, geo.loc.upscale(-1), Relocate::Relative)
             });
             let pixels = render_to_vec(
                 renderer,
@@ -545,23 +641,11 @@ impl State {
             .ok_or_else(|| String::from("primary renderer is not available"))?
             .map_err(|err| format!("error rendering window: {err:?}"))?;
 
-        let origin = geo.loc.to_f64().to_logical(scale);
-        let scale = scale.x;
-        thread::spawn(move || {
-            let mut png = Vec::new();
-            let result = write_png_rgba8(&mut png, geo.size.w as u32, geo.size.h as u32, &pixels)
-                .map(|()| {
-                    Response::AgentCapture(AgentCapture {
-                        png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
-                        origin: (origin.x, origin.y),
-                        scale,
-                    })
-                })
-                .map_err(|err| format!("error encoding image: {err:?}"));
-            let _ = reply.send_blocking(result);
-        });
-
-        Ok(())
+        Ok(Rendered {
+            area: geo,
+            pixels,
+            scale,
+        })
     }
 }
 

@@ -58,6 +58,9 @@ impl CompositorHandler for State {
         let _span = trace_span!("commit", surface = %surface.id()).entered();
         trace!("commit");
 
+        #[cfg(feature = "agent")]
+        self.agent_on_commit(surface);
+
         on_commit_buffer_handler::<Self>(surface);
         self.backend.early_import(surface);
 

@@ -360,6 +360,12 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
         },
         Msg::Agent { .. } => match response {
             Response::Handled => (),
+            Response::AgentReceipt(receipt) => {
+                // Receipts are meant for programs, so they're always JSON.
+                let output =
+                    serde_json::to_string(&receipt).context("error formatting response")?;
+                println!("{output}");
+            }
             Response::AgentCapture(capture) => {
                 if json {
                     let output =

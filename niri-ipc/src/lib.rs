@@ -177,6 +177,8 @@ pub enum Response {
     },
     /// Window image captured for the agent seat.
     AgentCapture(agent::AgentCapture),
+    /// What an agent action caused.
+    AgentReceipt(agent::AgentReceipt),
 }
 
 /// Overview information.
