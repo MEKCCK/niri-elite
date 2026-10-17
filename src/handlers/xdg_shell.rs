@@ -10,6 +10,8 @@ use smithay::desktop::{
 };
 use smithay::input::pointer::Focus;
 use smithay::input::tablet::TabletSeatTrait;
+#[cfg(feature = "agent")]
+use smithay::input::Seat;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_positioner::ConstraintAdjustment;
@@ -323,7 +325,16 @@ impl XdgShellHandler for State {
         surface.send_repositioned(token);
     }
 
-    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, serial: Serial) {
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        #[cfg(feature = "agent")]
+        if let Some(seat) = Seat::from_resource(&seat) {
+            if self.agent_popup_grab(&surface, &seat, serial) {
+                return;
+            }
+        }
+        #[cfg(not(feature = "agent"))]
+        let _ = seat;
+
         let popup = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&popup) else {
             trace!("ignoring popup grab because no root surface");

@@ -475,6 +475,23 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
         }
+        Request::Agent(action) => {
+            #[cfg(feature = "agent")]
+            {
+                let (tx, rx) = async_channel::bounded(1);
+                ctx.event_loop.insert_idle(move |state| {
+                    state.agent_action(action, tx);
+                });
+                let result = rx.recv().await;
+                return result.map_err(|_| String::from("error running agent action"))?;
+            }
+
+            #[cfg(not(feature = "agent"))]
+            {
+                let _ = action;
+                return Err(String::from("niri was built without the agent feature"));
+            }
+        }
     };
 
     Ok(response)

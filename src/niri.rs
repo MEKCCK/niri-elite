@@ -364,6 +364,8 @@ pub struct Niri {
     pub ext_data_control_state: ExtDataControlState,
     pub popups: PopupManager,
     pub popup_grab: Option<PopupGrabState>,
+    #[cfg(feature = "agent")]
+    pub agent: crate::agent::AgentState,
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
@@ -3343,6 +3345,9 @@ impl Niri {
         }
         seat.add_pointer();
 
+        #[cfg(feature = "agent")]
+        let agent = crate::agent::AgentState::new(&mut seat_state, &display_handle, &config_);
+
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
             CursorManager::new(&config_.cursor.xcursor_theme, config_.cursor.xcursor_size);
@@ -3523,6 +3528,8 @@ impl Niri {
             ext_data_control_state,
             popups: PopupManager::default(),
             popup_grab: None,
+            #[cfg(feature = "agent")]
+            agent,
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
             bind_cooldown_timers: HashMap::new(),
@@ -9319,7 +9326,10 @@ mod screen_cast_picker_preview_tests {
     #[test]
     fn picker_is_visible_to_outputs_and_normal_captures_only() {
         assert!(should_render_screen_cast_picker(true, RenderIntent::Normal));
-        assert!(should_render_screen_cast_picker(false, RenderIntent::Normal));
+        assert!(should_render_screen_cast_picker(
+            false,
+            RenderIntent::Normal
+        ));
         assert!(!should_render_screen_cast_picker(
             false,
             RenderIntent::PickerPreview

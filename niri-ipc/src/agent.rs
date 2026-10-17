@@ -1,0 +1,146 @@
+//! Types for driving the agent seat.
+//!
+//! The agent seat is a second `wl_seat` that niri creates on demand for automation. It has its
+//! own pointer, keyboard focus and clipboard, so a program can click and type into a window while
+//! the user keeps working on another one.
+//!
+//! Every action targets a window by id. Points are in logical pixels relative to the top-left
+//! corner of the window geometry (the same corner that [`AgentCapture`] reports its origin
+//! against), so they don't depend on where the window currently is on screen, or whether it's
+//! visible at all.
+
+use serde::{Deserialize, Serialize};
+
+/// Action for the agent seat.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "clap", derive(clap::Subcommand))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum AgentAction {
+    /// Capture a window as a PNG image.
+    ///
+    /// Unlike the screenshot actions, this doesn't touch the clipboard, doesn't save anything to
+    /// disk and doesn't show a notification.
+    Capture {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+    },
+    /// Move the agent pointer to a point in a window.
+    Move {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// X coordinate, in logical pixels from the left edge of the window.
+        x: f64,
+        /// Y coordinate, in logical pixels from the top edge of the window.
+        y: f64,
+    },
+    /// Click at a point in a window.
+    Click {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// X coordinate, in logical pixels from the left edge of the window.
+        x: f64,
+        /// Y coordinate, in logical pixels from the top edge of the window.
+        y: f64,
+        /// Mouse button to click.
+        #[cfg_attr(feature = "clap", arg(long, value_enum, default_value_t = AgentButton::Left))]
+        #[serde(default)]
+        button: AgentButton,
+        /// Number of clicks, for example 2 for a double click.
+        #[cfg_attr(feature = "clap", arg(long, default_value_t = 1))]
+        #[serde(default = "default_click_count")]
+        count: u8,
+    },
+    /// Press or release a mouse button at a point in a window, for dragging.
+    Button {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// X coordinate, in logical pixels from the left edge of the window.
+        x: f64,
+        /// Y coordinate, in logical pixels from the top edge of the window.
+        y: f64,
+        /// Mouse button.
+        #[cfg_attr(feature = "clap", arg(long, value_enum, default_value_t = AgentButton::Left))]
+        #[serde(default)]
+        button: AgentButton,
+        /// Whether to press (true) or release (false) the button.
+        #[cfg_attr(feature = "clap", arg(long, action = clap::ArgAction::Set))]
+        pressed: bool,
+    },
+    /// Scroll at a point in a window.
+    Scroll {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// X coordinate, in logical pixels from the left edge of the window.
+        x: f64,
+        /// Y coordinate, in logical pixels from the top edge of the window.
+        y: f64,
+        /// Horizontal scroll amount in logical pixels, positive scrolls right.
+        #[cfg_attr(feature = "clap", arg(long, default_value_t = 0.))]
+        #[serde(default)]
+        dx: f64,
+        /// Vertical scroll amount in logical pixels, positive scrolls down.
+        #[cfg_attr(feature = "clap", arg(long, default_value_t = 0.))]
+        #[serde(default)]
+        dy: f64,
+    },
+    /// Press a key combination in a window, for example `ctrl+shift+t` or `Return`.
+    ///
+    /// Key names are xkb keysym names; modifiers are `ctrl`, `shift`, `alt` and `super`.
+    Key {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// Key combination.
+        keys: String,
+    },
+    /// Type text into a window.
+    ///
+    /// Any Unicode text works, independent of the keyboard layout and without an input method.
+    Type {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+        /// Text to type.
+        text: String,
+    },
+}
+
+fn default_click_count() -> u8 {
+    1
+}
+
+/// Mouse button for the agent pointer.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub enum AgentButton {
+    /// Left mouse button.
+    #[default]
+    Left,
+    /// Right mouse button.
+    Right,
+    /// Middle mouse button.
+    Middle,
+}
+
+/// Captured window image.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct AgentCapture {
+    /// Base64-encoded PNG image data.
+    pub png_base64: String,
+    /// Position of the image's top-left corner in window coordinates, in logical pixels.
+    ///
+    /// This is usually negative or zero: the image also covers client-side shadows and popups
+    /// that stick out of the window geometry.
+    pub origin: (f64, f64),
+    /// Image pixels per logical pixel.
+    ///
+    /// Image pixel `(px, py)` is at window point `(origin.0 + px / scale, origin.1 + py / scale)`.
+    pub scale: f64,
+}

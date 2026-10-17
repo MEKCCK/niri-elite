@@ -58,6 +58,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub mod agent;
 pub mod socket;
 pub mod state;
 
@@ -119,6 +120,10 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Drive the agent seat, a second input seat for automation.
+    ///
+    /// See the [`agent`] module.
+    Agent(agent::AgentAction),
 }
 
 /// Reply from niri to client.
@@ -170,6 +175,8 @@ pub enum Response {
         /// Base64-encoded PNG image data.
         png_base64: String,
     },
+    /// Window image captured for the agent seat.
+    AgentCapture(agent::AgentCapture),
 }
 
 /// Overview information.

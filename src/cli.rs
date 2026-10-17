@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use clap_complete::Shell;
+use niri_ipc::agent::AgentAction;
 use niri_ipc::{Action, OutputAction};
 
 use crate::utils::version;
@@ -112,6 +113,15 @@ pub enum Msg {
     OverviewState,
     /// List screencasts.
     Casts,
+    /// Drive the agent seat, a second input seat for automation.
+    ///
+    /// The agent seat has its own pointer and keyboard focus, so it can click and type into a
+    /// window without moving your cursor or focus. Points are in logical pixels relative to the
+    /// window's top-left corner; `capture` writes the window image to stdout.
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     /// Send a raw JSON request to the compositor, reading from stdin.
     RawRequest,
 }

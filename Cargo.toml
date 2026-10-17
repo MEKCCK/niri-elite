@@ -133,7 +133,9 @@ xshell = "0.2.7"
 pkg-config = "0.3"
 
 [features]
-default = ["dbus", "systemd", "xdp-gnome-screencast"]
+default = ["agent", "dbus", "systemd", "xdp-gnome-screencast"]
+# Enables the agent seat, a second input seat for automation over IPC.
+agent = []
 # Enables D-Bus support (serve various freedesktop and GNOME interfaces, accessibility tree, power button handling).
 dbus = ["dep:zbus", "dep:async-io", "dep:accesskit", "dep:accesskit_unix"]
 # Enables systemd integration (global environment, apps in transient scopes).

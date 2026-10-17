@@ -50,6 +50,7 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
+        Msg::Agent { action } => Request::Agent(action.clone()),
         Msg::RawRequest => {
             let mut buf = Vec::new();
             let mut stdin = std::io::stdin().lock();
@@ -352,6 +353,32 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                     .lock()
                     .write_all(&png)
                     .context("error writing screenshot to stdout")?;
+            }
+            response => {
+                bail!("unexpected response: expected Handled, got {response:?}");
+            }
+        },
+        Msg::Agent { .. } => match response {
+            Response::Handled => (),
+            Response::AgentCapture(capture) => {
+                if json {
+                    let output =
+                        serde_json::to_string(&capture).context("error formatting response")?;
+                    println!("{output}");
+                    return Ok(());
+                }
+
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(&capture.png_base64)
+                    .context("error decoding capture response")?;
+                std::io::stdout()
+                    .lock()
+                    .write_all(&png)
+                    .context("error writing capture to stdout")?;
+                eprintln!(
+                    "origin: {} {}, scale: {}",
+                    capture.origin.0, capture.origin.1, capture.scale
+                );
             }
             response => {
                 bail!("unexpected response: expected Handled, got {response:?}");
