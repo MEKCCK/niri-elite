@@ -20,7 +20,7 @@ use smithay::utils::{Logical, Point, Scale, Size, Transform};
 use crate::render_helpers::renderer::NiriRenderer;
 
 /// Opacity of the arrow.
-const ALPHA: f32 = 0.7;
+const ALPHA: f32 = 0.8;
 
 /// Diameter of the halo, in logical pixels.
 const HALO_SIZE: f64 = 56.;
