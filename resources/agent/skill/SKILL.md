@@ -5,154 +5,94 @@ description: Operate GUI apps on the user's niri desktop in the background throu
 
 # 在 niri 桌面上操作图形界面应用
 
-niri 给你单独开了一个 seat（一套独立的指针和键盘）。你的点击和输入只进你指定的窗口，用户的光标、焦点和剪贴板都不受影响，用户可以同时正常工作。所有操作都按**窗口 id** 进行，窗口在不在屏幕上、用户正在看哪里都没关系。
+你有自己的一套指针和键盘（agent seat），输入只进你指定 id 的窗口，不影响用户的光标、焦点和剪贴板。窗口在不在屏幕上都能操作。下文的 `agent-ui`、`agent-firefox` 在本文件同目录 `~/.claude/skills/niri-agent/`。
 
-先确认可用：`niri msg agent --help` 能列出子命令就行。如果命令报 `the agent seat is off`，告诉用户 niri 配置里关掉了这个功能，不要自己去改配置。
+## 选窗口
 
-## 选择要操作的窗口
+`niri msg -j windows`：`is_focused: true` 是用户正在用的，除非用户要求，不要碰；`is_agent: true` 是你自己开的。
 
-```sh
-niri msg -j windows
-```
+**共享模式**：直接操作用户开着的窗口。GTK、Qt、Firefox、Alacritty 可以；Chromium、Electron（VS Code、QQ）、kitty、Zed 只认一个 seat，会报 `only handles one seat`，改用独立模式。
 
-每个窗口有 `id`、`app_id`、`title`、`is_focused`、`is_agent`。
+**独立模式**：`niri msg agent launch -- 命令`，等到第一个窗口出现，打印含 `id` 的 JSON。任何应用都能操作，开在 agent 工作区，不抢焦点。环境变量继承自 niri，不是你的 shell；要设就写 `launch -- env FOO=bar 命令`。
 
-- `is_focused: true` 是用户此刻正在用的窗口。除非用户明确让你操作它，否则不要碰：你的输入会和用户的输入交错。
-- `is_agent: true` 是你自己用 `launch` 开的窗口。
+单实例应用必须用独立 profile，否则请求交给用户的进程，30 秒后报错：
 
-## 两种方式
-
-**直接操作用户已经开着的窗口（共享模式）。** GTK 应用、Firefox、Alacritty 这类终端都可以。Chromium 和 Electron 应用（VS Code、QQ……）、kitty、Zed 不行：它们只认一个 seat，命令会报错 `doesn't listen to the agent pointer: its app only handles one seat`。遇到这个报错，改用下面的 `launch`。
-
-**自己启动一个应用（独立模式）。**
-
-```sh
-niri msg agent launch -- chromium --user-data-dir="$HOME/.local/share/niri-agent/chromium" --no-first-run https://example.com
-```
-
-它会等到应用的第一个窗口出现，打印一行 JSON，里面有窗口 `id`。这样启动的应用：
-
-- 任何应用都能操作，包括 Chromium、Electron 和 kitty。
-- 开在单独的工作区里，不抢用户的焦点，用户也没法在里面打字。
-- 是受限的：不能截屏、不能读写用户的剪贴板，也没有 `NIRI_SOCKET`。
-- 继承的是 niri 的环境变量，不是你这个 shell 的。要设环境变量，写成 `launch -- env FOO=bar 应用`。
-
-**上网用 Firefox，而且一律通过这个脚本启动**（它和本文件在同一个目录）：
-
-```sh
-~/.claude/skills/niri-agent/agent-firefox https://example.com
-```
-
-它在启动前把用户 Firefox 里当前的登录状态（cookies、网站存储、保存的密码）复制到你专用的 profile，然后用 `launch` 启动，打印同样的 JSON。用户登录过的网站，你这边也是登录状态，不要向用户要密码。你的 Firefox 已经开着时，它在里面开一个新窗口，这时不复制。只复制一个方向：你在里面登录、退出，都影响不到用户的 Firefox，下次启动还会被覆盖。
-
-这些登录是用户的账号：只做用户要你做的事，不要替用户发帖、发消息、下单、改账号设置。
-
-其他浏览器和"单实例"应用一定要用单独的 profile 或实例参数，否则请求会转交给用户已经开着的那个进程，`launch` 等 30 秒后报错：
-
-| 应用 | 参数 |
+| 应用 | 启动方式 |
 |---|---|
-| Chromium / Chrome | `--user-data-dir="$HOME/.local/share/niri-agent/chromium" --force-renderer-accessibility`，前面加 `env ACCESSIBILITY_ENABLED=1` |
-| VS Code | `--user-data-dir="$HOME/.local/share/niri-agent/vscode"` |
-| Mousepad | `--disable-server` |
+| Firefox（上网首选） | `agent-firefox URL`：先复制用户当前的登录状态，再启动；已开着就开新窗口 |
+| Chromium | `launch -- env ACCESSIBILITY_ENABLED=1 chromium --user-data-dir="$HOME/.local/share/niri-agent/chromium" --force-renderer-accessibility --no-first-run URL` |
+| VS Code | `launch -- code --user-data-dir="$HOME/.local/share/niri-agent/vscode"` |
+| Mousepad | `launch -- mousepad --disable-server` |
 
-这些 profile 里没有用户的登录状态。
+agent-firefox 里是用户的真实账号：不要向用户要密码，也不要替用户发帖、发消息、下单、改设置。
 
-## 标准循环：看控件或截图 → 动作 → 看回执
+## 循环：定位 → 动作 → 看回执
 
-**1a. 先读控件列表**（同目录的 `agent-ui`）。它从应用的无障碍接口读出按钮、菜单项、输入框、链接，带名字、状态和可以直接点击的窗口坐标：
+**定位，优先用 `agent-ui`**：读应用的无障碍树，几百 token，名字是原文。
 
 ```sh
-~/.claude/skills/niri-agent/agent-ui --id 7
-~/.claude/skills/niri-agent/agent-ui --id 7 --find 首选项      # 只看名字或文字里有"首选项"的
+agent-ui --id 7                 # 全部可见控件
+agent-ui --id 7 --find 首选项   # 名字、文字里含"首选项"的
 ```
-
 ```
 menu item '首选项...' @ 227,521.5 (324x31)
-check box '显示行号' @ 197,125.5 (352x27)
 check box '使用系统等宽字体' @ 119.5,368.5 (197x27) [checked]
 spin button @ 299,216 (128x34) [disabled; text='80'; value=80]
-link 'Learn more' @ 304,953 (86x20)
 ```
 
-- `@ X,Y` 是控件中心的窗口坐标，**直接 `click --id 7 X Y`，不加 `--image`**。
-- 比截图快（零点几秒）、便宜（几百 token）、准确（名字是原文，不用认图片里的小字），还能读出复选框是否勾上、输入框里的文字。
-- GTK、Qt 应用和用 `agent-firefox` 开的 Firefox 都有。Chromium、Electron 要按上表带上无障碍参数启动。kitty、Alacritty、游戏等没有，会报错叫你截图。
-- 它看不到颜色、图片、布局，也不知道页面长什么样。要判断"界面看起来对不对"、或者列表里没有你要的东西时，截图。
+`@ X,Y` 是窗口坐标，直接 `click --id 7 X Y`，不加 `--image`。kitty、Alacritty、游戏没有无障碍树，会报错；要看颜色、布局、图片内容时也要截图。
 
-**1b. 截图**，存成文件后用 Read 工具看：
+**截图**，再用 Read 看：
 
 ```sh
-mkdir -p /tmp/niri-agent
 niri msg agent capture --id 7 --path /tmp/niri-agent/7.png --max-size 1280
 ```
 
-- `--max-size 1280` 让长边不超过 1280 像素，太小会看不清，太大浪费 token。图片要的 token 只看像素尺寸，和文件大小无关。
-- 图片包括窗口的阴影和展开的菜单。截图前会先等窗口交出最新的一帧。
-- 旁边会写一份 `7.png.json`，记录图片和窗口坐标的对应关系，下一步要用。
+token 只取决于像素尺寸，1280 一般够用。截图包含阴影和展开的菜单。之后按图片像素坐标操作时加 `--image 那张图`，换了窗口就重截。
 
-**2. 动作**：直接用图片上的像素坐标，加 `--image` 指向那张截图，CLI 会自动换算。
+**动作**：
 
 ```sh
-niri msg agent click  --id 7 --image /tmp/niri-agent/7.png 288 29
-niri msg agent click  --id 7 --image /tmp/niri-agent/7.png 288 29 --button right
-niri msg agent click  --id 7 --image /tmp/niri-agent/7.png 288 29 --count 2      # 双击
-niri msg agent move   --id 7 --image /tmp/niri-agent/7.png 288 29                # 悬停，比如看提示框
-niri msg agent scroll --id 7 --image /tmp/niri-agent/7.png 300 500 --dy 400      # 正数向下，单位是逻辑像素
-niri msg agent key    --id 7 ctrl+l
-printf '%s' 'https://example.com' | niri msg agent type --id 7 -
-niri msg agent key    --id 7 Return
+niri msg agent click  --id 7 --image /tmp/niri-agent/7.png 288 29   # --button right / --count 2
+niri msg agent move   --id 7 --image /tmp/niri-agent/7.png 288 29   # 悬停
+niri msg agent scroll --id 7 --image /tmp/niri-agent/7.png 300 500 --dy 400   # 正数向下，逻辑像素
+niri msg agent key    --id 7 ctrl+shift+t                           # xkb 键名：Return Escape Tab BackSpace Page_Down F5…
+printf '%s' '任意 Unicode 文字' | niri msg agent type --id 7 -      # 一律从标准输入传，不经过输入法
 ```
 
-- **打字一律用 `type --id N -`，从标准输入传文字**，避免引号、`$`、换行被 shell 处理。任何 Unicode 都行，中文直接打，不经过输入法。
-- 按键名是 xkb 的键名：`Return`、`Escape`、`Tab`、`BackSpace`、`Delete`、`Up`、`Down`、`Left`、`Right`、`Page_Down`、`Home`、`F5`……修饰键写 `ctrl`、`shift`、`alt`、`super`，用 `+` 连起来，比如 `ctrl+shift+t`。
-- 拖动：`button --pressed true` 按下，`move` 到目标，`button --pressed false` 松开，都带同一个 `--image`。
-- 窗口 id 必须和截图对应。截图换了窗口，就重新截。
-- **连着做几步时，用 `--require-change` 加 `&&` 串起来**，一次 shell 调用做完。哪一步什么都没改变（点空了），它打印回执后以退出码 3 失败，后面的步骤不会执行，不会把字打进错的地方：
+拖动：`button --pressed true`，`move`，`button --pressed false`。
+
+多步用 `--require-change` 加 `&&` 串成一条命令。某步没有引起任何变化时，以退出码 3 停下，后面的不执行。悬停这类不一定有变化的步骤不要加：
 
 ```sh
 niri msg agent --require-change click --id 7 304 120 &&
 printf '%s' '张三' | niri msg agent type --id 7 - &&
-niri msg agent --require-change click --id 7 400 560
+niri msg agent --require-change key --id 7 ctrl+s
 ```
 
-  不确定某一步会不会引起变化（比如悬停），那一步就别加 `--require-change`。
+**回执**：每个动作等画面稳定（最多 2 秒）后打印 JSON，坐标是窗口坐标。
 
-**3. 看回执。** 每个动作都会等窗口画面稳定（最多 2 秒），然后打印一行 JSON：
+| 回执 | 含义 → 做法 |
+|---|---|
+| `changed`、`popups_opened`、`windows_opened` 全空 | 没点中 → 重新定位，不要原地再点 |
+| `popups_opened` 非空，`focus: "popup"` | 菜单打开了 → `agent-ui --find` 找菜单项；按键会进菜单 |
+| `windows_opened` | 新窗口或对话框，`parent_id` 是父窗口 → 改用新 `id` |
+| `title` | 标题变了：页面加载完成，或文件未保存 |
+| `settled: false` | 还在变（加载、动画、视频）→ 稍等再看 |
+| 文本框里约 8 像素宽的 `changed` | 光标闪烁 → 忽略 |
 
-```json
-{"settled":true,"elapsed_ms":62,"changed":[{"x":26,"y":62,"w":58,"h":24}],"resized":null,
- "popups_opened":[{"x":26,"y":86,"w":240,"h":380}],"popups_closed":[],
- "windows_opened":[],"windows_closed":[],"title":null,"focus":"popup"}
-```
-
-坐标都是窗口坐标，不是图片像素。怎么读：
-
-| 回执 | 说明 | 下一步 |
-|---|---|---|
-| `changed`、`popups_opened`、`windows_opened` 全是空的 | 什么都没发生，多半点偏了，或者点的不是控件 | 用 `agent-ui` 或截图重新定位，不要假设已经成功，也不要原地再点一次 |
-| `popups_opened` 不为空，`focus` 是 `"popup"` | 菜单或下拉框打开了 | 用 `agent-ui --find` 找菜单项，或重新截图；按键会进菜单 |
-| `windows_opened` 有新窗口 | 开了新窗口或对话框；`parent_id` 是它的父窗口 | 之后操作新窗口的 `id` |
-| `title` 不是 null | 窗口标题变了，比如页面加载完成、文件变成"未保存" | |
-| `settled: false` | 2 秒内画面一直在变：页面在加载、视频在放、动画没停 | 稍等一会儿再截图 |
-| `windows_closed` 里有目标窗口 | 目标窗口关掉了 | |
-| `changed` 里有一条约 8 像素宽的窄条，位置在文本框里 | 文本光标在闪，不算真正的变化 | 忽略 |
-| 点菜单项的回执要多等半秒 | GTK 3 菜单刚打开的半秒内不认点击，niri 会自动等过这段时间 | 正常 |
-
-**回执能回答的就不要截图。** 点开了菜单、开了对话框、标题变了、复选框所在的位置变了，这些回执里都有。只有回执说明画面变了、而且你需要知道变成了什么时，才先 `agent-ui`，还不够再截图。
+回执能说明结果，就不要截图；需要知道变成什么样时，先 `agent-ui`，不够再截图。
 
 ## 注意
 
-- 不要碰用户正在用的窗口，不要关闭用户的窗口，不要替用户做不可撤销的操作（发送消息、付款、删除），除非用户明确要求。
-- 你的剪贴板和用户的是分开的。你在应用里按 `ctrl+c` 复制的东西，用户粘贴不到，你自己也读不到。要把内容带出来，就截图看，或者让应用把内容存成文件。
-- 截图里显示的就是用户屏幕上会看到的内容。用户在 niri 配置里设了屏蔽录屏的窗口，在截图里是黑块。
-- 锁屏期间可以照常工作。锁屏界面本身你碰不到，也不要尝试解锁。
-
-## 常见报错
+- 不关用户的窗口；不可撤销的操作（发送、付款、删除）要用户明确要求才做。
+- 你的剪贴板是独立的，`ctrl+c` 的内容谁都读不到。要拿内容，就截图，或让应用存成文件。
+- 锁屏期间照常工作，不要碰锁屏界面。
 
 | 报错 | 处理 |
 |---|---|
-| `doesn't listen to the agent pointer/keyboard: its app only handles one seat` | 这个应用只认一个 seat。用 `launch` 另开一个实例 |
-| `window N was not found` | 窗口关了或 id 变了，重新 `niri msg -j windows` |
-| `no window appeared within 30 s` | 应用把请求交给了已经开着的实例，加上上表里的 profile 参数；Firefox 用 `agent-firefox` |
-| `"x.png" is a capture of window A, not window B` | 截图和窗口对不上，给这个窗口重新截图 |
-| `the agent seat is off` | 用户关掉了这个功能，告诉用户 |
+| `only handles one seat` | 改用独立模式 |
+| `window N was not found` | 重新 `niri msg -j windows` |
+| `no window appeared within 30 s` | 按上表加 profile 参数 |
+| `is a capture of window A, not window B` | 给目标窗口重新截图 |
+| `the agent seat is off` | 告诉用户，不要改配置 |
