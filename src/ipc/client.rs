@@ -366,6 +366,10 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                     serde_json::to_string(&receipt).context("error formatting response")?;
                 println!("{output}");
             }
+            Response::AgentLaunched(window) => {
+                let output = serde_json::to_string(&window).context("error formatting response")?;
+                println!("{output}");
+            }
             Response::AgentCapture(capture) => {
                 if json {
                     let output =
@@ -782,6 +786,9 @@ fn print_window(window: &Window) {
         "  Is floating: {}",
         if window.is_floating { "yes" } else { "no" }
     );
+    if window.is_agent {
+        println!("  Is agent: yes");
+    }
 
     if let Some(pid) = window.pid {
         println!("  PID: {pid}");

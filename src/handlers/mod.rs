@@ -834,6 +834,12 @@ impl XdgActivationHandler for State {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        // Agent apps never take the user's focus.
+        #[cfg(feature = "agent")]
+        if crate::agent::is_agent_surface(&surface) {
+            return;
+        }
+
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();

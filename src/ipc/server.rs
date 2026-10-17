@@ -37,7 +37,7 @@ use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
-use crate::window::Mapped;
+use crate::window::{Mapped, WindowRef};
 
 // If an event stream client fails to read events fast enough that we accumulate more than this
 // number in our buffer, we drop that event stream client.
@@ -589,6 +589,7 @@ fn make_ipc_window(
         is_floating: mapped.is_floating(),
         is_urgent: mapped.is_urgent(),
         is_minimized: mapped.is_minimized(),
+        is_agent: WindowRef::Mapped(mapped).is_agent(),
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
     })

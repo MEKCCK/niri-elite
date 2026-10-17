@@ -185,6 +185,13 @@ impl CompositorHandler for State {
                     } else {
                         activate
                     };
+                    // Neither do windows that the agent opened, directly or through an action.
+                    #[cfg(feature = "agent")]
+                    let activate = if self.agent_opened(toplevel) {
+                        ActivateWindow::No
+                    } else {
+                        activate
+                    };
 
                     let parent = toplevel
                         .parent()
@@ -231,6 +238,9 @@ impl CompositorHandler for State {
                         activate,
                     );
                     let output = output.cloned();
+
+                    #[cfg(feature = "agent")]
+                    self.agent_on_map(&window);
 
                     // The window state cannot contain Fullscreen and Maximized at once. Therefore,
                     // if the window ended up fullscreen, then we only know that it is also

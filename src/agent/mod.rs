@@ -9,7 +9,9 @@
 
 mod receipt;
 
+use std::ffi::OsStr;
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use async_channel::Sender;
@@ -29,18 +31,23 @@ use smithay::input::keyboard::{xkb, FilterResult, Keysym};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::rustix::net::sockopt::socket_peercred;
+use smithay::reexports::wayland_server::backend::ClientId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{DisplayHandle, Resource as _};
+use smithay::reexports::wayland_server::{Client, DisplayHandle, Resource as _};
 use smithay::utils::{IsAlive, Physical, Point, Rectangle, Scale, Size, Transform, SERIAL_COUNTER};
-use smithay::wayland::shell::xdg::PopupSurface;
+use smithay::wayland::shell::xdg::{PopupSurface, ToplevelSurface};
+use smithay::wayland::socket::ListeningSocketSource;
 
 use crate::layout::LayoutElement as _;
-use crate::niri::{ClientState, State};
+use crate::niri::{ClientState, NewClient, State};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{
     encompassing_geo, render_to_vec, RenderCtx, RenderIntent, RenderTarget,
 };
+use crate::utils::spawning::spawn_with_env;
 use crate::utils::write_png_rgba8;
 
 const SEAT_NAME: &str = "niri-agent";
@@ -54,6 +61,15 @@ const WHEEL_STEP: f64 = 15.;
 
 /// Most keysyms `inject_text_keysyms()` can bind in one keymap.
 const TYPE_CHUNK: usize = 200;
+
+/// Environment variable that tells which launch an agent app came from.
+const LAUNCH_ENV: &str = "NIRI_AGENT_LAUNCH";
+
+/// How long a launch waits for the app's first window.
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Windows that the user's apps open this soon after an agent action don't take focus.
+const RECENT_ACTION: Duration = Duration::from_secs(5);
 
 /// Executable names of clients that switch to the last seat they see, taking the user's keyboard,
 /// pointer and input method away when the agent seat appears.
@@ -70,6 +86,14 @@ pub struct AgentState {
     next_watch_id: u64,
     /// Output for frame callbacks to windows that aren't on any output.
     frame_output: Output,
+    /// Name of the Wayland socket for apps launched for the agent.
+    socket_name: Option<String>,
+    /// Launches waiting for their first window.
+    launches: Vec<(u64, Sender<Reply>)>,
+    next_launch_id: u64,
+    /// Clients that agent actions recently went to, so that windows they open don't take the
+    /// user's focus.
+    recent_clients: Vec<(ClientId, Instant)>,
 }
 
 impl AgentState {
@@ -81,7 +105,7 @@ impl AgentState {
         let mut seat = seat_state.new_wl_seat_with_filter(display, SEAT_NAME, |client| {
             client
                 .get_data::<ClientState>()
-                .is_none_or(|data| !data.hide_agent_seat)
+                .is_none_or(|data| data.agent_client || !data.hide_agent_seat)
         });
 
         // Same layout as the user's keyboard, so key combinations resolve the same way.
@@ -110,12 +134,59 @@ impl AgentState {
             watches: Vec::new(),
             next_watch_id: 0,
             frame_output,
+            socket_name: None,
+            launches: Vec::new(),
+            next_launch_id: 0,
+            recent_clients: Vec::new(),
         }
+    }
+
+    /// Creates the Wayland socket for apps launched for the agent, next to the main one.
+    pub fn create_socket(&mut self, event_loop: &LoopHandle<'static, State>, main: &OsStr) {
+        let name = format!("{}-agent", main.to_string_lossy());
+        let source = match ListeningSocketSource::with_name(&name) {
+            Ok(source) => source,
+            Err(err) => {
+                warn!("error creating the agent Wayland socket: {err:?}");
+                return;
+            }
+        };
+
+        event_loop
+            .insert_source(source, |client, _, state| {
+                // Agent apps get the same restrictions as sandboxed apps: no screencopy,
+                // virtual input, data control, layer shell and so on.
+                state.niri.insert_agent_client(NewClient {
+                    client,
+                    restricted: true,
+                    credentials_unknown: false,
+                });
+            })
+            .unwrap();
+
+        info!("agent apps connect to Wayland socket: {name}");
+        self.socket_name = Some(name);
     }
 
     pub fn is_agent_seat(&self, seat: &Seat<State>) -> bool {
         &self.seat == seat
     }
+}
+
+/// Whether a client sees the user's seat: all but agent apps do.
+pub fn sees_user_seat(client: &Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_none_or(|data| !data.agent_client)
+}
+
+/// Whether a surface belongs to an app launched for the agent.
+pub fn is_agent_surface(surface: &WlSurface) -> bool {
+    surface.client().is_some_and(|client| {
+        client
+            .get_data::<ClientState>()
+            .is_some_and(|data| data.agent_client)
+    })
 }
 
 /// Whether the agent seat should be hidden from a newly connected client.
@@ -130,6 +201,16 @@ pub fn hides_agent_seat(stream: &UnixStream, config: &Config) -> bool {
         debug!("hiding the agent seat from {name}");
     }
     hide
+}
+
+/// The agent launch a process came from, by its environment.
+fn launch_id_of(pid: i32) -> Option<u64> {
+    let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let prefix = format!("{LAUNCH_ENV}=");
+    environ
+        .split(|b| *b == 0)
+        .find_map(|var| var.strip_prefix(prefix.as_bytes()))
+        .and_then(|value| std::str::from_utf8(value).ok()?.parse().ok())
 }
 
 fn client_executable_name(stream: &UnixStream) -> Option<String> {
@@ -174,6 +255,10 @@ impl State {
         }
 
         let (id, device) = match &action {
+            AgentAction::Launch { command } => {
+                self.agent_launch(command.clone(), reply);
+                return;
+            }
             AgentAction::Capture { id } => {
                 if let Err(err) = self.agent_wait(*id, Wait::Capture(reply.clone())) {
                     let _ = reply.try_send(Err(err));
@@ -196,8 +281,14 @@ impl State {
         };
         let before = self.agent_snapshot(id);
 
+        if let Some(client) = target.toplevel.client() {
+            let agent = self.agent();
+            agent.recent_clients.retain(|(c, _)| *c != client.id());
+            agent.recent_clients.push((client.id(), Instant::now()));
+        }
+
         let result = match action {
-            AgentAction::Capture { .. } => unreachable!(),
+            AgentAction::Launch { .. } | AgentAction::Capture { .. } => unreachable!(),
             AgentAction::Move { x, y, .. } => {
                 self.agent_pointer_move(&target, Point::from((x, y)));
                 Ok(())
@@ -251,6 +342,127 @@ impl State {
         };
         if let Err(err) = result.and_then(|()| self.agent_wait(id, wait)) {
             let _ = reply.try_send(Err(err));
+        }
+    }
+
+    /// Whether a newly mapped window comes from the agent and must not take the user's focus.
+    ///
+    /// That's every window of agent apps, and windows that the user's apps open shortly after an
+    /// agent action, like a dialog the agent clicked open.
+    pub fn agent_opened(&mut self, toplevel: &ToplevelSurface) -> bool {
+        let surface = toplevel.wl_surface();
+        if is_agent_surface(surface) {
+            return true;
+        }
+
+        let Some(agent) = &mut self.niri.agent else {
+            return false;
+        };
+        agent
+            .recent_clients
+            .retain(|(_, at)| at.elapsed() < RECENT_ACTION);
+        let Some(client) = surface.client() else {
+            return false;
+        };
+        agent.recent_clients.iter().any(|(c, _)| *c == client.id())
+    }
+
+    fn agent_launch(&mut self, command: Vec<String>, reply: Sender<Reply>) {
+        let agent = self.agent();
+        let Some(socket_name) = agent.socket_name.clone() else {
+            let err = String::from("niri has no agent Wayland socket");
+            let _ = reply.try_send(Err(err));
+            return;
+        };
+
+        let id = agent.next_launch_id;
+        agent.next_launch_id += 1;
+        agent.launches.push((id, reply));
+
+        let env = vec![
+            (String::from("WAYLAND_DISPLAY"), Some(socket_name)),
+            (String::from(LAUNCH_ENV), Some(id.to_string())),
+            // X11 apps would go through Xwayland and the user's seat.
+            (String::from("DISPLAY"), None),
+            (
+                String::from("ELECTRON_OZONE_PLATFORM_HINT"),
+                Some(String::from("wayland")),
+            ),
+            (
+                String::from("QT_QPA_PLATFORM"),
+                Some(String::from("wayland")),
+            ),
+            (
+                String::from("SDL_VIDEODRIVER"),
+                Some(String::from("wayland")),
+            ),
+            // Agent apps shouldn't drive niri.
+            (String::from("NIRI_SOCKET"), None),
+        ];
+        spawn_with_env(command, None, env);
+
+        self.niri
+            .event_loop
+            .insert_source(Timer::from_duration(LAUNCH_TIMEOUT), move |_, _, state| {
+                let agent = state.agent();
+                if let Some(idx) = agent.launches.iter().position(|(i, _)| *i == id) {
+                    let (_, reply) = agent.launches.remove(idx);
+                    let err = format!(
+                        "no window appeared within {} s; if the app hands off to an \
+                         instance that's already running, give it a separate profile",
+                        LAUNCH_TIMEOUT.as_secs()
+                    );
+                    let _ = reply.try_send(Err(err));
+                }
+                TimeoutAction::Drop
+            })
+            .unwrap();
+    }
+
+    /// Replies to the launch that a newly mapped agent window belongs to.
+    pub fn agent_on_map(&mut self, window: &Window) {
+        let Some(agent) = &self.niri.agent else {
+            return;
+        };
+        if agent.launches.is_empty() {
+            return;
+        }
+
+        let Some(toplevel) = window.toplevel() else {
+            return;
+        };
+        let surface = toplevel.wl_surface().clone();
+        if !is_agent_surface(&surface) {
+            return;
+        }
+        let Some(client) = surface.client() else {
+            return;
+        };
+        let Some((mapped, _)) = self.niri.layout.find_window_and_output(&surface) else {
+            return;
+        };
+        let window_id = mapped.id().get();
+        let Some(info) = self.agent_window_info(window_id) else {
+            return;
+        };
+
+        // The launch id in the environment is exact, but some apps (Chromium) overwrite their
+        // environment block with the process title. Then fall back to the oldest launch, for
+        // windows that aren't dialogs of another window.
+        let pid = client
+            .get_credentials(&self.niri.display_handle)
+            .ok()
+            .map(|creds| creds.pid);
+        let launch_id = pid.and_then(launch_id_of);
+
+        let agent = self.agent();
+        let idx = match launch_id {
+            Some(launch_id) => agent.launches.iter().position(|(i, _)| *i == launch_id),
+            None => (info.parent_id.is_none() && !agent.launches.is_empty()).then_some(0),
+        };
+        if let Some(idx) = idx {
+            let (_, reply) = agent.launches.remove(idx);
+            let _ = reply.try_send(Ok(Response::AgentLaunched(info)));
         }
     }
 

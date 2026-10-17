@@ -316,7 +316,7 @@ impl State {
         windows.map(|(_, mapped)| mapped.id().get()).collect()
     }
 
-    fn agent_window_info(&self, window_id: u64) -> Option<AgentWindow> {
+    pub(super) fn agent_window_info(&self, window_id: u64) -> Option<AgentWindow> {
         let mapped = self.agent_mapped(window_id).ok()?;
         let toplevel = mapped.toplevel();
         let (app_id, title) =

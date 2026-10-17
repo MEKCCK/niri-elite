@@ -98,6 +98,20 @@ pub enum AgentAction {
         /// Key combination.
         keys: String,
     },
+    /// Launch an app for the agent seat and wait for its first window.
+    ///
+    /// The app connects through the agent's own Wayland socket: it sees only the agent seat, so
+    /// apps that handle a single seat (Chromium, Electron, kitty) work too, and it runs with the
+    /// same restrictions as sandboxed apps. Its windows match the `is-agent=true` window rule and
+    /// never take your focus.
+    ///
+    /// Apps that hand off to an already running instance (most browsers with the same profile)
+    /// open their window in that instance instead; give them a separate profile.
+    Launch {
+        /// Command to run.
+        #[cfg_attr(feature = "clap", arg(last = true, required = true))]
+        command: Vec<String>,
+    },
     /// Type text into a window.
     ///
     /// Any Unicode text works, independent of the keyboard layout and without an input method.

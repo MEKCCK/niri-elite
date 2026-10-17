@@ -179,6 +179,8 @@ pub enum Response {
     AgentCapture(agent::AgentCapture),
     /// What an agent action caused.
     AgentReceipt(agent::AgentReceipt),
+    /// Window of an app launched for the agent seat.
+    AgentLaunched(agent::AgentWindow),
 }
 
 /// Overview information.
@@ -1456,6 +1458,9 @@ pub struct Window {
     ///
     /// Minimized windows remain on their workspace but are hidden from the layout until restored.
     pub is_minimized: bool,
+    /// Whether this window belongs to an app launched for the agent seat.
+    #[serde(default)]
+    pub is_agent: bool,
     /// Position- and size-related properties of the window.
     pub layout: WindowLayout,
     /// Timestamp when the window was most recently focused.
