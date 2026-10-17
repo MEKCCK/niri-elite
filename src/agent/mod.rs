@@ -7,6 +7,7 @@
 //! and the agent pointer lives in the target window's buffer coordinate space rather than in the
 //! global space, so actions don't depend on where the window is on screen.
 
+pub mod cursor;
 mod receipt;
 
 use std::ffi::OsStr;
@@ -16,6 +17,7 @@ use std::{fs, thread};
 
 use async_channel::Sender;
 use base64::Engine as _;
+use cursor::AgentCursor;
 use niri_config::Config;
 use niri_ipc::agent::{AgentAction, AgentButton, AgentCapture};
 use niri_ipc::{Reply, Response};
@@ -28,7 +30,7 @@ use smithay::desktop::{
     WindowSurfaceType,
 };
 use smithay::input::keyboard::{xkb, FilterResult, Keysym};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
+use smithay::input::pointer::{AxisFrame, ButtonEvent, CursorIcon, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -41,6 +43,7 @@ use smithay::utils::{IsAlive, Physical, Point, Rectangle, Scale, Size, Transform
 use smithay::wayland::shell::xdg::{PopupSurface, ToplevelSurface};
 use smithay::wayland::socket::ListeningSocketSource;
 
+use crate::cursor::XCursor;
 use crate::layout::LayoutElement as _;
 use crate::niri::{ClientState, NewClient, State};
 use crate::render_helpers::xray::XrayPos;
@@ -64,6 +67,9 @@ const TYPE_CHUNK: usize = 200;
 
 /// Environment variable that tells which launch an agent app came from.
 const LAUNCH_ENV: &str = "NIRI_AGENT_LAUNCH";
+
+/// How often the agent cursor is redrawn while it animates.
+const CURSOR_TICK: Duration = Duration::from_millis(16);
 
 /// How long a launch waits for the app's first window.
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -94,6 +100,10 @@ pub struct AgentState {
     /// Clients that agent actions recently went to, so that windows they open don't take the
     /// user's focus.
     recent_clients: Vec<(ClientId, Instant)>,
+    /// Window that shows the agent cursor.
+    cursor_window: Option<WlSurface>,
+    /// Whether the agent cursor redraw timer runs.
+    cursor_timer: bool,
 }
 
 impl AgentState {
@@ -138,6 +148,8 @@ impl AgentState {
             launches: Vec::new(),
             next_launch_id: 0,
             recent_clients: Vec::new(),
+            cursor_window: None,
+            cursor_timer: false,
         }
     }
 
@@ -536,6 +548,100 @@ impl State {
             },
         );
         pointer.frame(self);
+
+        self.agent_update_cursor(&target.toplevel, |cursor| cursor.move_to(pos));
+    }
+
+    /// Shows the agent cursor on the window, moving it off the window it was on before.
+    fn agent_update_cursor(&mut self, toplevel: &WlSurface, update: impl FnOnce(&mut AgentCursor)) {
+        let previous = self.agent().cursor_window.replace(toplevel.clone());
+        if let Some(previous) = previous.filter(|previous| previous != toplevel) {
+            if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&previous) {
+                mapped.agent_cursor = None;
+            }
+        }
+
+        let Some((_, output)) = self.niri.layout.find_window_and_output(toplevel) else {
+            return;
+        };
+        let output = output.cloned();
+        let scale = output
+            .as_ref()
+            .map_or(1, |output| output.current_scale().integer_scale());
+
+        // The system arrow, whatever the user's own cursor looks like right now.
+        let xcursor = self.niri.cursor_manager.get_default_cursor(scale);
+        let (_, frame) = xcursor.frame(0);
+        let hotspot = XCursor::hotspot(frame).to_logical(scale).to_f64();
+        let arrow_size = Size::<i32, Physical>::from((frame.width as i32, frame.height as i32))
+            .to_logical(scale)
+            .to_f64();
+        let arrow = self
+            .niri
+            .cursor_texture_cache
+            .get(CursorIcon::Default, scale, &xcursor, 0);
+        let color = self.niri.config.borrow().layout.focus_ring.active_color;
+
+        let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(toplevel) else {
+            return;
+        };
+        let cursor = mapped.agent_cursor.get_or_insert_with(|| {
+            let halo = cursor::halo_buffer(color, scale);
+            AgentCursor::new(arrow, hotspot, arrow_size, halo)
+        });
+        update(cursor);
+
+        match output {
+            Some(output) => self.niri.queue_redraw(&output),
+            None => self.niri.queue_redraw_all(),
+        }
+
+        if !self.agent().cursor_timer {
+            self.agent().cursor_timer = true;
+            self.niri
+                .event_loop
+                .insert_source(Timer::from_duration(CURSOR_TICK), |_, _, state| {
+                    state.agent_cursor_tick()
+                })
+                .unwrap();
+        }
+    }
+
+    /// Redraws the agent cursor while it animates, and removes it once it has faded out.
+    fn agent_cursor_tick(&mut self) -> TimeoutAction {
+        let Some(toplevel) = self.agent().cursor_window.clone() else {
+            self.agent().cursor_timer = false;
+            return TimeoutAction::Drop;
+        };
+
+        let mut redraw = None;
+        let mut visible = false;
+        if let Some((mapped, output)) = self.niri.layout.find_window_and_output_mut(&toplevel) {
+            if let Some(cursor) = &mapped.agent_cursor {
+                visible = cursor.is_visible();
+                if cursor.is_animating() || !visible {
+                    redraw = Some(output.cloned());
+                }
+                if !visible {
+                    mapped.agent_cursor = None;
+                }
+            }
+        }
+
+        match redraw {
+            Some(Some(output)) => self.niri.queue_redraw(&output),
+            Some(None) => self.niri.queue_redraw_all(),
+            None => (),
+        }
+
+        if visible {
+            TimeoutAction::ToDuration(CURSOR_TICK)
+        } else {
+            let agent = self.agent();
+            agent.cursor_window = None;
+            agent.cursor_timer = false;
+            TimeoutAction::Drop
+        }
     }
 
     fn agent_button(&mut self, target: &Target, button: AgentButton, state: ButtonState) {
@@ -546,6 +652,9 @@ impl State {
         // popup grab instead.
         if state == ButtonState::Pressed && !self.agent_popup_grab_on(&target.toplevel) {
             self.agent_focus(target);
+        }
+        if state == ButtonState::Pressed {
+            self.agent_update_cursor(&target.toplevel, AgentCursor::click);
         }
 
         let button = match button {
@@ -813,14 +922,17 @@ impl State {
             };
             // Render the window geometry at the origin, so element positions are in window
             // coordinates.
-            mapped.render(
-                ctx,
-                Point::from((0., 0.)),
-                scale,
-                1.,
-                XrayPos::default(),
-                &mut |elem| elements.push(elem),
-            );
+            // The agent doesn't see its own cursor.
+            cursor::without_cursor(|| {
+                mapped.render(
+                    ctx,
+                    Point::from((0., 0.)),
+                    scale,
+                    1.,
+                    XrayPos::default(),
+                    &mut |elem| elements.push(elem),
+                )
+            });
 
             let geo = if geometry_only {
                 let size = mapped.window.geometry().size;
