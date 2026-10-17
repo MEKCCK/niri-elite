@@ -249,10 +249,6 @@ impl State {
             let _ = reply.try_send(Err(err));
             return;
         }
-        if self.niri.is_locked() {
-            let _ = reply.try_send(Err(String::from("the session is locked")));
-            return;
-        }
 
         let (id, device) = match &action {
             AgentAction::Launch { command } => {
@@ -512,32 +508,6 @@ impl State {
         }
 
         Ok(target)
-    }
-
-    /// Drops agent focus and grabs, for example when the session locks.
-    pub fn agent_release(&mut self) {
-        if self.niri.agent.is_none() {
-            return;
-        }
-
-        if let Some((_, mut grab)) = self.agent().popup_grab.take() {
-            grab.ungrab(smithay::desktop::PopupUngrabStrategy::All);
-        }
-
-        let seat = self.agent_seat();
-        let serial = SERIAL_COUNTER.next_serial();
-        seat.get_keyboard().unwrap().set_focus(self, None, serial);
-        let pointer = seat.get_pointer().unwrap();
-        pointer.motion(
-            self,
-            None,
-            &MotionEvent {
-                location: Point::from((0., 0.)),
-                serial,
-                time: InputTime::now(),
-            },
-        );
-        pointer.frame(self);
     }
 
     /// Moves the agent pointer to `pos` in window coordinates.
