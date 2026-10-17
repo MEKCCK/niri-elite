@@ -193,3 +193,8 @@ assets = [
     ["resources/niri.service", "/usr/lib/systemd/user/", "644"],
     ["resources/niri-shutdown.target", "/usr/lib/systemd/user/", "644"],
 ]
+
+# Fork-only: Smithay with SeatState::new_wl_seat_with_filter() for the agent seat.
+[patch."https://github.com/Smithay/smithay.git"]
+smithay = { path = "../smithay-agent" }
+smithay-drm-extras = { path = "../smithay-agent/smithay-drm-extras" }

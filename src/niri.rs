@@ -364,8 +364,10 @@ pub struct Niri {
     pub ext_data_control_state: ExtDataControlState,
     pub popups: PopupManager,
     pub popup_grab: Option<PopupGrabState>,
+    /// The agent seat, unless turned off in the config. Only read at startup, since clients like
+    /// GTK 3 ignore seats that appear later.
     #[cfg(feature = "agent")]
-    pub agent: crate::agent::AgentState,
+    pub agent: Option<crate::agent::AgentState>,
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
@@ -3346,7 +3348,8 @@ impl Niri {
         seat.add_pointer();
 
         #[cfg(feature = "agent")]
-        let agent = crate::agent::AgentState::new(&mut seat_state, &display_handle, &config_);
+        let agent = (!config_.agent.off)
+            .then(|| crate::agent::AgentState::new(&mut seat_state, &display_handle, &config_));
 
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
@@ -3641,6 +3644,8 @@ impl Niri {
             primary_selection_disabled: config.clipboard.disable_primary,
             restricted,
             credentials_unknown,
+            #[cfg(feature = "agent")]
+            hide_agent_seat: crate::agent::hides_agent_seat(&client, &config),
         });
 
         if let Err(err) = self.display_handle.insert_client(client, data) {
@@ -9089,6 +9094,9 @@ pub struct ClientState {
     pub restricted: bool,
     /// We cannot retrieve this client's socket credentials.
     pub credentials_unknown: bool,
+    /// Whether the agent seat global is hidden from this client.
+    #[cfg(feature = "agent")]
+    pub hide_agent_seat: bool,
 }
 
 impl ClientData for ClientState {

@@ -89,6 +89,7 @@ pub struct Config {
     pub magnifier: Magnifier,
     pub environment: Environment,
     pub xwayland_satellite: XwaylandSatellite,
+    pub agent: Agent,
     pub window_rules: Vec<WindowRule>,
     pub layer_rules: Vec<LayerRule>,
     pub binds: Binds,
@@ -213,6 +214,7 @@ where
                 "magnifier" => m_merge!(magnifier),
                 "screen-cast-picker" => m_merge!(screen_cast_picker),
                 "xwayland-satellite" => m_merge!(xwayland_satellite),
+                "agent" => m_merge!(agent),
                 "switch-events" => m_merge!(switch_events),
                 "debug" => m_merge!(debug),
 
@@ -1170,6 +1172,10 @@ mod tests {
             }
 
             screenshot-path "~/Screenshots/screenshot.png"
+
+            agent {
+                hide-seat-from "foo" "bar"
+            }
 
             clipboard {
                 disable-primary
@@ -2187,6 +2193,13 @@ mod tests {
             xwayland_satellite: XwaylandSatellite {
                 off: false,
                 path: "xwayland-satellite",
+            },
+            agent: Agent {
+                off: false,
+                hide_seat_from: [
+                    "foo",
+                    "bar",
+                ],
             },
             window_rules: [
                 WindowRule {

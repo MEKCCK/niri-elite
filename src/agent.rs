@@ -7,7 +7,8 @@
 //! and the agent pointer lives in the target window's buffer coordinate space rather than in the
 //! global space, so actions don't depend on where the window is on screen.
 
-use std::thread;
+use std::os::unix::net::UnixStream;
+use std::{fs, thread};
 
 use async_channel::Sender;
 use base64::Engine as _;
@@ -23,13 +24,14 @@ use smithay::desktop::{
 use smithay::input::keyboard::{xkb, FilterResult, Keysym};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, Focus, MotionEvent};
 use smithay::input::{Seat, SeatState};
+use smithay::reexports::rustix::net::sockopt::socket_peercred;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Point, Scale, Transform, SERIAL_COUNTER};
 use smithay::wayland::shell::xdg::PopupSurface;
 
 use crate::layout::LayoutElement as _;
-use crate::niri::State;
+use crate::niri::{ClientState, State};
 use crate::render_helpers::xray::XrayPos;
 use crate::render_helpers::{
     encompassing_geo, render_to_vec, RenderCtx, RenderIntent, RenderTarget,
@@ -48,6 +50,13 @@ const WHEEL_STEP: f64 = 15.;
 /// Most keysyms `inject_text_keysyms()` can bind in one keymap.
 const TYPE_CHUNK: usize = 200;
 
+/// Executable names of clients that switch to the last seat they see, taking the user's keyboard,
+/// pointer and input method away when the agent seat appears.
+const HIDE_SEAT_FROM: &[&str] = &[
+    // gpui keeps the seat whose capabilities arrive last.
+    "zed-editor",
+];
+
 pub struct AgentState {
     seat: Seat<State>,
     popup_grab: Option<(WlSurface, PopupGrab<State>)>,
@@ -59,7 +68,11 @@ impl AgentState {
         display: &DisplayHandle,
         config: &Config,
     ) -> Self {
-        let mut seat = seat_state.new_wl_seat(display, SEAT_NAME);
+        let mut seat = seat_state.new_wl_seat_with_filter(display, SEAT_NAME, |client| {
+            client
+                .get_data::<ClientState>()
+                .is_none_or(|data| !data.hide_agent_seat)
+        });
 
         // Same layout as the user's keyboard, so key combinations resolve the same way.
         let keyboard = &config.input.keyboard;
@@ -81,6 +94,29 @@ impl AgentState {
     }
 }
 
+/// Whether the agent seat should be hidden from a newly connected client.
+pub fn hides_agent_seat(stream: &UnixStream, config: &Config) -> bool {
+    let Some(name) = client_executable_name(stream) else {
+        return false;
+    };
+
+    let hide = HIDE_SEAT_FROM.contains(&name.as_str())
+        || config.agent.hide_seat_from.contains(&name);
+    if hide {
+        debug!("hiding the agent seat from {name}");
+    }
+    hide
+}
+
+fn client_executable_name(stream: &UnixStream) -> Option<String> {
+    let cred = socket_peercred(stream).ok()?;
+    let pid = cred.pid.as_raw_nonzero().get();
+    let exe = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let name = exe.file_name()?.to_str()?;
+    // The link of a replaced binary ends with " (deleted)".
+    Some(name.trim_end_matches(" (deleted)").to_owned())
+}
+
 struct Target {
     window: Window,
     toplevel: WlSurface,
@@ -88,6 +124,12 @@ struct Target {
 
 impl State {
     pub fn agent_action(&mut self, action: AgentAction, reply: Sender<Reply>) {
+        if self.niri.agent.is_none() {
+            let err = String::from("the agent seat is off, see `agent` in the config");
+            let _ = reply.try_send(Err(err));
+            return;
+        }
+
         let result = match action {
             AgentAction::Capture { id } => {
                 // Replies from the encoding thread.
@@ -142,8 +184,13 @@ impl State {
         let _ = reply.try_send(result.map(|()| Response::Handled));
     }
 
-    fn agent_seat(&self) -> Seat<State> {
-        self.niri.agent.seat.clone()
+    fn agent(&mut self) -> &mut AgentState {
+        // agent_action() refuses everything while the agent seat is off.
+        self.niri.agent.as_mut().unwrap()
+    }
+
+    fn agent_seat(&mut self) -> Seat<State> {
+        self.agent().seat.clone()
     }
 
     fn agent_target(&mut self, id: u64) -> Result<Target, String> {
@@ -303,7 +350,7 @@ impl State {
     }
 
     fn agent_popup_grab_on(&mut self, root: &WlSurface) -> bool {
-        let agent = &mut self.niri.agent;
+        let agent = self.agent();
         if agent
             .popup_grab
             .as_ref()
@@ -327,7 +374,12 @@ impl State {
         seat: &Seat<State>,
         serial: smithay::utils::Serial,
     ) -> bool {
-        if !self.niri.agent.is_agent_seat(seat) {
+        if !self
+            .niri
+            .agent
+            .as_ref()
+            .is_some_and(|agent| agent.is_agent_seat(seat))
+        {
             return false;
         }
 
@@ -364,7 +416,7 @@ impl State {
 
         keyboard.set_grab(self, PopupKeyboardGrab::new(&grab), serial);
         pointer.set_grab(self, PopupPointerGrab::new(&grab), serial, Focus::Keep);
-        self.niri.agent.popup_grab = Some((root, grab));
+        self.agent().popup_grab = Some((root, grab));
         true
     }
 
