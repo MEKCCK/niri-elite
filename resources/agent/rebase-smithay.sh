@@ -45,6 +45,6 @@ git push --quiet fork "seat-global-filter:$branch"
 
 cd "$root"
 sed -i "s/$current/$new/g" Cargo.toml
-cargo metadata --format-version 1 >/dev/null
+cargo metadata --quiet --format-version 1 >/dev/null
 
 echo "Smithay patch rebased: $current -> $new (on $base, branch $branch)."
