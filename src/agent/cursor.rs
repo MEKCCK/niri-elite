@@ -29,7 +29,7 @@ const HALO_SIZE: f64 = 44.;
 const HALO_ALPHA: f32 = 0.55;
 
 /// The cursor stays this long after the last action, then fades out.
-const IDLE: Duration = Duration::from_secs(2);
+const IDLE: Duration = Duration::from_secs(8);
 const FADE: Duration = Duration::from_millis(500);
 
 /// Click ripple: the halo grows from `RIPPLE_FROM` to `RIPPLE_TO` while fading out.
