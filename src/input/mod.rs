@@ -19,7 +19,9 @@ use smithay::backend::input::{
 };
 use smithay::backend::libinput::LibinputInputBackend;
 use smithay::input::dnd::DnDGrab;
-use smithay::input::keyboard::{keysyms, FilterResult, Keysym, Layout, ModifiersState};
+use smithay::input::keyboard::{
+    keysyms, FilterResult, KeyboardSource, Keysym, Layout, ModifiersState,
+};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, CursorIcon, CursorImageStatus, Focus, GestureHoldBeginEvent,
     GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
@@ -38,6 +40,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle, Transform, SERIAL_COUNTER};
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitor;
 use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
+use smithay::wayland::virtual_keyboard::VirtualKeyboardDevice;
 use touch_overview_grab::TouchOverviewGrab;
 
 use self::magnifier_center_grab::MagnifierCenterGrab;
@@ -432,7 +435,26 @@ impl State {
         &mut self,
         event: I::KeyboardKeyEvent,
         consumed_by_a11y: &mut bool,
-    ) {
+    ) where
+        I::Device: 'static,
+    {
+        let device = event.device();
+        let virtual_keyboard = (&device as &dyn Any).downcast_ref::<VirtualKeyboardDevice>();
+
+        // Restore the real keymap if required (the virtual keyboard uses its own one).
+        if virtual_keyboard.is_none() {
+            self.restore_configured_keymap();
+        }
+
+        // Keys from a virtual keyboard are tracked separately from the physical
+        // ones, otherwise, a virtual keyboard sending a key already held by
+        // another keyboard (an IME, e.g., fcitx, forwarding keys it got through its
+        // grab) would release it prematurely.
+        //
+        // Note that keyboard shortcuts can still be pressed across multiple
+        // keyboards even with this, as intended.
+        let source = virtual_keyboard.map_or(KeyboardSource::MAIN, |device| device.source());
+
         let mod_key = self.backend.mod_key(&self.niri.config.borrow());
 
         let serial = SERIAL_COUNTER.next_serial();
@@ -483,7 +505,8 @@ impl State {
         #[cfg(not(feature = "dbus"))]
         let _ = consumed_by_a11y;
 
-        let maybe_bind = self.niri.seat.get_keyboard().unwrap().input(
+        let Some(Some(bind)) = self.niri.seat.get_keyboard().unwrap().input_from_source(
+            source,
             self,
             event.key_code(),
             event.state(),
@@ -769,14 +792,12 @@ impl State {
 
                 res
             },
-        );
-
-        if let Some(bind) = self.niri.completed_modifier_bind.take() {
-            self.handle_bind(bind);
-            return;
-        }
-
-        let Some(Some(bind)) = maybe_bind else {
+        ) else {
+            // A modifier bind completes on its key's release, which the filter never intercepts
+            // with a bind.
+            if let Some(bind) = self.niri.completed_modifier_bind.take() {
+                self.handle_bind(bind);
+            }
             return;
         };
 
@@ -899,13 +920,25 @@ impl State {
             }
             Action::ChangeVt(vt) => {
                 self.backend.change_vt(vt);
+
                 // Changing VT may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
+
+                // Stop ongoing key repeat if any.
+                if let Some(token) = self.niri.bind_repeat_timer.take() {
+                    self.niri.event_loop.remove(token);
+                }
             }
             Action::Suspend => {
                 self.backend.suspend();
+
                 // Suspend may not deliver the key releases, so clear the state.
                 self.niri.suppressed_keys.clear();
+
+                // Stop ongoing key repeat if any.
+                if let Some(token) = self.niri.bind_repeat_timer.take() {
+                    self.niri.event_loop.remove(token);
+                }
             }
             Action::PowerOffMonitors => {
                 self.niri.deactivate_monitors(&mut self.backend);
@@ -5320,7 +5353,9 @@ fn find_bind<'a>(
                 modifiers: Modifiers::empty(),
             },
             action,
-            repeat: true,
+            // Repeating VT switches and power off doesn't make sense (and it actually happens on
+            // FreeBSD where it doesn't get released and ends up broken).
+            repeat: false,
             cooldown: None,
             allow_when_locked: false,
             // In a worst-case scenario, the user has no way to unlock the compositor and a
@@ -5646,6 +5681,7 @@ fn allowed_when_locked(action: &Action) -> bool {
             | Action::PowerOnMonitors
             | Action::SwitchLayout(_)
             | Action::ToggleKeyboardShortcutsInhibit
+            | Action::ToggleTouchpad
     )
 }
 
@@ -5657,6 +5693,7 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             | Action::Suspend
             | Action::PowerOffMonitors
             | Action::PowerOnMonitors
+            | Action::ToggleTouchpad
             // Intended for binds such as volume up/down, lock the screen, etc.
             | Action::Spawn(_)
             | Action::SpawnSh(_)
