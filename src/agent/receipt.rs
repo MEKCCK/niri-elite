@@ -18,7 +18,10 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::utils::{IsAlive as _, Physical, Rectangle, Size, SERIAL_COUNTER};
 use smithay::wayland::compositor::{get_role, with_states};
-use smithay::wayland::shell::xdg::{PopupSurface, XdgPopupSurfaceData, XDG_POPUP_ROLE};
+use smithay::wayland::shell::xdg::{
+    PopupSurface, ShellClient, XdgPopupSurfaceData, XDG_POPUP_ROLE,
+};
+use smithay::wayland::shell::PingError;
 
 use crate::niri::State;
 use crate::utils::{get_monotonic_time, with_toplevel_role};
@@ -50,6 +53,14 @@ const RECEIPT_LIMITS: Limits = Limits {
     max: Duration::from_secs(2),
 };
 
+/// Longest wait for a client that's busy: it hasn't answered a ping since the action, or it's
+/// setting up a window it just created. Building a dialog can block an app for over a second.
+const BUSY_MAX: Duration = Duration::from_secs(5);
+
+/// Pings sent this long after the action show that the client got past handling it: an app
+/// answers pings while reading its events, before acting on the input read in the same batch.
+const RESPONSIVE_AFTER: Duration = Duration::from_millis(50);
+
 /// Before a capture: wait for one fresh frame, if the window has anything new to show.
 const CAPTURE_LIMITS: Limits = Limits {
     quiet: Duration::ZERO,
@@ -77,6 +88,14 @@ pub(super) struct Watch {
     last_commit: Option<Instant>,
     limits: &'static Limits,
     wait: Wait,
+    /// The window's xdg_wm_base, for pinging the client.
+    shell: ShellClient,
+    /// When the ping awaiting its pong was sent.
+    ping_sent: Option<Instant>,
+    /// When the last answered ping was sent.
+    answered: Option<Instant>,
+    /// Toplevels of the client that were waiting for their first commit before the action.
+    unmapped_before: HashSet<ObjectId>,
 }
 
 /// State of the target window and its surroundings, to compare against after an action.
@@ -99,6 +118,8 @@ impl State {
             .client()
             .ok_or_else(|| format!("window {window_id} has no client"))?
             .id();
+        let shell = mapped.toplevel().client();
+        let unmapped_before = self.agent_unmapped_of(&client);
 
         let limits = match wait {
             Wait::Capture { .. } => &CAPTURE_LIMITS,
@@ -117,6 +138,10 @@ impl State {
             last_commit: None,
             limits,
             wait,
+            shell,
+            ping_sent: None,
+            answered: None,
+            unmapped_before,
         });
 
         self.agent_send_frame(window_id);
@@ -151,14 +176,72 @@ impl State {
         }
     }
 
+    /// Notes that a client answered the ping of a watch.
+    pub fn agent_on_pong(&mut self, shell: &ShellClient) {
+        let Some(agent) = &mut self.niri.agent else {
+            return;
+        };
+        for watch in &mut agent.watches {
+            if &watch.shell == shell {
+                if let Some(sent) = watch.ping_sent.take() {
+                    watch.answered = Some(sent);
+                }
+            }
+        }
+    }
+
+    /// Toplevels of a client that haven't had their first commit with a buffer yet.
+    fn agent_unmapped_of(&self, client: &ClientId) -> HashSet<ObjectId> {
+        self.niri
+            .unmapped_windows
+            .keys()
+            .filter(|surface| surface.client().is_some_and(|c| &c.id() == client))
+            .map(|surface| surface.id())
+            .collect()
+    }
+
+    /// Whether the watched client may still be working on its response to the action.
+    fn agent_watch_busy(&mut self, idx: usize, now: Instant) -> bool {
+        let agent = self.agent();
+        let watch = &mut agent.watches[idx];
+        if !matches!(watch.wait, Wait::Receipt { .. }) {
+            return false;
+        }
+
+        if watch.ping_sent.is_none() {
+            match watch.shell.send_ping(SERIAL_COUNTER.next_serial()) {
+                Ok(()) | Err(PingError::PingAlreadyPending(_)) => watch.ping_sent = Some(now),
+                // Nothing to wait for.
+                Err(PingError::DeadSurface) => watch.answered = Some(now),
+            }
+        }
+        let responsive = watch
+            .answered
+            .is_some_and(|sent| sent >= watch.start + RESPONSIVE_AFTER);
+
+        let client = watch.client.clone();
+        let before = watch.unmapped_before.clone();
+        let opening = self
+            .agent_unmapped_of(&client)
+            .iter()
+            .any(|surface| !before.contains(surface));
+
+        !responsive || opening
+    }
+
     fn agent_wait_tick(&mut self, id: u64) -> TimeoutAction {
+        let now = Instant::now();
+        let Some(idx) = self.agent().watches.iter().position(|w| w.id == id) else {
+            return TimeoutAction::Drop;
+        };
+        let busy = self.agent_watch_busy(idx, now);
+
         let agent = self.agent();
         let Some(idx) = agent.watches.iter().position(|w| w.id == id) else {
             return TimeoutAction::Drop;
         };
 
         let watch = &mut agent.watches[idx];
-        let now = Instant::now();
         let elapsed = now - watch.start;
         let limits = watch.limits;
 
@@ -167,12 +250,15 @@ impl State {
         let stalled = now - watch.last_tick > TICK * 4;
         watch.last_tick = now;
 
-        let settled = !stalled
-            && match watch.last_commit {
-                Some(last) => now - last >= limits.quiet,
-                None => elapsed >= limits.idle,
-            };
-        if !settled && elapsed < limits.max {
+        let quiet = match watch.last_commit {
+            Some(last) => now - last >= limits.quiet,
+            None => elapsed >= limits.idle,
+        };
+        let settled = !stalled && !busy && quiet;
+        // A client that keeps drawing ends the wait at the time limit; one that's busy gets
+        // longer, as it's about to show something.
+        let max = if busy { BUSY_MAX } else { limits.max };
+        if !settled && elapsed < max {
             let window_id = watch.window_id;
             self.agent_send_frame(window_id);
             return TimeoutAction::ToDuration(TICK);

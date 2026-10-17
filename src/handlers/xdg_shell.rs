@@ -32,7 +32,7 @@ use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorati
 use smithay::wayland::shell::wlr_layer::{self, Layer};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    PopupSurface, PositionerState, ShellClient, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
@@ -59,6 +59,13 @@ impl XdgShellHandler for State {
         let unmapped = Unmapped::new(Window::new_wayland_window(surface));
         let existing = self.niri.unmapped_windows.insert(wl_surface, unmapped);
         assert!(existing.is_none());
+    }
+
+    fn client_pong(&mut self, client: ShellClient) {
+        #[cfg(feature = "agent")]
+        self.agent_on_pong(&client);
+        #[cfg(not(feature = "agent"))]
+        let _ = client;
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
