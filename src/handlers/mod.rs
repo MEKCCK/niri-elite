@@ -94,7 +94,12 @@ impl SeatHandler for State {
         &mut self.niri.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, mut image: CursorImageStatus) {
+    fn cursor_image(&mut self, seat: &Seat<Self>, mut image: CursorImageStatus) {
+        // Only the user's seat has a visible cursor.
+        if seat != &self.niri.seat {
+            return;
+        }
+
         // FIXME: this hack should be removable once the screenshot UI is tracked with a
         // PointerFocus properly.
         if self.niri.screenshot_ui.is_open() {
@@ -334,10 +339,14 @@ impl WaylandDndGrabHandler for State {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.niri.dnd_icon = icon.map(|surface| DndIcon {
-            surface,
-            offset: Point::new(0, 0),
-        });
+        // Drags from other seats (the agent seat) neither show an icon at the user's cursor nor
+        // affect the user's focus when they end.
+        if seat == self.niri.seat {
+            self.niri.dnd_icon = icon.map(|surface| DndIcon {
+                surface,
+                offset: Point::new(0, 0),
+            });
+        }
 
         match type_ {
             dnd::GrabType::Pointer => {
@@ -365,11 +374,15 @@ impl DndGrabHandler for State {
         &mut self,
         target: Option<DndTarget<'_, Self>>,
         validated: bool,
-        _seat: Seat<Self>,
+        seat: Seat<Self>,
         location: Point<f64, Logical>,
     ) {
         let target: Option<&WlSurface> = target.map(DndTarget::into_inner);
         trace!("dnd dropped, target: {target:?}, validated: {validated}");
+
+        if seat != self.niri.seat {
+            return;
+        }
 
         // End DnD before activating a specific window below so that it takes precedence.
         self.niri.on_maybe_dnd_ended();
@@ -396,8 +409,12 @@ impl DndGrabHandler for State {
         }
     }
 
-    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+    fn cancelled(&mut self, seat: Seat<Self>, _location: Point<f64, Logical>) {
         trace!("dnd cancelled");
+
+        if seat != self.niri.seat {
+            return;
+        }
 
         self.niri.on_maybe_dnd_ended();
     }
@@ -815,6 +832,12 @@ impl XdgActivationHandler for State {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        // Agent apps never take the user's focus.
+        #[cfg(feature = "agent")]
+        if crate::agent::is_agent_surface(&surface) {
+            return;
+        }
+
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();

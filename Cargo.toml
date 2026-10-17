@@ -133,7 +133,9 @@ xshell = "0.2.7"
 pkg-config = "0.3"
 
 [features]
-default = ["dbus", "systemd", "xdp-gnome-screencast"]
+default = ["agent", "dbus", "systemd", "xdp-gnome-screencast"]
+# Enables the agent seat, a second input seat for automation over IPC.
+agent = []
 # Enables D-Bus support (serve various freedesktop and GNOME interfaces, accessibility tree, power button handling).
 dbus = ["dep:zbus", "dep:async-io", "dep:accesskit", "dep:accesskit_unix"]
 # Enables systemd integration (global environment, apps in transient scopes).
@@ -191,3 +193,9 @@ assets = [
     ["resources/niri.service", "/usr/lib/systemd/user/", "644"],
     ["resources/niri-shutdown.target", "/usr/lib/systemd/user/", "644"],
 ]
+
+# Fork-only: Smithay with SeatState::new_wl_seat_with_filter() for the agent seat. When upstream
+# bumps the Smithay rev above, rebase the seat-global-filter commit onto it and update this rev.
+[patch."https://github.com/Smithay/smithay.git"]
+smithay = { git = "https://github.com/SHORiN-KiWATA/smithay.git", rev = "7e4a1baccd6f9f752a19a4aea194d5f6403bb588" }
+smithay-drm-extras = { git = "https://github.com/SHORiN-KiWATA/smithay.git", rev = "7e4a1baccd6f9f752a19a4aea194d5f6403bb588" }

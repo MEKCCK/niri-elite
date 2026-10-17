@@ -37,7 +37,7 @@ use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
-use crate::window::Mapped;
+use crate::window::{Mapped, WindowRef};
 
 // If an event stream client fails to read events fast enough that we accumulate more than this
 // number in our buffer, we drop that event stream client.
@@ -475,6 +475,23 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
         }
+        Request::Agent(action) => {
+            #[cfg(feature = "agent")]
+            {
+                let (tx, rx) = async_channel::bounded(1);
+                ctx.event_loop.insert_idle(move |state| {
+                    state.agent_action(action, tx);
+                });
+                let result = rx.recv().await;
+                return result.map_err(|_| String::from("error running agent action"))?;
+            }
+
+            #[cfg(not(feature = "agent"))]
+            {
+                let _ = action;
+                return Err(String::from("niri was built without the agent feature"));
+            }
+        }
     };
 
     Ok(response)
@@ -572,6 +589,7 @@ fn make_ipc_window(
         is_floating: mapped.is_floating(),
         is_urgent: mapped.is_urgent(),
         is_minimized: mapped.is_minimized(),
+        is_agent: WindowRef::Mapped(mapped).is_agent(),
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
     })

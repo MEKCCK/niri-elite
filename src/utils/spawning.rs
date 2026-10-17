@@ -64,6 +64,17 @@ pub fn restore_nofile_rlimit() {
 
 /// Spawns the command to run independently of the compositor.
 pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, token: Option<XdgActivationToken>) {
+    spawn_with_env(command, token, Vec::new());
+}
+
+/// Spawns the command with extra environment variables; `None` removes a variable.
+///
+/// These are applied after the configured environment, so they take precedence.
+pub fn spawn_with_env<T: AsRef<OsStr> + Send + 'static>(
+    command: Vec<T>,
+    token: Option<XdgActivationToken>,
+    env: Vec<(String, Option<String>)>,
+) {
     let _span = tracy_client::span!();
 
     if command.is_empty() {
@@ -75,7 +86,7 @@ pub fn spawn<T: AsRef<OsStr> + Send + 'static>(command: Vec<T>, token: Option<Xd
         .name("Command Spawner".to_owned())
         .spawn(move || {
             let (command, args) = command.split_first().unwrap();
-            spawn_sync(command, args, token);
+            spawn_sync(command, args, token, env);
         });
 
     if let Err(err) = res {
@@ -97,6 +108,7 @@ fn spawn_sync(
     command: impl AsRef<OsStr>,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
     token: Option<XdgActivationToken>,
+    extra_env: Vec<(String, Option<String>)>,
 ) {
     let _span = tracy_client::span!();
 
@@ -148,6 +160,14 @@ fn spawn_sync(
         }
     }
     drop(env);
+
+    for (name, value) in extra_env {
+        if let Some(value) = value {
+            process.env(name, value);
+        } else {
+            process.env_remove(name);
+        }
+    }
 
     if let Some(token) = token.as_ref() {
         process.env("XDG_ACTIVATION_TOKEN", token.as_str());

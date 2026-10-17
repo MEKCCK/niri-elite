@@ -364,6 +364,10 @@ pub struct Niri {
     pub ext_data_control_state: ExtDataControlState,
     pub popups: PopupManager,
     pub popup_grab: Option<PopupGrabState>,
+    /// The agent seat, unless turned off in the config. Only read at startup, since clients like
+    /// GTK 3 ignore seats that appear later.
+    #[cfg(feature = "agent")]
+    pub agent: Option<crate::agent::AgentState>,
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
@@ -3315,6 +3319,14 @@ impl Niri {
         #[cfg(test)]
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
 
+        // Apps launched for the agent see only the agent seat.
+        #[cfg(feature = "agent")]
+        let mut seat: Seat<State> = seat_state.new_wl_seat_with_filter(
+            &display_handle,
+            backend.seat_name(),
+            crate::agent::sees_user_seat,
+        );
+        #[cfg(not(feature = "agent"))]
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         let keyboard = match seat.add_keyboard(
             config_.input.keyboard.xkb.to_xkb_config(),
@@ -3342,6 +3354,10 @@ impl Niri {
             keyboard.set_modifier_state(modifier_state);
         }
         seat.add_pointer();
+
+        #[cfg(feature = "agent")]
+        let mut agent = (!config_.agent.off)
+            .then(|| crate::agent::AgentState::new(&mut seat_state, &display_handle, &config_));
 
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
@@ -3397,6 +3413,11 @@ impl Niri {
                 .unwrap();
             socket_name
         });
+
+        #[cfg(feature = "agent")]
+        if let (Some(agent), Some(socket_name)) = (&mut agent, &socket_name) {
+            agent.create_socket(&event_loop, socket_name);
+        }
 
         let ipc_server = match IpcServer::start(&event_loop, socket_name.as_deref()) {
             Ok(server) => Some(server),
@@ -3523,6 +3544,8 @@ impl Niri {
             ext_data_control_state,
             popups: PopupManager::default(),
             popup_grab: None,
+            #[cfg(feature = "agent")]
+            agent,
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
             bind_cooldown_timers: HashMap::new(),
@@ -3621,6 +3644,19 @@ impl Niri {
     }
 
     pub fn insert_client(&mut self, client: NewClient) {
+        self.insert_client_inner(client, false);
+    }
+
+    /// Inserts a client that connected through the agent socket.
+    #[cfg(feature = "agent")]
+    pub fn insert_agent_client(&mut self, client: NewClient) {
+        self.insert_client_inner(client, true);
+    }
+
+    fn insert_client_inner(&mut self, client: NewClient, agent: bool) {
+        #[cfg(not(feature = "agent"))]
+        let _ = agent;
+
         let NewClient {
             client,
             restricted,
@@ -3634,6 +3670,10 @@ impl Niri {
             primary_selection_disabled: config.clipboard.disable_primary,
             restricted,
             credentials_unknown,
+            #[cfg(feature = "agent")]
+            hide_agent_seat: crate::agent::hides_agent_seat(&client, &config),
+            #[cfg(feature = "agent")]
+            agent_client: agent,
         });
 
         if let Err(err) = self.display_handle.insert_client(client, data) {
@@ -9082,6 +9122,12 @@ pub struct ClientState {
     pub restricted: bool,
     /// We cannot retrieve this client's socket credentials.
     pub credentials_unknown: bool,
+    /// Whether the agent seat global is hidden from this client.
+    #[cfg(feature = "agent")]
+    pub hide_agent_seat: bool,
+    /// Whether this client connected through the agent socket.
+    #[cfg(feature = "agent")]
+    pub agent_client: bool,
 }
 
 impl ClientData for ClientState {
@@ -9319,7 +9365,10 @@ mod screen_cast_picker_preview_tests {
     #[test]
     fn picker_is_visible_to_outputs_and_normal_captures_only() {
         assert!(should_render_screen_cast_picker(true, RenderIntent::Normal));
-        assert!(should_render_screen_cast_picker(false, RenderIntent::Normal));
+        assert!(should_render_screen_cast_picker(
+            false,
+            RenderIntent::Normal
+        ));
         assert!(!should_render_screen_cast_picker(
             false,
             RenderIntent::PickerPreview
