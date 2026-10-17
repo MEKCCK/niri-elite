@@ -52,7 +52,6 @@ use crate::render_helpers::{
     encompassing_geo, render_to_vec, RenderCtx, RenderIntent, RenderTarget,
 };
 use crate::utils::spawning::spawn_with_env;
-use crate::utils::write_png_rgba8;
 
 const SEAT_NAME: &str = "niri-agent";
 
@@ -1016,7 +1015,7 @@ impl State {
         let scale = scale.x;
         thread::spawn(move || {
             let mut png = Vec::new();
-            let result = write_png_rgba8(&mut png, geo.size.w as u32, geo.size.h as u32, &pixels)
+            let result = write_capture_png(&mut png, geo.size.w as u32, geo.size.h as u32, &pixels)
                 .map(|()| {
                     Response::AgentCapture(AgentCapture {
                         png_base64: base64::engine::general_purpose::STANDARD.encode(&png),
@@ -1110,6 +1109,21 @@ impl State {
             scale,
         })
     }
+}
+
+/// Encodes a capture as PNG, favoring speed: the image is read once, right away.
+fn write_capture_png(
+    w: impl std::io::Write,
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+) -> Result<(), png::EncodingError> {
+    let mut encoder = png::Encoder::new(w, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder.set_compression(png::Compression::Fast);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(pixels)
 }
 
 /// A keymap with each keysym on its own keycode at the base level, so no modifiers are needed.

@@ -5,6 +5,7 @@
 //! these short waits, agent windows are throttled like any other off-screen window.
 
 use std::collections::HashSet;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use async_channel::Sender;
@@ -183,8 +184,21 @@ impl State {
                 }
             }
             Wait::Receipt { before, reply } => {
-                let receipt = self.agent_receipt(watch.window_id, before, settled, elapsed);
-                let _ = reply.try_send(Ok(Response::AgentReceipt(receipt)));
+                let (mut receipt, images) =
+                    self.agent_receipt(watch.window_id, before, settled, elapsed);
+                match images {
+                    // Comparing the images takes a few milliseconds on big windows; keep it off
+                    // the compositor's thread.
+                    Some(images) => {
+                        thread::spawn(move || {
+                            receipt.changed = images.changed();
+                            let _ = reply.send_blocking(Ok(Response::AgentReceipt(receipt)));
+                        });
+                    }
+                    None => {
+                        let _ = reply.try_send(Ok(Response::AgentReceipt(receipt)));
+                    }
+                }
             }
         }
 
@@ -230,7 +244,7 @@ impl State {
         before: Option<Snapshot>,
         settled: bool,
         elapsed: Duration,
-    ) -> AgentReceipt {
+    ) -> (AgentReceipt, Option<ImagePair>) {
         let mut receipt = AgentReceipt {
             settled,
             elapsed_ms: elapsed.as_millis() as u64,
@@ -245,7 +259,7 @@ impl State {
         };
 
         let Some(before) = before else {
-            return receipt;
+            return (receipt, None);
         };
 
         let windows = self.agent_window_ids();
@@ -259,27 +273,23 @@ impl State {
             .filter_map(|id| self.agent_window_info(id))
             .collect();
 
-        let Some(after) = self.agent_snapshot(window_id) else {
-            return receipt;
+        let Some(mut after) = self.agent_snapshot(window_id) else {
+            return (receipt, None);
         };
 
-        if let (Some((size_before, pixels_before)), Some((size, pixels))) =
-            (&before.image, &after.image)
+        let mut images = None;
+        if let (Some((size_before, before_pixels)), Some((size, after_pixels))) =
+            (before.image, after.image.take())
         {
-            let to_logical = |rect: Rectangle<i32, Physical>| AgentRect {
-                x: f64::from(rect.loc.x) / after.scale,
-                y: f64::from(rect.loc.y) / after.scale,
-                w: f64::from(rect.size.w) / after.scale,
-                h: f64::from(rect.size.h) / after.scale,
-            };
-
             if size_before == size && before.scale == after.scale {
-                receipt.changed = changed_rects(pixels_before, pixels, *size)
-                    .into_iter()
-                    .map(to_logical)
-                    .collect();
+                images = Some(ImagePair {
+                    size,
+                    scale: after.scale,
+                    before: before_pixels,
+                    after: after_pixels,
+                });
             } else {
-                let whole = to_logical(Rectangle::from_size(*size));
+                let whole = to_logical(Rectangle::from_size(size), after.scale);
                 receipt.resized = Some((whole.w, whole.h));
                 receipt.changed = vec![whole];
             }
@@ -302,7 +312,7 @@ impl State {
             receipt.title = after.title;
         }
 
-        receipt
+        (receipt, images)
     }
 
     pub(super) fn agent_mapped(&self, window_id: u64) -> Result<&Mapped, String> {
@@ -384,6 +394,33 @@ fn popups(mapped: &Mapped) -> Vec<(ObjectId, AgentRect)> {
             (popup.wl_surface().id(), rect)
         })
         .collect()
+}
+
+/// The window before and after an action, rendered at the same size.
+struct ImagePair {
+    size: Size<i32, Physical>,
+    scale: f64,
+    before: Vec<u8>,
+    after: Vec<u8>,
+}
+
+impl ImagePair {
+    /// Changed areas in window coordinates.
+    fn changed(&self) -> Vec<AgentRect> {
+        changed_rects(&self.before, &self.after, self.size)
+            .into_iter()
+            .map(|rect| to_logical(rect, self.scale))
+            .collect()
+    }
+}
+
+fn to_logical(rect: Rectangle<i32, Physical>, scale: f64) -> AgentRect {
+    AgentRect {
+        x: f64::from(rect.loc.x) / scale,
+        y: f64::from(rect.loc.y) / scale,
+        w: f64::from(rect.size.w) / scale,
+        h: f64::from(rect.size.h) / scale,
+    }
 }
 
 /// Areas that differ between two RGBA images of the same size.
