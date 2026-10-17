@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context};
 use base64::Engine as _;
 use niri_config::OutputName;
 use niri_ipc::agent::{AgentAction, AgentCapture};
-use niri_ipc::socket::Socket;
+use niri_ipc::socket::{Socket, SOCKET_PATH_ENV};
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
     OutputConfigChanged, Overview, Request, Response, Transform, Window, WindowLayout,
@@ -18,6 +18,13 @@ use crate::cli::Msg;
 use crate::utils::version;
 
 pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Result<()> {
+    // Shells that niri didn't start, like a coding agent's, don't have NIRI_SOCKET.
+    if env::var_os(SOCKET_PATH_ENV).is_none() {
+        if let Some(path) = find_niri_socket() {
+            env::set_var(SOCKET_PATH_ENV, path);
+        }
+    }
+
     // For actions taking paths, prepend the niri CLI's working directory.
     if let Msg::Action {
         action:
@@ -1024,4 +1031,48 @@ fn prepare_agent_action(
     *y = info.origin.1 + (*y + 0.5) / info.scale;
 
     Ok(action)
+}
+
+/// Finds the socket of a running niri for when NIRI_SOCKET isn't set.
+///
+/// Sockets are named `niri.<wayland display>.<pid>.sock`. Prefers the instance for WAYLAND_DISPLAY,
+/// then the only one running, then the only session instance among several (nested ones aside).
+fn find_niri_socket() -> Option<PathBuf> {
+    let dir = env::var_os("XDG_RUNTIME_DIR")?;
+    let wayland_display = env::var("WAYLAND_DISPLAY").ok().filter(|d| !d.is_empty());
+
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(rest) = name
+            .strip_prefix("niri.")
+            .and_then(|r| r.strip_suffix(".sock"))
+        else {
+            continue;
+        };
+        let Some((display, pid)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        // Skip sockets left behind by an instance that's gone.
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let is_session = cmdline.split(|b| *b == 0).any(|arg| arg == b"--session");
+        found.push((display.to_owned(), is_session, entry.path()));
+    }
+
+    if let Some(display) = wayland_display {
+        if let Some((_, _, path)) = found.iter().find(|(d, _, _)| *d == display) {
+            return Some(path.clone());
+        }
+    }
+    if found.len() == 1 {
+        return found.pop().map(|(_, _, path)| path);
+    }
+    let mut sessions = found.into_iter().filter(|(_, is_session, _)| *is_session);
+    match (sessions.next(), sessions.next()) {
+        (Some((_, _, path)), None) => Some(path),
+        _ => None,
+    }
 }
