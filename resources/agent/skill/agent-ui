@@ -66,7 +66,13 @@ def niri_info(window_id):
     )
     if out.returncode != 0:
         sys.exit(out.stderr.strip() or "niri msg agent info failed")
-    return json.loads(out.stdout)
+    info = json.loads(out.stdout)
+    out = subprocess.run([NIRI, "msg", "-j", "windows"], capture_output=True, text=True)
+    if out.returncode == 0:
+        for window in json.loads(out.stdout):
+            if window["id"] == window_id:
+                info["title"] = window.get("title")
+    return info
 
 
 def find_app(pid):
@@ -151,20 +157,32 @@ def main():
     scale = info.get("scale", 1.0)
     find = args.find.lower() if args.find else None
 
-    # Each top-level accessible of the app is a window or a popup. Pick the one that matches
-    # the niri window by size; popups come after it.
+    # Each top-level accessible of the app is a window or a popup. Pick the one for this niri
+    # window: by title, which niri knows, then by size. Apps with several windows of the same
+    # size (browsers) can't be told apart by size, and the agent's windows never get the
+    # "active" state that marks the focused one.
     roots = list(frames(app))
-    main_root = None
-    for root in roots:
+    title = (info.get("title") or "").strip()
+
+    def fits(root):
         e = extents(root)
-        if e and abs(e[2] - (w + 2 * ox)) <= 2 * ox + 2 and abs(e[3] - (h + 2 * oy)) <= 2 * oy + 2:
-            try:
-                if root.get_state_set().contains(Atspi.StateType.ACTIVE) or main_root is None:
-                    main_root = root
-            except Exception:
-                main_root = root
+        return e and abs(e[2] - (w + 2 * ox)) <= 2 * ox + 2 and abs(e[3] - (h + 2 * oy)) <= 2 * oy + 2
+
+    def name_of(root):
+        try:
+            return (root.get_name() or "").strip()
+        except Exception:
+            return ""
+
+    main_root = None
+    if title:
+        named = [r for r in roots if name_of(r) == title] or [
+            r for r in roots if name_of(r) and (name_of(r) in title or title in name_of(r))
+        ]
+        main_root = next((r for r in named if fits(r)), named[0] if named else None)
     if main_root is None:
-        main_root = roots[0] if roots else app
+        sized = [r for r in roots if fits(r)]
+        main_root = sized[0] if sized else (roots[0] if roots else app)
 
     count = 0
     lines = []
