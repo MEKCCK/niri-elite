@@ -1,11 +1,12 @@
-use std::io::{BufRead as _, ErrorKind, Write};
+use std::io::{BufRead as _, ErrorKind, Read as _, Write};
 use std::iter::Peekable;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{env, slice};
 
 use anyhow::{anyhow, bail, Context};
 use base64::Engine as _;
 use niri_config::OutputName;
+use niri_ipc::agent::{AgentAction, AgentCapture};
 use niri_ipc::socket::Socket;
 use niri_ipc::{
     Action, Cast, CastKind, CastTarget, Event, KeyboardLayouts, LogicalOutput, Mode, Output,
@@ -50,7 +51,7 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
         Msg::RequestError => Request::ReturnError,
         Msg::OverviewState => Request::OverviewState,
         Msg::Casts => Request::Casts,
-        Msg::Agent { action } => Request::Agent(action.clone()),
+        Msg::Agent { action, image } => Request::Agent(prepare_agent_action(action, image)?),
         Msg::RawRequest => {
             let mut buf = Vec::new();
             let mut stdin = std::io::stdin().lock();
@@ -371,6 +372,19 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                 println!("{output}");
             }
             Response::AgentCapture(capture) => {
+                if let Msg::Agent {
+                    action:
+                        AgentAction::Capture {
+                            id,
+                            path: Some(path),
+                            ..
+                        },
+                    ..
+                } = &msg
+                {
+                    return write_agent_capture(*id, path, &capture);
+                }
+
                 if json {
                     let output =
                         serde_json::to_string(&capture).context("error formatting response")?;
@@ -912,4 +926,102 @@ mod tests {
         assert_snapshot!(fmt_rounded(2.006), @"2.01");
         assert_snapshot!(fmt_rounded(2.1), @"2.10");
     }
+}
+
+/// Where a capture written with `agent capture --path` sits in its window, saved next to the PNG.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AgentCaptureInfo {
+    id: u64,
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    /// Window coordinates of the image's top-left corner.
+    origin: (f64, f64),
+    /// Image pixels per logical pixel.
+    scale: f64,
+}
+
+fn agent_capture_info_path(image: &Path) -> PathBuf {
+    let mut path = image.as_os_str().to_owned();
+    path.push(".json");
+    PathBuf::from(path)
+}
+
+fn write_agent_capture(id: u64, path: &Path, capture: &AgentCapture) -> anyhow::Result<()> {
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(&capture.png_base64)
+        .context("error decoding capture response")?;
+    // Width and height are the first fields of the IHDR chunk.
+    let dim = |at: usize| {
+        png.get(at..at + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    let (Some(width), Some(height)) = (dim(16), dim(20)) else {
+        bail!("capture response is not a PNG");
+    };
+
+    std::fs::write(path, &png).with_context(|| format!("error writing {path:?}"))?;
+
+    let info = AgentCaptureInfo {
+        id,
+        path: std::path::absolute(path).unwrap_or_else(|_| path.to_owned()),
+        width,
+        height,
+        origin: capture.origin,
+        scale: capture.scale,
+    };
+    let json = serde_json::to_string(&info).context("error formatting capture info")?;
+    let info_path = agent_capture_info_path(path);
+    std::fs::write(&info_path, &json).with_context(|| format!("error writing {info_path:?}"))?;
+
+    println!("{json}");
+    Ok(())
+}
+
+/// Resolves the CLI conveniences of an agent action before sending it.
+fn prepare_agent_action(
+    action: &AgentAction,
+    image: &Option<PathBuf>,
+) -> anyhow::Result<AgentAction> {
+    let mut action = action.clone();
+
+    if let AgentAction::Type { text, .. } = &mut action {
+        if text == "-" {
+            text.clear();
+            std::io::stdin()
+                .read_to_string(text)
+                .context("error reading text from stdin")?;
+        }
+    }
+
+    let Some(image) = image else {
+        return Ok(action);
+    };
+
+    let info_path = agent_capture_info_path(image);
+    let info = std::fs::read(&info_path).with_context(|| {
+        format!("error reading {info_path:?}; was the image made with `capture --path`?")
+    })?;
+    let info: AgentCaptureInfo =
+        serde_json::from_slice(&info).with_context(|| format!("error parsing {info_path:?}"))?;
+
+    let (id, x, y) = match &mut action {
+        AgentAction::Move { id, x, y }
+        | AgentAction::Click { id, x, y, .. }
+        | AgentAction::Button { id, x, y, .. }
+        | AgentAction::Scroll { id, x, y, .. } => (id, x, y),
+        _ => bail!("--image only applies to move, click, button and scroll"),
+    };
+    if *id != info.id {
+        bail!(
+            "{image:?} is a capture of window {}, not window {id}",
+            info.id
+        );
+    }
+
+    // Pixel centers, so that pixel (0, 0) maps to the middle of its area.
+    *x = info.origin.0 + (*x + 0.5) / info.scale;
+    *y = info.origin.1 + (*y + 0.5) / info.scale;
+
+    Ok(action)
 }

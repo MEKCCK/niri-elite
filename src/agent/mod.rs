@@ -255,8 +255,12 @@ impl State {
                 self.agent_launch(command.clone(), reply);
                 return;
             }
-            AgentAction::Capture { id } => {
-                if let Err(err) = self.agent_wait(*id, Wait::Capture(reply.clone())) {
+            AgentAction::Capture { id, max_size, .. } => {
+                let wait = Wait::Capture {
+                    reply: reply.clone(),
+                    max_size: *max_size,
+                };
+                if let Err(err) = self.agent_wait(*id, wait) {
                     let _ = reply.try_send(Err(err));
                 }
                 return;
@@ -732,12 +736,25 @@ impl State {
     }
 
     /// Renders the window with its popups and replies with the PNG from a thread.
-    fn agent_capture(&mut self, id: u64, reply: Sender<Reply>) -> Result<(), String> {
+    fn agent_capture(
+        &mut self,
+        id: u64,
+        max_size: Option<u32>,
+        reply: Sender<Reply>,
+    ) -> Result<(), String> {
+        // Render smaller rather than downscaling the image afterwards.
+        let mut scale = self.agent_window_scale(id);
+        if let Some(max_size) = max_size {
+            let bbox = self.agent_mapped(id)?.window.bbox_with_popups();
+            let longest = f64::from(bbox.size.w.max(bbox.size.h).max(1));
+            scale = scale.min(f64::from(max_size.max(1)) / longest);
+        }
+
         let Rendered {
             area: geo,
             pixels,
             scale,
-        } = self.agent_render(id, false)?;
+        } = self.agent_render(id, false, Some(scale))?;
 
         let origin = geo.loc.to_f64().to_logical(scale);
         let scale = scale.x;
@@ -771,8 +788,13 @@ impl State {
     ///
     /// With `geometry_only`, the area is just the window geometry; otherwise it also covers
     /// client-side shadows and popups.
-    fn agent_render(&mut self, id: u64, geometry_only: bool) -> Result<Rendered, String> {
-        let scale = Scale::from(self.agent_window_scale(id));
+    fn agent_render(
+        &mut self,
+        id: u64,
+        geometry_only: bool,
+        scale: Option<f64>,
+    ) -> Result<Rendered, String> {
+        let scale = Scale::from(scale.unwrap_or_else(|| self.agent_window_scale(id)));
         let mapped = self
             .niri
             .layout

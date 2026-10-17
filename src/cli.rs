@@ -119,6 +119,9 @@ pub enum Msg {
     /// window without moving your cursor or focus. Points are in logical pixels relative to the
     /// window's top-left corner; `capture` writes the window image to stdout.
     Agent {
+        /// Treat the points of pointer actions as pixels of this image from `capture --path`.
+        #[arg(long, global = true)]
+        image: Option<PathBuf>,
         #[command(subcommand)]
         action: AgentAction,
     },

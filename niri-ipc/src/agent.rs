@@ -24,6 +24,17 @@ pub enum AgentAction {
         /// Id of the window.
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
+        /// Render smaller so that the image's longer side is at most this many pixels.
+        #[cfg_attr(feature = "clap", arg(long))]
+        #[serde(default)]
+        max_size: Option<u32>,
+        /// Write the PNG to this file, and its coordinate mapping as JSON next to it
+        /// (`<path>.json`), instead of writing the PNG to stdout.
+        ///
+        /// Handled by the CLI; not part of the request.
+        #[cfg_attr(feature = "clap", arg(long))]
+        #[serde(skip)]
+        path: Option<std::path::PathBuf>,
     },
     /// Move the agent pointer to a point in a window.
     Move {
@@ -119,7 +130,7 @@ pub enum AgentAction {
         /// Id of the window.
         #[cfg_attr(feature = "clap", arg(long))]
         id: u64,
-        /// Text to type.
+        /// Text to type, or `-` to read it from stdin.
         text: String,
     },
 }

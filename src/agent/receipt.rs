@@ -55,7 +55,10 @@ const CAPTURE_LIMITS: Limits = Limits {
 };
 
 pub(super) enum Wait {
-    Capture(Sender<Reply>),
+    Capture {
+        reply: Sender<Reply>,
+        max_size: Option<u32>,
+    },
     Receipt {
         before: Option<Snapshot>,
         reply: Sender<Reply>,
@@ -95,7 +98,7 @@ impl State {
             .id();
 
         let limits = match wait {
-            Wait::Capture(_) => &CAPTURE_LIMITS,
+            Wait::Capture { .. } => &CAPTURE_LIMITS,
             Wait::Receipt { .. } => &RECEIPT_LIMITS,
         };
 
@@ -174,8 +177,8 @@ impl State {
 
         let watch = agent.watches.swap_remove(idx);
         match watch.wait {
-            Wait::Capture(reply) => {
-                if let Err(err) = self.agent_capture(watch.window_id, reply.clone()) {
+            Wait::Capture { reply, max_size } => {
+                if let Err(err) = self.agent_capture(watch.window_id, max_size, reply.clone()) {
                     let _ = reply.try_send(Err(err));
                 }
             }
@@ -207,7 +210,7 @@ impl State {
 
     pub(super) fn agent_snapshot(&mut self, window_id: u64) -> Option<Snapshot> {
         let image = self
-            .agent_render(window_id, true)
+            .agent_render(window_id, true, None)
             .ok()
             .map(|rendered| (rendered.area.size, rendered.pixels));
 
