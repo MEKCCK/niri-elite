@@ -12,6 +12,7 @@ Usage:
     --id N       window id from `niri msg -j windows`
     --find TEXT  only controls whose name, role or text contains TEXT (case-insensitive)
     --all        also list containers and unnamed text (panels, fillers, paragraphs)
+    --offscreen  also list the parts of web pages scrolled out of view (always on with --find)
     --json       one JSON object per line instead of text
 
 Apps expose their tree only with accessibility on. GTK and Qt do by default. Firefox, Chromium
@@ -39,7 +40,7 @@ INTERACTIVE = {
     "push button", "button", "toggle button", "check box", "radio button", "check menu item",
     "radio menu item", "menu item", "menu", "combo box", "entry", "password text", "text",
     "spin button", "slider", "link", "page tab", "list item", "table cell", "tree item",
-    "scroll bar", "editbar", "toggle", "switch", "icon",
+    "scroll bar", "editbar", "toggle", "switch", "icon", "heading",
 }
 # Roles that are just structure.
 CONTAINERS = {
@@ -129,6 +130,7 @@ def main():
     parser.add_argument("--id", type=int, required=True)
     parser.add_argument("--find")
     parser.add_argument("--all", action="store_true")
+    parser.add_argument("--offscreen", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -146,6 +148,7 @@ def main():
     ox, oy = info["surface_offset"]
     popups = info.get("popup_surfaces", [])
     w, h = info["size"]
+    scale = info.get("scale", 1.0)
     find = args.find.lower() if args.find else None
 
     # Each top-level accessible of the app is a window or a popup. Pick the one that matches
@@ -166,13 +169,19 @@ def main():
     count = 0
     lines = []
 
-    def emit(obj, role, name, rect, origin, depth):
-        x, y, rw, rh = rect
+    def emit(obj, role, name, rect, origin, depth, div):
+        x, y, rw, rh = (v / div for v in rect)
         cx = round(x + rw / 2 - origin[0], 1)
         cy = round(y + rh / 2 - origin[1], 1)
-        if cx < -1 or cy < -1 or cx > w + 1 or cy > h + 1:
-            return
+        rw, rh = round(rw), round(rh)
         states = [label for label, st in STATES if obj.get_state_set().contains(st)]
+        # Scrolled out of view: listed so that the caller knows to scroll, not to click there.
+        if cy < 0:
+            states.append("offscreen above")
+        elif cy > h:
+            states.append("offscreen below")
+        elif cx < 0 or cx > w:
+            states.append("offscreen")
         try:
             ss = obj.get_state_set()
             if not ss.contains(Atspi.StateType.ENABLED) and role in INTERACTIVE:
@@ -183,6 +192,13 @@ def main():
         if text and len(text) == 200:
             text += "…"
         value = value_of(obj)
+        if role == "heading":
+            try:
+                level = obj.get_attributes().get("level")
+            except Exception:
+                level = None
+            if level:
+                role = f"heading {level}"
         hay = " ".join(str(v) for v in (role, name, text or "") if v).lower()
         if find and find not in hay:
             return
@@ -195,7 +211,7 @@ def main():
             entry["value"] = value
         lines.append((depth, entry))
 
-    def walk(obj, origin, depth, in_popup):
+    def walk(obj, origin, depth, in_popup, div=1.0, in_doc=False):
         nonlocal count
         count += 1
         if count > MAX_NODES:
@@ -206,9 +222,22 @@ def main():
             ss = obj.get_state_set()
         except Exception:
             return
-        if not ss.contains(Atspi.StateType.SHOWING) and role not in ("application",):
+        # Web pages keep the whole page in the tree, with the part scrolled out of view not
+        # SHOWING but still VISIBLE. Elsewhere, not SHOWING means hidden.
+        shown = ss.contains(Atspi.StateType.SHOWING) or (
+            in_doc and ss.contains(Atspi.StateType.VISIBLE)
+        )
+        if not shown and role != "application":
             return
+        in_doc = in_doc or role in ("document web", "document frame")
         rect = extents(obj)
+
+        # Chromium reports web content in physical pixels on fractionally scaled outputs, while
+        # its own UI and other apps use logical pixels. Spot that by the document being wider
+        # than the window.
+        if role in ("document web", "document frame") and rect and div == 1.0 and scale > 1:
+            if rect[2] > (w + 2 * ox) * 1.1:
+                div = scale
 
         # GTK 3 reports the items of an open menu relative to the menu's popup surface, whose
         # top-left corner niri reports in window coordinates.
@@ -227,7 +256,7 @@ def main():
             or role == "static" and name
         )
         if listed:
-            emit(obj, role, name, rect, origin, depth)
+            emit(obj, role, name, rect, origin, depth, div)
 
         # Nothing interesting below a text field or a link, besides its text.
         if role in ("entry", "password text", "link") and not args.all:
@@ -239,7 +268,7 @@ def main():
         for i in range(min(n, 2000)):
             child = obj.get_child_at_index(i)
             if child is not None:
-                walk(child, child_origin, depth + 1, in_popup)
+                walk(child, child_origin, depth + 1, in_popup, div, in_doc)
 
     # Coordinates from the surface origin to window coordinates.
     walk(main_root, (ox, oy), 0, 0)
@@ -252,6 +281,14 @@ def main():
             continue
         px, py = popups[-1]
         walk(root, (-px, -py), 0, 1)
+
+    # Long pages have thousands of controls out of view; by default list only what's on screen.
+    hidden = 0
+    if not (args.offscreen or find):
+        shown = [(d, e) for d, e in lines if not any(
+            st.startswith("offscreen") for st in e.get("states", []))]
+        hidden = len(lines) - len(shown)
+        lines = shown
 
     if not lines:
         if find:
@@ -272,6 +309,8 @@ def main():
         name = f" {e['name']!r}" if e["name"] else ""
         tail = f" [{'; '.join(extra)}]" if extra else ""
         print(f"{e['role']}{name} @ {e['x']:g},{e['y']:g} ({e['w']}x{e['h']}){tail}")
+    if hidden and not args.json:
+        print(f"({hidden} more out of view; --offscreen lists them, --find searches them)")
 
 
 if __name__ == "__main__":
