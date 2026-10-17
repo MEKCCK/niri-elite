@@ -580,13 +580,13 @@ impl State {
             .niri
             .cursor_texture_cache
             .get(CursorIcon::Default, scale, &xcursor, 0);
-        let color = self.niri.config.borrow().layout.focus_ring.active_color;
+        let focus_ring = self.niri.config.borrow().layout.focus_ring;
 
         let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(toplevel) else {
             return;
         };
         let cursor = mapped.agent_cursor.get_or_insert_with(|| {
-            let halo = cursor::halo_buffer(color, scale);
+            let halo = cursor::halo_buffer(&focus_ring, scale);
             AgentCursor::new(arrow, hotspot, arrow_size, halo)
         });
         update(cursor);

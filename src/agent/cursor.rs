@@ -1,6 +1,6 @@
 //! The agent's cursor, drawn on the window it acts on.
 //!
-//! It's the system arrow, a bit transparent, with a feathered halo in the focus ring color, and a
+//! It's the system arrow, a bit transparent, with a feathered halo in the focus ring colors, and a
 //! soft ripple on clicks. It's part of the window's own rendering, so it follows the window
 //! wherever niri draws it (scrolling, overview, grid, screencasts) without knowing about the
 //! layout. It fades out when the agent stops acting on the window, and agent captures leave it
@@ -9,7 +9,7 @@
 use std::cell::Cell;
 use std::time::{Duration, Instant};
 
-use niri_config::Color;
+use niri_config::FocusRing;
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
@@ -172,8 +172,16 @@ impl AgentCursor {
     }
 }
 
-/// Renders the halo: a feathered disc of `color`, `HALO_SIZE` logical pixels wide.
-pub fn halo_buffer(color: Color, scale: i32) -> MemoryRenderBuffer {
+/// Renders the halo: a feathered disc, `HALO_SIZE` logical pixels wide, colored like the active
+/// focus ring: its gradient if it has one, laid across the disc at the same angle.
+pub fn halo_buffer(focus_ring: &FocusRing, scale: i32) -> MemoryRenderBuffer {
+    let (from, to, angle) = match focus_ring.active_gradient {
+        Some(gradient) => (gradient.from, gradient.to, f64::from(gradient.angle)),
+        None => (focus_ring.active_color, focus_ring.active_color, 0.),
+    };
+    // CSS angles: 0 points up, 90 points right.
+    let (dir_x, dir_y) = (angle.to_radians().sin(), -angle.to_radians().cos());
+
     let size = (HALO_SIZE * f64::from(scale)).round() as i32;
     let radius = f64::from(size) / 2.;
 
@@ -183,15 +191,22 @@ pub fn halo_buffer(color: Color, scale: i32) -> MemoryRenderBuffer {
             let dx = f64::from(x) + 0.5 - radius;
             let dy = f64::from(y) + 0.5 - radius;
             let t = ((dx * dx + dy * dy).sqrt() / radius).min(1.);
+
+            // Position along the gradient, 0 at its start and 1 at its end.
+            let g = (((dx * dir_x + dy * dir_y) / radius + 1.) / 2.).clamp(0., 1.) as f32;
+            let mix = |a: f32, b: f32| a + (b - a) * g;
+            let (r, gr, b) = (mix(from.r, to.r), mix(from.g, to.g), mix(from.b, to.b));
+            let color_a = mix(from.a, to.a);
+
             // Gaussian-like falloff that reaches exactly zero at the edge.
-            let a = HALO_ALPHA as f64 * color.a as f64 * (-2. * t * t).exp() * (1. - t * t);
+            let a = f64::from(HALO_ALPHA * color_a) * (-2. * t * t).exp() * (1. - t * t);
 
             // Premultiplied ARGB8888, which is B, G, R, A in memory.
             let channel = |c: f32| (f64::from(c) * a * 255.).round() as u8;
             pixels.extend_from_slice(&[
-                channel(color.b),
-                channel(color.g),
-                channel(color.r),
+                channel(b),
+                channel(gr),
+                channel(r),
                 (a * 255.).round() as u8,
             ]);
         }
