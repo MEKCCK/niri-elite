@@ -397,6 +397,10 @@ pub fn handle_msg(mut msg: Msg, json: bool, print_request: bool) -> anyhow::Resu
                 let output = serde_json::to_string(&window).context("error formatting response")?;
                 println!("{output}");
             }
+            Response::AgentInfo(info) => {
+                let output = serde_json::to_string(&info).context("error formatting response")?;
+                println!("{output}");
+            }
             Response::AgentCapture(capture) => {
                 if let Msg::Agent {
                     action:

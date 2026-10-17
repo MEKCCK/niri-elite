@@ -19,7 +19,7 @@ use async_channel::Sender;
 use base64::Engine as _;
 use cursor::AgentCursor;
 use niri_config::Config;
-use niri_ipc::agent::{AgentAction, AgentButton, AgentCapture};
+use niri_ipc::agent::{AgentAction, AgentButton, AgentCapture, AgentInfo};
 use niri_ipc::{Reply, Response};
 use receipt::{Wait, Watch};
 use smithay::backend::allocator::Fourcc;
@@ -303,6 +303,11 @@ impl State {
                 self.agent_launch(command.clone(), reply);
                 return;
             }
+            AgentAction::Info { id } => {
+                let result = self.agent_info(*id).map(Response::AgentInfo);
+                let _ = reply.try_send(result);
+                return;
+            }
             AgentAction::Capture { id, max_size, .. } => {
                 let wait = Wait::Capture {
                     reply: reply.clone(),
@@ -338,7 +343,9 @@ impl State {
         // Pointer actions first move the pointer; what they do at the destination may have to
         // wait for the client to take in the pointer entering a new surface.
         let (pos, pointer_input) = match action {
-            AgentAction::Launch { .. } | AgentAction::Capture { .. } => unreachable!(),
+            AgentAction::Launch { .. } | AgentAction::Capture { .. } | AgentAction::Info { .. } => {
+                unreachable!()
+            }
             AgentAction::Move { x, y, .. } => ((x, y), None),
             AgentAction::Click {
                 x,
@@ -1049,6 +1056,19 @@ impl State {
         });
 
         Ok(())
+    }
+
+    fn agent_info(&self, id: u64) -> Result<AgentInfo, String> {
+        let mapped = self.agent_mapped(id)?;
+        let geo = mapped.window.geometry();
+        Ok(AgentInfo {
+            id,
+            pid: mapped.credentials().map(|creds| creds.pid),
+            surface_offset: (f64::from(geo.loc.x), f64::from(geo.loc.y)),
+            size: (f64::from(geo.size.w), f64::from(geo.size.h)),
+            scale: self.agent_window_scale(id),
+            popup_surfaces: receipt::popup_surfaces(mapped),
+        })
     }
 
     /// Scale of the output the window is on.

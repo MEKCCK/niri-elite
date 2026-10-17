@@ -123,6 +123,16 @@ pub enum AgentAction {
         #[cfg_attr(feature = "clap", arg(last = true, required = true))]
         command: Vec<String>,
     },
+    /// Print where a window's geometry sits in its surface, and its process id.
+    ///
+    /// For tools that read the window's accessibility tree: AT-SPI's window coordinates are
+    /// relative to the surface, which can include client-side shadows; subtract `surface_offset`
+    /// to get the window coordinates that actions take.
+    Info {
+        /// Id of the window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: u64,
+    },
     /// Type text into a window.
     ///
     /// Any Unicode text works, independent of the keyboard layout and without an input method.
@@ -216,6 +226,26 @@ pub struct AgentRect {
     pub w: f64,
     /// Height.
     pub h: f64,
+}
+
+/// Facts about a window for tools that work with the agent seat.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+pub struct AgentInfo {
+    /// Id of the window.
+    pub id: u64,
+    /// Process id of the window's client, if known.
+    pub pid: Option<i32>,
+    /// Position of the window geometry's top-left corner in the window's main surface, in logical
+    /// pixels.
+    pub surface_offset: (f64, f64),
+    /// Size of the window geometry in logical pixels.
+    pub size: (f64, f64),
+    /// Scale of the output the window is on.
+    pub scale: f64,
+    /// Top-left corners of the surfaces of the window's open popups (menus, dropdowns), in
+    /// window coordinates, outermost popup first.
+    pub popup_surfaces: Vec<(f64, f64)>,
 }
 
 /// Window that opened during an agent action.

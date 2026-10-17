@@ -17,6 +17,8 @@ use smithay::reexports::wayland_server::backend::{ClientId, ObjectId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::utils::{IsAlive as _, Physical, Rectangle, Size, SERIAL_COUNTER};
+use smithay::wayland::compositor::{get_role, with_states};
+use smithay::wayland::shell::xdg::{PopupSurface, XdgPopupSurfaceData, XDG_POPUP_ROLE};
 
 use crate::niri::State;
 use crate::utils::{get_monotonic_time, with_toplevel_role};
@@ -377,6 +379,45 @@ impl State {
             AgentFocus::Other
         }
     }
+}
+
+/// Top-left corners of the surfaces of the window's xdg popups in window coordinates, outermost
+/// first.
+pub(super) fn popup_surfaces(mapped: &Mapped) -> Vec<(f64, f64)> {
+    // Popup offsets are positions of their geometry relative to the window geometry.
+    let mut popups: Vec<_> = PopupManager::popups_for_surface(mapped.toplevel().wl_surface())
+        .filter_map(|(popup, offset)| match popup {
+            PopupKind::Xdg(ref xdg) => {
+                let origin = offset - popup.geometry().loc;
+                Some((
+                    popup_depth(&xdg),
+                    (f64::from(origin.x), f64::from(origin.y)),
+                ))
+            }
+            _ => None,
+        })
+        .collect();
+    popups.sort_by_key(|(depth, _)| *depth);
+    popups.into_iter().map(|(_, origin)| origin).collect()
+}
+
+/// How many popups an xdg popup is nested in.
+fn popup_depth(popup: &PopupSurface) -> usize {
+    let mut depth = 0;
+    let mut parent = popup.get_parent_surface();
+    while let Some(surface) = parent {
+        if get_role(&surface) != Some(XDG_POPUP_ROLE) {
+            break;
+        }
+        depth += 1;
+        parent = with_states(&surface, |states| {
+            states
+                .data_map
+                .get::<XdgPopupSurfaceData>()
+                .and_then(|data| data.lock().unwrap().parent.clone())
+        });
+    }
+    depth
 }
 
 /// The window's xdg popups, in window coordinates.

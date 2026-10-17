@@ -51,22 +51,42 @@ niri msg agent launch -- chromium --user-data-dir="$HOME/.local/share/niri-agent
 
 | 应用 | 参数 |
 |---|---|
-| Chromium / Chrome | `--user-data-dir="$HOME/.local/share/niri-agent/chromium"` |
+| Chromium / Chrome | `--user-data-dir="$HOME/.local/share/niri-agent/chromium" --force-renderer-accessibility`，前面加 `env ACCESSIBILITY_ENABLED=1` |
 | VS Code | `--user-data-dir="$HOME/.local/share/niri-agent/vscode"` |
 | Mousepad | `--disable-server` |
 
 这些 profile 里没有用户的登录状态。
 
-## 标准循环：截图 → 看图 → 动作 → 看回执
+## 标准循环：看控件或截图 → 动作 → 看回执
 
-**1. 截图**，存成文件后用 Read 工具看：
+**1a. 先读控件列表**（同目录的 `agent-ui`）。它从应用的无障碍接口读出按钮、菜单项、输入框、链接，带名字、状态和可以直接点击的窗口坐标：
+
+```sh
+~/.claude/skills/niri-agent/agent-ui --id 7
+~/.claude/skills/niri-agent/agent-ui --id 7 --find 首选项      # 只看名字或文字里有"首选项"的
+```
+
+```
+menu item '首选项...' @ 227,521.5 (324x31)
+check box '显示行号' @ 197,125.5 (352x27)
+check box '使用系统等宽字体' @ 119.5,368.5 (197x27) [checked]
+spin button @ 299,216 (128x34) [disabled; text='80'; value=80]
+link 'Learn more' @ 304,953 (86x20)
+```
+
+- `@ X,Y` 是控件中心的窗口坐标，**直接 `click --id 7 X Y`，不加 `--image`**。
+- 比截图快（零点几秒）、便宜（几百 token）、准确（名字是原文，不用认图片里的小字），还能读出复选框是否勾上、输入框里的文字。
+- GTK、Qt 应用和用 `agent-firefox` 开的 Firefox 都有。Chromium、Electron 要按上表带上无障碍参数启动。kitty、Alacritty、游戏等没有，会报错叫你截图。
+- 它看不到颜色、图片、布局，也不知道页面长什么样。要判断"界面看起来对不对"、或者列表里没有你要的东西时，截图。
+
+**1b. 截图**，存成文件后用 Read 工具看：
 
 ```sh
 mkdir -p /tmp/niri-agent
 niri msg agent capture --id 7 --path /tmp/niri-agent/7.png --max-size 1280
 ```
 
-- `--max-size 1280` 让长边不超过 1280 像素，太小会看不清，太大浪费 token。
+- `--max-size 1280` 让长边不超过 1280 像素，太小会看不清，太大浪费 token。图片要的 token 只看像素尺寸，和文件大小无关。
 - 图片包括窗口的阴影和展开的菜单。截图前会先等窗口交出最新的一帧。
 - 旁边会写一份 `7.png.json`，记录图片和窗口坐标的对应关系，下一步要用。
 
@@ -87,6 +107,15 @@ niri msg agent key    --id 7 Return
 - 按键名是 xkb 的键名：`Return`、`Escape`、`Tab`、`BackSpace`、`Delete`、`Up`、`Down`、`Left`、`Right`、`Page_Down`、`Home`、`F5`……修饰键写 `ctrl`、`shift`、`alt`、`super`，用 `+` 连起来，比如 `ctrl+shift+t`。
 - 拖动：`button --pressed true` 按下，`move` 到目标，`button --pressed false` 松开，都带同一个 `--image`。
 - 窗口 id 必须和截图对应。截图换了窗口，就重新截。
+- **连着做几步时，用 `--require-change` 加 `&&` 串起来**，一次 shell 调用做完。哪一步什么都没改变（点空了），它打印回执后以退出码 3 失败，后面的步骤不会执行，不会把字打进错的地方：
+
+```sh
+niri msg agent --require-change click --id 7 304 120 &&
+printf '%s' '张三' | niri msg agent type --id 7 - &&
+niri msg agent --require-change click --id 7 400 560
+```
+
+  不确定某一步会不会引起变化（比如悬停），那一步就别加 `--require-change`。
 
 **3. 看回执。** 每个动作都会等窗口画面稳定（最多 2 秒），然后打印一行 JSON：
 
@@ -100,16 +129,16 @@ niri msg agent key    --id 7 Return
 
 | 回执 | 说明 | 下一步 |
 |---|---|---|
-| `changed`、`popups_opened`、`windows_opened` 全是空的 | 什么都没发生，多半点偏了，或者点的不是控件 | 重新截图定位，不要假设已经成功 |
-| `popups_opened` 不为空，`focus` 是 `"popup"` | 菜单或下拉框打开了 | 重新截图，选菜单项；按键会进菜单 |
+| `changed`、`popups_opened`、`windows_opened` 全是空的 | 什么都没发生，多半点偏了，或者点的不是控件 | 用 `agent-ui` 或截图重新定位，不要假设已经成功，也不要原地再点一次 |
+| `popups_opened` 不为空，`focus` 是 `"popup"` | 菜单或下拉框打开了 | 用 `agent-ui --find` 找菜单项，或重新截图；按键会进菜单 |
 | `windows_opened` 有新窗口 | 开了新窗口或对话框；`parent_id` 是它的父窗口 | 之后操作新窗口的 `id` |
 | `title` 不是 null | 窗口标题变了，比如页面加载完成、文件变成"未保存" | |
 | `settled: false` | 2 秒内画面一直在变：页面在加载、视频在放、动画没停 | 稍等一会儿再截图 |
 | `windows_closed` 里有目标窗口 | 目标窗口关掉了 | |
 | `changed` 里有一条约 8 像素宽的窄条，位置在文本框里 | 文本光标在闪，不算真正的变化 | 忽略 |
-| 点了菜单项，但 `popups_closed` 为空、其他也都没变 | 共享模式下 GTK 3 应用的菜单项偶尔不认点击 | 改用键盘：方向键选到这一项再按 `Return`。菜单本身也可以用 `alt+助记字母` 打开，比如"编辑(E)"就是 `alt+e` |
+| 点菜单项的回执要多等半秒 | GTK 3 菜单刚打开的半秒内不认点击，niri 会自动等过这段时间 | 正常 |
 
-只有回执说明画面变了、而且你需要看清变成了什么时，才重新截图。
+**回执能回答的就不要截图。** 点开了菜单、开了对话框、标题变了、复选框所在的位置变了，这些回执里都有。只有回执说明画面变了、而且你需要知道变成了什么时，才先 `agent-ui`，还不够再截图。
 
 ## 注意
 

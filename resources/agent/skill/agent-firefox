@@ -293,7 +293,8 @@ def main():
     agent.mkdir(parents=True, exist_ok=True)
     # Firefox hands a launch off only to an instance with the same profile, so the user's
     # Firefox is never involved, and a running agent Firefox opens a new window.
-    firefox = ["firefox", "--profile", str(agent)]
+    # Accessibility on, so that `agent-ui` can list the page's controls.
+    firefox = ["env", "GNOME_ACCESSIBILITY=1", "firefox", "--profile", str(agent)]
     if running:
         firefox.append("--new-window")
     niri = os.environ.get("NIRI", "niri")

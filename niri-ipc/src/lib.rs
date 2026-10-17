@@ -181,6 +181,8 @@ pub enum Response {
     AgentReceipt(agent::AgentReceipt),
     /// Window of an app launched for the agent seat.
     AgentLaunched(agent::AgentWindow),
+    /// Facts about a window for agent tools.
+    AgentInfo(agent::AgentInfo),
 }
 
 /// Overview information.
