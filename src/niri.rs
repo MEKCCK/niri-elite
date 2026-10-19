@@ -183,6 +183,7 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
+use crate::ui::pick_color_ui::PickColorUi;
 use crate::ui::screen_transition::{self, ScreenTransition};
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::ui::screencast_picker::{PickerCandidate, ScreenCastPickerUi};
@@ -469,6 +470,7 @@ pub struct Niri {
     pub locked_hint: Option<bool>,
 
     pub screenshot_ui: ScreenshotUi,
+    pub pick_color_ui: PickColorUi,
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
     pub exit_confirm_dialog: ExitConfirmDialog,
@@ -2555,20 +2557,65 @@ impl State {
         }
     }
 
-    pub fn handle_pick_color(&mut self, tx: async_channel::Sender<Option<niri_ipc::PickedColor>>) {
+    pub fn handle_pick_color(
+        &mut self,
+        tx: async_channel::Sender<Option<niri_ipc::PickedColor>>,
+        copy_to_clipboard: bool,
+    ) {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.pick_color_ui.is_open()
+            || self.niri.screen_cast_picker_is_visible()
+        {
+            let _ = tx.try_send(None);
+            return;
+        }
+
+        // Freeze the screen so the magnifier and the picked color come from a still image.
+        self.niri.update_render_elements(None);
+        let opened = self
+            .backend
+            .with_primary_renderer(|renderer| {
+                let screenshots = self.niri.capture_screenshots(renderer).collect();
+                self.niri.pick_color_ui.open(renderer, screenshots)
+            })
+            .unwrap_or(false);
+        if !opened {
+            let _ = tx.try_send(None);
+            return;
+        }
+
         let pointer = self.niri.seat.get_pointer().unwrap();
+        let location = pointer.current_location();
         let start_data = PointerGrabStartData {
             focus: None,
             button: 0,
-            location: pointer.current_location(),
+            location,
         };
-        let grab = PickColorGrab::new(start_data);
+        let grab = PickColorGrab::new(start_data, copy_to_clipboard);
         pointer.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Clear);
         self.niri.pick_color = Some(tx);
+        // The magnifier replaces the cursor.
         self.niri
             .cursor_manager
-            .set_cursor_image(CursorImageStatus::Named(CursorIcon::Crosshair));
+            .set_cursor_image(CursorImageStatus::Hidden);
+        self.update_pick_color_magnifier(location);
         self.niri.queue_redraw_all();
+    }
+
+    /// Must not lock the pointer: this is called from inside the pointer grab.
+    pub fn update_pick_color_magnifier(&mut self, location: Point<f64, Logical>) {
+        if !self.niri.pick_color_ui.is_open() {
+            return;
+        }
+        let under = self
+            .niri
+            .output_under(location)
+            .map(|(output, pos)| (output.clone(), pos));
+        let ui = &mut self.niri.pick_color_ui;
+        self.backend.with_primary_renderer(|renderer| {
+            ui.update_pointer(renderer, under.as_ref().map(|(o, pos)| (o, *pos)));
+        });
     }
 
     pub fn cancel_screenshot(&mut self) {
@@ -2940,7 +2987,7 @@ impl State {
                 self.cancel_screenshot();
             }
             ScreenshotToNiri::PickColor(tx) => {
-                self.handle_pick_color(tx);
+                self.handle_pick_color(tx, false);
             }
         }
     }
@@ -3601,6 +3648,7 @@ impl Niri {
             locked_hint: None,
 
             screenshot_ui,
+            pick_color_ui: PickColorUi::new(),
             config_error_notification,
             hotkey_overlay,
             exit_confirm_dialog,
@@ -6034,6 +6082,16 @@ impl Niri {
             Kind::Unspecified,
         )
         .into();
+
+        // If the color picker is open, draw the frozen screen with the magnifier.
+        if self.pick_color_ui.is_open() {
+            self.pick_color_ui
+                .render_output(output, ctx.target, &mut |elem| {
+                    push(OutputRenderElements::Texture(elem))
+                });
+            push(backdrop);
+            return;
+        }
 
         // If the screenshot UI is open, draw it.
         if self.screenshot_ui.is_open() {
