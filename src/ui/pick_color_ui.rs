@@ -1,21 +1,17 @@
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use anyhow::Context as _;
 use niri_ipc::PickedColor;
 use pango::FontDescription;
 use pangocairo::cairo::{self, ImageSurface};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{ExportMem, Texture as _};
 use smithay::output::Output;
 use smithay::utils::{Logical, Physical, Point, Size, Transform};
 
 use crate::render_helpers::primary_gpu_texture::PrimaryGpuTextureRenderElement;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
-use crate::render_helpers::RenderTarget;
-use crate::ui::screenshot_ui::OutputScreenshot;
 use crate::utils::to_physical_precise_round;
 
 /// Diameter of the magnifier, in logical pixels.
@@ -33,28 +29,42 @@ const LABEL_PADDING_Y: i32 = 2;
 const LABEL_RADIUS: i32 = 6;
 const FONT: &str = "monospace bold 13px";
 
-/// Frozen-screen color picker with a magnifier that follows the pointer.
+/// Color picker with a magnifier that follows the pointer over the live screen.
+///
+/// The magnifier shows a small region around the pointer, captured from the output without the
+/// magnifier itself. The region is captured again on pointer motion and after every frame, so the
+/// magnifier follows changing contents; it is redrawn only when the captured pixels change.
+#[allow(clippy::large_enum_variant)]
 pub enum PickColorUi {
     Closed,
     Open {
-        output_data: HashMap<Output, OutputData>,
+        region: Option<Region>,
         magnifier: Option<Magnifier>,
         zoom: f64,
+        /// Whether an output was rendered since the region was last captured.
+        rendered: Cell<bool>,
     },
 }
 
-pub struct OutputData {
-    // Output, screencast, screen capture.
-    screenshot: [OutputScreenshot; 3],
-    size: Size<i32, Physical>,
-    scale: f64,
-    /// RGBA8 copy of the output screenshot, used for reading colors.
-    pixels: Vec<u8>,
+/// Screen pixels around the pointer.
+pub struct Region {
+    pub output: Output,
+    pub scale: f64,
+    /// Output-local pointer position.
+    pub pos: Point<f64, Logical>,
+    pub output_size: Size<i32, Physical>,
+    /// Top-left corner of the region within the output.
+    pub origin: Point<i32, Physical>,
+    /// Width and height of the region.
+    pub side: i32,
+    /// RGBA8 pixels.
+    pub pixels: Vec<u8>,
 }
 
 pub struct Magnifier {
     output: Output,
     location: Point<f64, Logical>,
+    zoom: f64,
     buffer: TextureBuffer<GlesTexture>,
 }
 
@@ -67,44 +77,13 @@ impl PickColorUi {
         matches!(self, Self::Open { .. })
     }
 
-    pub fn open(
-        &mut self,
-        renderer: &mut GlesRenderer,
-        screenshots: HashMap<Output, [OutputScreenshot; 3]>,
-    ) -> bool {
-        let output_data: HashMap<_, _> = screenshots
-            .into_iter()
-            .filter_map(|(output, screenshot)| {
-                let scale = output.current_scale().fractional_scale();
-                let size = screenshot[0].texture().size();
-                let size = Size::<i32, Physical>::from((size.w, size.h));
-                let pixels = match download(renderer, screenshot[0].texture(), size) {
-                    Ok(pixels) => pixels,
-                    Err(err) => {
-                        warn!("error downloading screenshot for color picking: {err:?}");
-                        return None;
-                    }
-                };
-                let data = OutputData {
-                    screenshot,
-                    size,
-                    scale,
-                    pixels,
-                };
-                Some((output, data))
-            })
-            .collect();
-
-        if output_data.is_empty() {
-            return false;
-        }
-
+    pub fn open(&mut self) {
         *self = Self::Open {
-            output_data,
+            region: None,
             magnifier: None,
             zoom: DEFAULT_ZOOM,
+            rendered: Cell::new(false),
         };
-        true
     }
 
     pub fn close(&mut self) -> bool {
@@ -115,14 +94,20 @@ impl PickColorUi {
         true
     }
 
-    /// Reads the color at the given output-local position from the frozen screen.
+    /// Reads the color under the pointer from the last captured region.
     pub fn color_at(&self, output: &Output, pos: Point<f64, Logical>) -> Option<PickedColor> {
-        let Self::Open { output_data, .. } = self else {
+        let Self::Open {
+            region: Some(region),
+            ..
+        } = self
+        else {
             return None;
         };
-        let data = output_data.get(output)?;
-        let pos = data.pixel_pos(pos);
-        let [r, g, b] = data.pixel(pos.x, pos.y);
+        if region.output != *output {
+            return None;
+        }
+        let pos = region.pixel_pos(pos);
+        let [r, g, b] = region.pixel_checked(pos.x, pos.y)?;
         Some(PickedColor {
             rgb: [r, g, b].map(|v| f64::from(v) / 255.),
         })
@@ -135,36 +120,67 @@ impl PickColorUi {
         }
     }
 
-    /// Moves the magnifier to the given output-local pointer position.
-    pub fn update_pointer(
-        &mut self,
-        renderer: &mut GlesRenderer,
-        output: Option<(&Output, Point<f64, Logical>)>,
-    ) {
+    /// Number of screen pixels the magnifier needs on each side of the center pixel.
+    pub fn capture_half(&self, scale: f64) -> i32 {
+        let zoom = match self {
+            Self::Open { zoom, .. } => *zoom,
+            Self::Closed => DEFAULT_ZOOM,
+        };
+        magnifier_half(scale, zoom)
+    }
+
+    /// Returns whether an output was rendered since the last call.
+    pub fn take_rendered(&self) -> bool {
+        match self {
+            Self::Open { rendered, .. } => rendered.replace(false),
+            Self::Closed => false,
+        }
+    }
+
+    /// Hides the magnifier, returning whether it was visible.
+    pub fn clear(&mut self) -> bool {
         let Self::Open {
-            output_data,
-            magnifier,
-            zoom,
+            region, magnifier, ..
         } = self
         else {
-            return;
+            return false;
+        };
+        *region = None;
+        magnifier.take().is_some()
+    }
+
+    /// Updates the magnifier from a newly captured region.
+    ///
+    /// Returns whether the magnifier changed and needs a redraw.
+    pub fn set_region(&mut self, renderer: &mut GlesRenderer, new: Region) -> bool {
+        let Self::Open {
+            region,
+            magnifier,
+            zoom,
+            ..
+        } = self
+        else {
+            return false;
         };
 
-        let Some((output, pos)) = output else {
-            *magnifier = None;
-            return;
-        };
-        let Some(data) = output_data.get(output) else {
-            *magnifier = None;
-            return;
-        };
+        let unchanged = region.as_ref().is_some_and(|old| {
+            old.output == new.output
+                && old.pos == new.pos
+                && old.origin == new.origin
+                && old.side == new.side
+                && old.pixels == new.pixels
+        }) && magnifier.as_ref().is_some_and(|m| m.zoom == *zoom);
+        if unchanged {
+            return false;
+        }
 
-        match render_magnifier(renderer, data, pos, *zoom) {
+        match render_magnifier(renderer, &new, *zoom) {
             Ok((buffer, center)) => {
-                let location = pos - center.to_f64().to_logical(data.scale);
+                let location = new.pos - center.to_f64().to_logical(new.scale);
                 *magnifier = Some(Magnifier {
-                    output: output.clone(),
+                    output: new.output.clone(),
                     location,
+                    zoom: *zoom,
                     buffer,
                 });
             }
@@ -173,22 +189,25 @@ impl PickColorUi {
                 *magnifier = None;
             }
         }
+        *region = Some(new);
+        true
     }
 
     pub fn render_output(
         &self,
         output: &Output,
-        target: RenderTarget,
         push: &mut dyn FnMut(PrimaryGpuTextureRenderElement),
     ) {
         let Self::Open {
-            output_data,
             magnifier,
+            rendered,
             ..
         } = self
         else {
             return;
         };
+
+        rendered.set(true);
 
         if let Some(magnifier) = magnifier {
             if magnifier.output == *output {
@@ -204,16 +223,6 @@ impl PickColorUi {
                 ));
             }
         }
-
-        let Some(data) = output_data.get(output) else {
-            return;
-        };
-        let index = match target {
-            RenderTarget::Output => 0,
-            RenderTarget::Screencast => 1,
-            RenderTarget::ScreenCapture => 2,
-        };
-        push(data.screenshot[index].buffer().clone());
     }
 }
 
@@ -223,47 +232,39 @@ impl Default for PickColorUi {
     }
 }
 
-impl OutputData {
+impl Region {
     fn pixel_pos(&self, pos: Point<f64, Logical>) -> Point<i32, Physical> {
-        let pos: Point<i32, Physical> = pos.to_physical_precise_floor(self.scale);
-        Point::from((
-            pos.x.clamp(0, self.size.w - 1),
-            pos.y.clamp(0, self.size.h - 1),
-        ))
+        clamp_to_output(pos.to_physical_precise_floor(self.scale), self.output_size)
     }
 
-    fn pixel(&self, x: i32, y: i32) -> [u8; 3] {
-        let idx = (y as usize * self.size.w as usize + x as usize) * 4;
-        match self.pixels.get(idx..idx + 3) {
-            Some(px) => [px[0], px[1], px[2]],
-            None => [0, 0, 0],
-        }
-    }
-
-    /// Returns the pixel color, or `None` if outside the screen.
+    /// Returns the pixel color, or `None` if outside the screen or the captured region.
     fn pixel_checked(&self, x: i32, y: i32) -> Option<[u8; 3]> {
-        if x < 0 || y < 0 || x >= self.size.w || y >= self.size.h {
+        if x < 0 || y < 0 || x >= self.output_size.w || y >= self.output_size.h {
             return None;
         }
-        Some(self.pixel(x, y))
+        let (x, y) = (x - self.origin.x, y - self.origin.y);
+        if x < 0 || y < 0 || x >= self.side || y >= self.side {
+            return None;
+        }
+        let idx = (y as usize * self.side as usize + x as usize) * 4;
+        let px = self.pixels.get(idx..idx + 3)?;
+        Some([px[0], px[1], px[2]])
     }
 }
 
-fn download(
-    renderer: &mut GlesRenderer,
-    texture: &GlesTexture,
-    size: Size<i32, Physical>,
-) -> anyhow::Result<Vec<u8>> {
-    let rect = smithay::utils::Rectangle::from_size(size)
-        .to_logical(1)
-        .to_buffer(1, Transform::Normal, &Size::from((1, 1)));
-    let mapping = renderer
-        .copy_texture(texture, rect, Fourcc::Abgr8888)
-        .context("error copying texture")?;
-    let pixels = renderer
-        .map_texture(&mapping)
-        .context("error mapping texture")?;
-    Ok(pixels.to_vec())
+pub fn clamp_to_output(
+    pos: Point<i32, Physical>,
+    output_size: Size<i32, Physical>,
+) -> Point<i32, Physical> {
+    Point::from((
+        pos.x.clamp(0, output_size.w - 1),
+        pos.y.clamp(0, output_size.h - 1),
+    ))
+}
+
+fn magnifier_half(scale: f64, zoom: f64) -> i32 {
+    let diameter: i32 = to_physical_precise_round(scale, MAGNIFIER_DIAMETER);
+    (f64::from(diameter) / 2. / zoom).ceil() as i32 + 1
 }
 
 /// Renders the magnifier: magnified pixels inside a ring filled with the picked color, and the
@@ -272,15 +273,14 @@ fn download(
 /// Returns the buffer and the physical position of the magnifier center within it.
 fn render_magnifier(
     renderer: &mut GlesRenderer,
-    data: &OutputData,
-    pos: Point<f64, Logical>,
+    data: &Region,
     zoom: f64,
 ) -> anyhow::Result<(TextureBuffer<GlesTexture>, Point<i32, Physical>)> {
     let _span = tracy_client::span!("pick_color_ui::render_magnifier");
 
     let scale = data.scale;
-    let center = data.pixel_pos(pos);
-    let [r, g, b] = data.pixel(center.x, center.y);
+    let center = data.pixel_pos(data.pos);
+    let [r, g, b] = data.pixel_checked(center.x, center.y).unwrap_or_default();
     let (rf, gf, bf) = (
         f64::from(r) / 255.,
         f64::from(g) / 255.,
@@ -310,7 +310,7 @@ fn render_magnifier(
     let radius = f64::from(diameter) / 2.;
 
     // Copy the screen pixels covered by the lens, centered on the picked pixel.
-    let half = (radius / cell).ceil() as i32 + 1;
+    let half = magnifier_half(scale, zoom);
     let count = half * 2 + 1;
     let mut region = ImageSurface::create(cairo::Format::Rgb24, count, count)?;
     {

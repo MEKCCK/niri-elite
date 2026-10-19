@@ -1058,14 +1058,6 @@ impl ScreenshotUi {
 }
 
 impl OutputScreenshot {
-    pub fn texture(&self) -> &GlesTexture {
-        &self.texture
-    }
-
-    pub fn buffer(&self) -> &PrimaryGpuTextureRenderElement {
-        &self.buffer
-    }
-
     pub fn from_textures(
         renderer: &mut GlesRenderer,
         scale: Scale<f64>,

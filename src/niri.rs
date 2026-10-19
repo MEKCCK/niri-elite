@@ -174,8 +174,9 @@ use crate::render_helpers::surface::push_elements_from_surface_tree;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
-    encompassing_geo, render_to_dmabuf, render_to_encompassing_texture, render_to_shm,
-    render_to_texture, render_to_vec, shaders, RenderCtx, RenderIntent, RenderTarget,
+    encompassing_geo, render_and_download, render_to_dmabuf, render_to_encompassing_texture,
+    render_to_shm, render_to_texture, render_to_vec, shaders, RenderCtx, RenderIntent,
+    RenderTarget,
 };
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::Screencasting;
@@ -183,7 +184,7 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
-use crate::ui::pick_color_ui::PickColorUi;
+use crate::ui::pick_color_ui::{clamp_to_output, PickColorUi, Region as PickColorRegion};
 use crate::ui::screen_transition::{self, ScreenTransition};
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::ui::screencast_picker::{PickerCandidate, ScreenCastPickerUi};
@@ -315,6 +316,8 @@ pub struct Niri {
     pub magnifier_zoom: f64,
     pub magnifier_animation: Option<crate::animation::Animation>,
     pub magnifier_capture: Cell<bool>,
+    /// Set while capturing the screen for the color picker magnifier, to leave it out.
+    pub pick_color_capture: Cell<bool>,
     pub magnifier_center: RefCell<Option<(WeakOutput, Point<i32, Physical>)>>,
     /// Movement of the shown magnifier center towards `magnifier_center`.
     pub magnifier_center_anim: Option<MagnifierCenterAnim>,
@@ -921,6 +924,15 @@ impl State {
         }
 
         self.niri.redraw_queued_outputs(&mut self.backend);
+
+        // Follow changing screen contents in the color picker magnifier: recapture right after
+        // a frame was rendered. This only redraws when the captured pixels change, so it settles
+        // once the screen stops changing.
+        if self.niri.pick_color_ui.take_rendered() {
+            let location = self.niri.seat.get_pointer().unwrap().current_location();
+            self.update_pick_color_magnifier(location);
+            self.niri.redraw_queued_outputs(&mut self.backend);
+        }
 
         {
             let _span = tracy_client::span!("flush_clients");
@@ -2571,19 +2583,7 @@ impl State {
             return;
         }
 
-        // Freeze the screen so the magnifier and the picked color come from a still image.
-        self.niri.update_render_elements(None);
-        let opened = self
-            .backend
-            .with_primary_renderer(|renderer| {
-                let screenshots = self.niri.capture_screenshots(renderer).collect();
-                self.niri.pick_color_ui.open(renderer, screenshots)
-            })
-            .unwrap_or(false);
-        if !opened {
-            let _ = tx.try_send(None);
-            return;
-        }
+        self.niri.pick_color_ui.open();
 
         let pointer = self.niri.seat.get_pointer().unwrap();
         let location = pointer.current_location();
@@ -2603,19 +2603,63 @@ impl State {
         self.niri.queue_redraw_all();
     }
 
+    /// Captures the screen around the pointer and updates the color picker magnifier.
+    ///
     /// Must not lock the pointer: this is called from inside the pointer grab.
     pub fn update_pick_color_magnifier(&mut self, location: Point<f64, Logical>) {
         if !self.niri.pick_color_ui.is_open() {
             return;
         }
-        let under = self
+
+        let Some((output, pos)) = self
             .niri
             .output_under(location)
-            .map(|(output, pos)| (output.clone(), pos));
+            .map(|(output, pos)| (output.clone(), pos))
+        else {
+            if self.niri.pick_color_ui.clear() {
+                self.niri.queue_redraw_all();
+            }
+            return;
+        };
+
+        let scale = output.current_scale().fractional_scale();
+        let output_size = output
+            .current_transform()
+            .transform_size(output.current_mode().unwrap().size);
+        let half = self.niri.pick_color_ui.capture_half(scale);
+        let center = clamp_to_output(pos.to_physical_precise_floor(scale), output_size);
+        let origin = center - Point::from((half, half));
+        let side = half * 2 + 1;
+
+        self.niri.update_render_elements(Some(&output));
+        let niri = &self.niri;
+        let Some(pixels) = self
+            .backend
+            .with_primary_renderer(|renderer| {
+                niri.capture_pick_color_region(renderer, &output, origin, side)
+            })
+            .flatten()
+        else {
+            return;
+        };
+
+        let region = PickColorRegion {
+            output: output.clone(),
+            scale,
+            pos,
+            output_size,
+            origin,
+            side,
+            pixels,
+        };
         let ui = &mut self.niri.pick_color_ui;
-        self.backend.with_primary_renderer(|renderer| {
-            ui.update_pointer(renderer, under.as_ref().map(|(o, pos)| (o, *pos)));
-        });
+        let changed = self
+            .backend
+            .with_primary_renderer(|renderer| ui.set_region(renderer, region))
+            .unwrap_or(false);
+        if changed {
+            self.niri.queue_redraw(&output);
+        }
     }
 
     pub fn cancel_screenshot(&mut self) {
@@ -3548,6 +3592,7 @@ impl Niri {
             magnifier_zoom: magnifier_zoom_factor,
             magnifier_animation: None,
             magnifier_capture: Cell::new(false),
+            pick_color_capture: Cell::new(false),
             magnifier_center: RefCell::new(None),
             magnifier_center_anim: None,
 
@@ -6083,14 +6128,11 @@ impl Niri {
         )
         .into();
 
-        // If the color picker is open, draw the frozen screen with the magnifier.
-        if self.pick_color_ui.is_open() {
-            self.pick_color_ui
-                .render_output(output, ctx.target, &mut |elem| {
-                    push(OutputRenderElements::Texture(elem))
-                });
-            push(backdrop);
-            return;
+        // Draw the color picker magnifier on top, unless capturing the screen for it.
+        if self.pick_color_ui.is_open() && !self.pick_color_capture.get() {
+            self.pick_color_ui.render_output(output, &mut |elem| {
+                push(OutputRenderElements::Texture(elem))
+            });
         }
 
         // If the screenshot UI is open, draw it.
@@ -7843,6 +7885,50 @@ impl Niri {
         }
 
         self.queue_redraw_all();
+    }
+
+    /// Renders a square region of the output, without the color picker magnifier, and downloads
+    /// its RGBA8 pixels.
+    pub fn capture_pick_color_region(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        origin: Point<i32, Physical>,
+        side: i32,
+    ) -> Option<Vec<u8>> {
+        use smithay::backend::renderer::ExportMem as _;
+
+        let _span = tracy_client::span!("Niri::capture_pick_color_region");
+
+        let scale = Scale::from(output.current_scale().fractional_scale());
+        let ctx = RenderCtx {
+            renderer,
+            // This is an interactive operation so we can render without blocking out.
+            target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
+            xray: None,
+        };
+        let was_capture = self.pick_color_capture.replace(true);
+        let elements = self.render_to_vec(ctx, output, false);
+        self.pick_color_capture.set(was_capture);
+
+        let mapping = render_and_download(
+            renderer,
+            Size::from((side, side)),
+            scale,
+            Transform::Normal,
+            Fourcc::Abgr8888,
+            elements.iter().rev().map(|elem| {
+                RelocateRenderElement::from_element(elem, origin.upscale(-1), Relocate::Relative)
+            }),
+        )
+        .map_err(|err| warn!("error capturing screen for color picking: {err:?}"))
+        .ok()?;
+        let pixels = renderer
+            .map_texture(&mapping)
+            .map_err(|err| warn!("error mapping color picker capture: {err:?}"))
+            .ok()?;
+        Some(pixels.to_vec())
     }
 
     pub fn capture_screenshots<'a>(
