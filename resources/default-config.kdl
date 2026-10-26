@@ -548,9 +548,23 @@ binds {
     // or do a four-finger swipe up on a touchpad.
     Mod+O repeat=false { toggle-overview; }
 
+    // You can also bind both press and release actions like so.
+    // If the press action fires, the release action
+    // is also guaranteed to fire.
+    // This is useful for binds like push-to-talk.
+    // Alt+Shift {
+    //     press   { spawn "notify-send" "Enable push-to-talk!"; }
+    //     release { spawn "notify-send" "Disable push-to-talk!"; }
+    // }
+
     // Tap Mod (press and release without pressing any other key in between)
     // to toggle the grid overview: a view of all windows on the current workspaces.
-    Mod repeat=false { toggle-grid-overview; }
+    //
+    // This is a release bind.
+    // Press and release Mod by itself to trigger it.
+    Mod {
+        release { toggle-grid-overview; }
+    }
 
     // Toggle the fullscreen magnifier on or off.
     Mod+Shift+Z repeat=false { toggle-magnifier; }

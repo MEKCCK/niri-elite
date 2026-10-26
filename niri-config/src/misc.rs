@@ -4,7 +4,7 @@ use knuffel::errors::DecodeError;
 
 use crate::appearance::{Color, WorkspaceShadow, WorkspaceShadowPart, DEFAULT_BACKDROP_COLOR};
 use crate::utils::{expect_only_children, parse_arg_node, Flag, MergeWith};
-use crate::{Action, Bind, FloatOrInt, Key, Trigger};
+use crate::{Action, Bind, BoundAction, FloatOrInt, Key, Trigger};
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnAtStartup {
@@ -266,7 +266,7 @@ impl From<MagnifierBind> for Bind {
     fn from(x: MagnifierBind) -> Self {
         Self {
             key: x.key,
-            action: Action::from(x.action),
+            action: BoundAction::Press(Action::from(x.action)),
             // Key repeat replays the bind, so a repeating toggle would turn the magnifier back on.
             repeat: x
                 .repeat

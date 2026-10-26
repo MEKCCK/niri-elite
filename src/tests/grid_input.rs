@@ -491,3 +491,75 @@ fn mod_drag_moves_click_through_ignored_window() {
     assert!(pos_of(&mut f).x > before.x + 100.);
     assert!(f.niri().layout.is_grid_overview_open());
 }
+
+// A window with the grid closed, for the default-mod-action tests.
+fn set_up_mod_tap(config: &str) -> (Fixture, ClientId) {
+    let config = Config::parse_mem(config).unwrap();
+    let mut f = Fixture::with_config(config);
+    f.add_output(1, (1920, 1080));
+    let id = f.add_client();
+    add_window(&mut f, id, None);
+    assert!(!f.niri().layout.is_grid_overview_open());
+    (f, id)
+}
+
+#[test]
+fn default_mod_tap_toggles_grid() {
+    let (mut f, id) = set_up_mod_tap("");
+
+    tap_key(&mut f, id, "LWIN");
+    assert!(f.niri().layout.is_grid_overview_open());
+
+    tap_key(&mut f, id, "LWIN");
+    assert!(!f.niri().layout.is_grid_overview_open());
+}
+
+#[test]
+fn default_mod_tap_is_cancelled_by_other_keys() {
+    let (mut f, id) = set_up_mod_tap("");
+
+    // Mod+A is not bound, so it reaches the client, but it still isn't a tap.
+    press_key(&mut f, "LWIN", KeyState::Pressed);
+    tap_key(&mut f, id, "AC01");
+    press_key(&mut f, "LWIN", KeyState::Released);
+    f.roundtrip(id);
+    assert!(!f.niri().layout.is_grid_overview_open());
+
+    // Ctrl+Mod isn't a bare Mod tap either.
+    press_key(&mut f, "LCTL", KeyState::Pressed);
+    tap_key(&mut f, id, "LWIN");
+    press_key(&mut f, "LCTL", KeyState::Released);
+    f.roundtrip(id);
+    assert!(!f.niri().layout.is_grid_overview_open());
+}
+
+#[test]
+fn default_mod_tap_yields_to_mod_bind() {
+    let (mut f, id) = set_up_mod_tap(
+        r##"
+        binds {
+            Mod {
+                release { open-overview; }
+            }
+        }
+        "##,
+    );
+
+    tap_key(&mut f, id, "LWIN");
+    assert!(f.niri().layout.is_overview_open());
+    assert!(!f.niri().layout.is_grid_overview_open());
+}
+
+#[test]
+fn default_mod_tap_can_be_disabled() {
+    let (mut f, id) = set_up_mod_tap(
+        r##"
+        grid-overview {
+            default-mod-action false
+        }
+        "##,
+    );
+
+    tap_key(&mut f, id, "LWIN");
+    assert!(!f.niri().layout.is_grid_overview_open());
+}
