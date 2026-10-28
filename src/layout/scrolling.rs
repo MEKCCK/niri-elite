@@ -11,6 +11,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Scale, Serial, Size};
 
 use super::closing_window::{ClosingWindow, ClosingWindowRenderElement};
+use super::axis::AxisMap;
 use super::grid_overview::GridItem;
 use super::monitor::InsertPosition;
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
@@ -372,6 +373,37 @@ struct MoveAnimation {
 }
 
 impl<W: LayoutElement> ScrollingSpace<W> {
+    /// Axis map for this workspace: internal scrolling-space coordinates have X as the main axis
+    /// and Y as the cross axis, regardless of the configured orientation.
+    pub fn axis(&self) -> AxisMap {
+        AxisMap::new(self.options.layout.main_axis)
+    }
+
+    /// The configured main axis.
+    pub fn main_axis(&self) -> niri_config::MainAxis {
+        self.options.layout.main_axis
+    }
+
+    /// Convert a physical point to scrolling-space coordinates.
+    pub fn point_in(&self, point: Point<f64, Logical>) -> Point<f64, Logical> {
+        self.axis().point_in(point)
+    }
+
+    /// Convert a scrolling-space point to physical coordinates.
+    pub fn point_out(&self, point: Point<f64, Logical>) -> Point<f64, Logical> {
+        self.axis().point_out(point)
+    }
+
+    /// Convert a scrolling-space size to physical coordinates.
+    pub fn size_out(&self, size: Size<f64, Logical>) -> Size<f64, Logical> {
+        self.axis().size_out(size)
+    }
+
+    /// Convert a scrolling-space rectangle to physical coordinates.
+    pub fn rect_out(&self, rect: Rectangle<f64, Logical>) -> Rectangle<f64, Logical> {
+        self.axis().rect_out(rect)
+    }
+
     pub fn new(
         view_size: Size<f64, Logical>,
         parent_area: Rectangle<f64, Logical>,
@@ -379,7 +411,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         clock: Clock,
         options: Rc<Options>,
     ) -> Self {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let axis = AxisMap::new(options.layout.main_axis);
+        // Transpose the incoming physical geometry into scrolling space, where X is the main axis.
+        // compute_working_area() works on physical geometry (struts apply to physical edges), so
+        // it runs before the transposition.
+        let working_area = axis.rect_in(compute_working_area(parent_area, scale, options.layout.struts));
+        let view_size = axis.size_in(view_size);
+        let parent_area = axis.rect_in(parent_area);
 
         Self {
             columns: Vec::new(),
@@ -407,7 +445,13 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         scale: f64,
         options: Rc<Options>,
     ) {
-        let working_area = compute_working_area(parent_area, scale, options.layout.struts);
+        let axis = AxisMap::new(options.layout.main_axis);
+        // Transpose the incoming physical geometry into scrolling space, where X is the main axis.
+        // compute_working_area() works on physical geometry (struts apply to physical edges), so
+        // it runs before the transposition.
+        let working_area = axis.rect_in(compute_working_area(parent_area, scale, options.layout.struts));
+        let view_size = axis.size_in(view_size);
+        let parent_area = axis.rect_in(parent_area);
 
         for (column, data) in zip(&mut self.columns, &mut self.data) {
             column.update_config(view_size, working_area, parent_area, scale, options.clone());
