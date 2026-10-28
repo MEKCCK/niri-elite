@@ -3,8 +3,8 @@ use std::cell::{Cell, OnceCell, RefCell};
 use niri_config::utils::Flag;
 use niri_config::workspace::WorkspaceName;
 use niri_config::{
-    CenterFocusedColumn, FloatOrInt, OutputName, Struts, TabIndicatorLength, TabIndicatorPosition,
-    WorkspaceReference,
+    CenterFocusedColumn, FloatOrInt, MainAxis, OutputName, Struts, TabIndicatorLength,
+    TabIndicatorPosition, WorkspaceReference,
 };
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -11397,3 +11397,37 @@ fn grid_floating_only_windows_stay_in_their_rows() {
     let left: Vec<usize> = (1..=9).filter(|&id| id != 5).collect();
     assert_eq!(same_row(&closed, &left), same_row(&opened, &left));
 }
+
+#[test]
+fn vertical_main_axis_places_columns_vertically() {
+    let mut options = Options::default();
+    options.layout.main_axis = MainAxis::Vertical;
+
+    let layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+        ],
+    );
+
+    let ws = layout.active_workspace().unwrap();
+    let positions: Vec<_> = ws
+        .tiles_with_render_positions()
+        .map(|(_, pos, _)| pos)
+        .collect();
+    assert_eq!(positions.len(), 2);
+
+    let dx = (positions[0].x - positions[1].x).abs();
+    let dy = (positions[0].y - positions[1].y).abs();
+    assert!(
+        dy > dx,
+        "expected the second column below the first, got dx={dx} dy={dy}"
+    );
+}
+

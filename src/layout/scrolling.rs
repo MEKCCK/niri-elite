@@ -3343,11 +3343,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {
         let scale = self.scale;
+        let axis = self.axis();
         self.columns_with_render_positions()
             .flat_map(move |(col, col_pos)| {
                 col.tiles_in_render_order()
                     .map(move |(tile, tile_off, visible)| {
-                        let pos = col_pos + tile_off + tile.render_offset();
+                        let pos = axis.point_out(col_pos + tile_off + tile.render_offset());
                         // Round to physical pixels.
                         let pos = pos.to_physical_precise_round(scale).to_logical(scale);
                         (tile, pos, visible)
@@ -3360,11 +3361,12 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         round: bool,
     ) -> impl Iterator<Item = (&mut Tile<W>, Point<f64, Logical>)> {
         let scale = self.scale;
+        let axis = self.axis();
         self.columns_with_render_positions_mut()
             .flat_map(move |(col, col_pos)| {
                 col.tiles_in_render_order_mut()
                     .map(move |(tile, tile_off)| {
-                        let mut pos = col_pos + tile_off + tile.render_offset();
+                        let mut pos = axis.point_out(col_pos + tile_off + tile.render_offset());
                         // Round to physical pixels.
                         if round {
                             pos = pos.to_physical_precise_round(scale).to_logical(scale);
@@ -3934,7 +3936,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         // Draw the closing windows on top of the other windows. When the active tile renders
         // separately above the floating windows, they go on top of it.
         if layer.is_normal() && !matches!(part, ScrollingPart::BelowFloating { .. }) {
-            let view_rect = Rectangle::new(Point::from((self.view_pos(), 0.)), self.view_size);
+            let view_rect = self.rect_out(Rectangle::new(
+                Point::from((self.view_pos(), 0.)),
+                self.view_size,
+            ));
             for closing in self.closing_windows.iter().rev() {
                 let elem = closing.render(ctx.as_gles(), view_rect, scale);
                 push(elem.into());
@@ -3958,7 +3963,8 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             // Draw the tab indicator on top.
             let col_above_floating = col.tiles.iter().any(|tile| tile.above_floating);
             if part.includes(col_above_floating, is_active_col) {
-                let pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
+                let pos = self.point_out(col_pos);
+                let pos = pos.to_physical_precise_round(scale).to_logical(scale);
                 col.tab_indicator
                     .render(ctx.renderer, pos, &mut |elem| push(elem.into()));
             }
@@ -3970,7 +3976,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     continue;
                 }
 
-                let tile_pos = col_pos + tile_off + tile.render_offset();
+                let tile_pos = self.point_out(col_pos + tile_off + tile.render_offset());
                 // Round to physical pixels.
                 let tile_pos = tile_pos.to_physical_precise_round(scale).to_logical(scale);
 
@@ -4015,6 +4021,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                 && col.display_mode == ColumnDisplay::Tabbed
                 && col.sizing_mode().is_normal()
             {
+                let col_pos = self.point_out(col_pos);
                 let col_pos = col_pos.to_physical_precise_round(scale).to_logical(scale);
 
                 if let Some(idx) = col.tab_indicator.hit(
@@ -4037,7 +4044,7 @@ impl<W: LayoutElement> ScrollingSpace<W> {
                     continue;
                 }
 
-                let tile_pos = col_pos + tile_off + tile.render_offset();
+                let tile_pos = self.point_out(col_pos + tile_off + tile.render_offset());
                 // Round to physical pixels.
                 let tile_pos = tile_pos.to_physical_precise_round(scale).to_logical(scale);
 
@@ -4786,13 +4793,15 @@ impl<W: LayoutElement> ScrollingSpace<W> {
     }
 
     #[cfg(test)]
+    /// Physical view size (main/cross transposed back from scrolling space).
     pub fn view_size(&self) -> Size<f64, Logical> {
-        self.view_size
+        self.axis().size_out(self.view_size)
     }
 
+    /// Physical parent area (main/cross transposed back from scrolling space).
     #[cfg(test)]
     pub fn parent_area(&self) -> Rectangle<f64, Logical> {
-        self.parent_area
+        self.axis().rect_out(self.parent_area)
     }
 
     #[cfg(test)]
@@ -5036,6 +5045,11 @@ impl WindowHeight {
 }
 
 impl<W: LayoutElement> Column<W> {
+    /// Axis map for this column's workspace.
+    fn axis(&self) -> AxisMap {
+        AxisMap::new(self.options.layout.main_axis)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_tile(
         tile: Tile<W>,
@@ -5251,12 +5265,14 @@ impl<W: LayoutElement> Column<W> {
 
     pub fn update_render_elements(&mut self, is_active: bool, view_rect: Rectangle<f64, Logical>) {
         let active_idx = self.active_tile_idx;
+        let axis = self.axis();
         for (tile_idx, (tile, tile_off)) in self.tiles_mut().enumerate() {
             let is_active = is_active && tile_idx == active_idx;
 
             let mut tile_view_rect = view_rect;
             tile_view_rect.loc -= tile_off + tile.render_offset();
-            tile.update_render_elements(is_active, tile_view_rect);
+            // Tiles draw in physical coordinates; the column lays out in scrolling space.
+            tile.update_render_elements(is_active, axis.rect_out(tile_view_rect));
         }
 
         let config = self.tab_indicator.config();
@@ -5268,7 +5284,7 @@ impl<W: LayoutElement> Column<W> {
             .map(|(tile_idx, (tile, tile_off))| {
                 let is_active = tile_idx == active_idx;
                 let is_urgent = tile.window().is_urgent();
-                let tile_pos = tile_off + tile.render_offset();
+                let tile_pos = axis.point_out(tile_off + tile.render_offset());
                 TabInfo::from_tile(tile, tile_pos, is_active, is_urgent, &config)
             });
 
@@ -5291,7 +5307,7 @@ impl<W: LayoutElement> Column<W> {
         self.tab_indicator.update_render_elements(
             enabled,
             self.tab_indicator_area(),
-            view_rect,
+            axis.rect_out(view_rect),
             visible_tiles,
             tabs,
             is_active,
@@ -5660,6 +5676,7 @@ impl<W: LayoutElement> Column<W> {
     }
 
     fn update_tile_sizes_with_transaction(&mut self, animate: bool, transaction: Transaction) {
+        let axis = self.axis();
         let sizing_mode = self.pending_sizing_mode();
         if matches!(sizing_mode, SizingMode::Fullscreen | SizingMode::Maximized) {
             for (tile_idx, tile) in self.tiles.iter_mut().enumerate() {
@@ -5678,7 +5695,7 @@ impl<W: LayoutElement> Column<W> {
                 if matches!(sizing_mode, SizingMode::Fullscreen) {
                     tile.request_fullscreen(animate, transaction);
                 } else {
-                    tile.request_maximized(self.parent_area.size, animate, transaction);
+                    tile.request_maximized(axis.size_out(self.parent_area.size), animate, transaction);
                 }
             }
             return;
@@ -5690,6 +5707,7 @@ impl<W: LayoutElement> Column<W> {
             .tiles
             .iter()
             .map(Tile::min_size_nonfullscreen)
+            .map(|size| axis.size_in(size))
             .map(|mut size| {
                 size.w = size.w.max(1.);
                 size.h = size.h.max(1.);
@@ -5700,6 +5718,7 @@ impl<W: LayoutElement> Column<W> {
             .tiles
             .iter()
             .map(Tile::max_size_nonfullscreen)
+            .map(|size| axis.size_in(size))
             .collect();
 
         // Minimized tiles are layout-neutral: they take no space, impose no constraints, and
@@ -5747,7 +5766,7 @@ impl<W: LayoutElement> Column<W> {
         };
 
         let working_size = self.working_area.size;
-        let extra_size = self.extra_size();
+        let extra_size = axis.size_in(self.extra_size());
 
         let width = self.resolve_column_width(width);
         let width = f64::max(f64::min(width, max_width), min_width);
@@ -5971,7 +5990,8 @@ impl<W: LayoutElement> Column<W> {
                 continue;
             }
 
-            let size = Size::from((width, height));
+            // `width` and `height` are main/cross spans in scrolling space.
+            let size = axis.size_out(Size::from((width, height)));
 
             // In tabbed mode, only the visible window participates in the transaction.
             let is_active = tile_idx == self.active_tile_idx;
@@ -5986,10 +6006,11 @@ impl<W: LayoutElement> Column<W> {
     }
 
     fn width(&self) -> f64 {
+        let axis = self.axis();
         let mut tiles_width = self
             .data
             .iter()
-            .map(|data| NotNan::new(data.size.w).unwrap())
+            .map(|data| NotNan::new(axis.size_in(data.size).w).unwrap())
             .max()
             .map(NotNan::into_inner)
             .unwrap();
