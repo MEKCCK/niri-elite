@@ -6215,6 +6215,13 @@ impl<W: LayoutElement> Layout<W> {
         self.overview_open
     }
 
+    /// Main axis of the active workspace's scrolling layout.
+    pub fn active_main_axis(&self) -> niri_config::MainAxis {
+        self.active_workspace()
+            .map(|ws| ws.axis().main_axis())
+            .unwrap_or(self.options.layout.main_axis)
+    }
+
     pub fn is_grid_overview_open(&self) -> bool {
         self.grid_overview_open_in_scope()
     }

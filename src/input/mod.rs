@@ -3824,6 +3824,14 @@ impl State {
             vertical_amount_v120.unwrap_or(0.0) / 120. * 15.
         });
 
+        // With a vertical main axis, the pointer's vertical wheel scrolls along the layout's main
+        // axis and the horizontal wheel moves across workspaces. Swap the two amounts so the rest
+        // of the handler keeps working in main/cross terms. Wheel *binds* are matched further down
+        // from the raw v120 amounts, so they keep their physical direction.
+        if self.niri.layout.active_main_axis() == niri_config::MainAxis::Vertical {
+            std::mem::swap(&mut horizontal_amount, &mut vertical_amount);
+        }
+
         // Check the contents before updating them as pointer binds are supposed to act on the
         // previous focus.
         //
