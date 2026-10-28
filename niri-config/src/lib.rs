@@ -2240,6 +2240,7 @@ mod tests {
                         },
                     ),
                 },
+                main_axis: Horizontal,
                 preset_column_widths: [
                     Proportion(
                         0.25,
