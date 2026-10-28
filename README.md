@@ -133,6 +133,27 @@ sudo install -Dm755 target/release/niri /usr/bin/niri
 The version string carries the `-elite` suffix (`niri 26.04-elite (...)`), so a
 running fork build can never be mistaken for mainline niri.
 
+## Installing from the AUR
+
+The package files live in [`packaging/aur`](packaging/aur) (`niri-elite-git`). It
+builds from this repository's `main` branch and installs the same `niri` binary
+and session files as the `niri` package, so it conflicts with `niri` and
+`niri-git` and provides `niri` for anything that depends on it.
+
+```sh
+paru -S niri-elite-git     # or: yay -S niri-elite-git
+```
+
+To publish an update, copy `PKGBUILD` and the regenerated `.SRCINFO` into the
+AUR repository and push:
+
+```sh
+makepkg --printsrcinfo > .SRCINFO
+git clone ssh://aur@aur.archlinux.org/niri-elite-git.git
+cp PKGBUILD .SRCINFO niri-elite-git/ && cd niri-elite-git
+git add PKGBUILD .SRCINFO && git commit -m "upgpkg: update to $(grep ^pkgver= PKGBUILD | cut -d= -f2)" && git push
+```
+
 ## Syncing upstreams
 
 ```sh

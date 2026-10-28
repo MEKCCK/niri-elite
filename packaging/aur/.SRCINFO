@@ -1,0 +1,42 @@
+pkgbase = niri-elite-git
+	pkgdesc = Scrollable-tiling Wayland compositor (fork: grid overview, liquid glass, built-in portal)
+	pkgver = r3287.gde17906
+	pkgrel = 1
+	url = https://github.com/MEKCCK/niri-elite
+	arch = x86_64
+	arch = aarch64
+	license = GPL-3.0-or-later
+	makedepends = clang
+	makedepends = git
+	makedepends = pkgconf
+	makedepends = rust
+	depends = cairo
+	depends = glib2
+	depends = libdisplay-info
+	depends = libinput
+	depends = libpipewire
+	depends = libxkbcommon
+	depends = mesa
+	depends = pango
+	depends = pixman
+	depends = seatd
+	depends = systemd-libs
+	optdepends = xwayland-satellite: run X11 applications
+	optdepends = xdg-desktop-portal: portal broker for the built-in ScreenCast/Screenshot backend
+	optdepends = xdg-desktop-portal-gtk: fallback portal for file chooser and friends
+	optdepends = oo7-portal: implements the Secret portal
+	optdepends = kitty: GPU-accelerated terminal emulator
+	optdepends = fuzzel: application launcher
+	optdepends = mako: notification daemon
+	optdepends = swaybg: wallpaper tool
+	optdepends = swaylock: screen locker
+	optdepends = polkit-gnome: authentication agent for privileged applications
+	provides = niri=r3287.gde17906
+	provides = wayland-compositor
+	conflicts = niri
+	conflicts = niri-git
+	options = !strip
+	source = niri-elite::git+https://github.com/MEKCCK/niri-elite.git#branch=main
+	sha256sums = SKIP
+
+pkgname = niri-elite-git
