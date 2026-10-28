@@ -3288,6 +3288,11 @@ impl<W: LayoutElement> Workspace<W> {
         self.windows_mut().find(|win| win.is_wl_surface(wl_surface))
     }
 
+    /// Axis map of this workspace's scrolling layout.
+    pub fn axis(&self) -> crate::layout::axis::AxisMap {
+        self.scrolling.axis()
+    }
+
     pub fn tiles_with_render_positions(
         &self,
     ) -> impl Iterator<Item = (&Tile<W>, Point<f64, Logical>, bool)> {

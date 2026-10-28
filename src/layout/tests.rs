@@ -11431,3 +11431,35 @@ fn vertical_main_axis_places_columns_vertically() {
     );
 }
 
+#[test]
+fn vertical_main_axis_stacks_workspaces_along_the_cross_axis() {
+    let mut options = Options::default();
+    options.layout.main_axis = MainAxis::Vertical;
+
+    let layout = check_ops_with_options(
+        options,
+        [
+            Op::AddOutput(1),
+            Op::AddWindow {
+                params: TestWindowParams::new(1),
+            },
+            // Go to a second workspace and put a window there too.
+            Op::FocusWorkspaceDown,
+            Op::AddWindow {
+                params: TestWindowParams::new(2),
+            },
+        ],
+    );
+
+    let monitor = match &layout.monitor_set {
+        MonitorSet::Normal { monitors, .. } => &monitors[0],
+        MonitorSet::NoOutputs { .. } => unreachable!(),
+    };
+    let geos: Vec<_> = monitor.workspaces_render_geo().take(2).collect();
+    let dx = (geos[0].loc.x - geos[1].loc.x).abs();
+    let dy = (geos[0].loc.y - geos[1].loc.y).abs();
+    assert!(
+        dx > dy,
+        "with a vertical main axis, workspaces must sit side by side, got dx={dx} dy={dy}"
+    );
+}

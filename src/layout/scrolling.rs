@@ -4598,6 +4598,10 @@ impl<W: LayoutElement> ScrollingSpace<W> {
             return false;
         }
 
+        // Edges arrive in physical coordinates; the column works in scrolling space, where the
+        // left edge is the start of the main axis (top for a vertical layout).
+        let edges = self.axis().resize_edges_in(edges);
+
         let col = self
             .columns
             .iter_mut()
@@ -4642,6 +4646,9 @@ impl<W: LayoutElement> ScrollingSpace<W> {
         }
 
         let is_centering = self.is_centering_focused_column();
+
+        // The pointer delta is physical; the resize math below works in scrolling space.
+        let delta = self.axis().point_in(delta);
 
         let col = self
             .columns
