@@ -145,6 +145,7 @@ impl DBusServers {
                     to_niri,
                     to_niri_screenshot,
                     backend.ipc_outputs(),
+                    is_session_instance,
                 ) {
                     Ok((conn, casts)) => {
                         dbus.conn_portal = Some(conn);

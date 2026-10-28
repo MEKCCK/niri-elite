@@ -10,6 +10,8 @@ use smithay::desktop::{
 };
 use smithay::input::pointer::Focus;
 use smithay::input::tablet::TabletSeatTrait;
+#[cfg(feature = "agent")]
+use smithay::input::Seat;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_positioner::ConstraintAdjustment;
@@ -30,7 +32,7 @@ use smithay::wayland::shell::kde::decoration::{KdeDecorationHandler, KdeDecorati
 use smithay::wayland::shell::wlr_layer::{self, Layer};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    PopupSurface, PositionerState, ShellClient, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
@@ -57,6 +59,13 @@ impl XdgShellHandler for State {
         let unmapped = Unmapped::new(Window::new_wayland_window(surface));
         let existing = self.niri.unmapped_windows.insert(wl_surface, unmapped);
         assert!(existing.is_none());
+    }
+
+    fn client_pong(&mut self, client: ShellClient) {
+        #[cfg(feature = "agent")]
+        self.agent_on_pong(&client);
+        #[cfg(not(feature = "agent"))]
+        let _ = client;
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -323,7 +332,16 @@ impl XdgShellHandler for State {
         surface.send_repositioned(token);
     }
 
-    fn grab(&mut self, surface: PopupSurface, _seat: WlSeat, serial: Serial) {
+    fn grab(&mut self, surface: PopupSurface, seat: WlSeat, serial: Serial) {
+        #[cfg(feature = "agent")]
+        if let Some(seat) = Seat::from_resource(&seat) {
+            if self.agent_popup_grab(&surface, &seat, serial) {
+                return;
+            }
+        }
+        #[cfg(not(feature = "agent"))]
+        let _ = seat;
+
         let popup = PopupKind::Xdg(surface);
         let Ok(root) = find_popup_root_surface(&popup) else {
             trace!("ignoring popup grab because no root surface");
@@ -754,6 +772,24 @@ impl XdgShellHandler for State {
             error!("couldn't find the toplevel in fullscreen_request()");
             toplevel.send_configure();
         }
+    }
+
+    fn minimize_request(&mut self, toplevel: ToplevelSurface) {
+        // We advertise the minimize wm capability, so handle the client's request for real.
+        //
+        // No configure is required in response to set_minimized, but minimizing sends one anyway
+        // for the suspended state.
+        if let Some((mapped, _)) = self
+            .niri
+            .layout
+            .find_window_and_output(toplevel.wl_surface())
+        {
+            let window = mapped.window.clone();
+            self.minimize_window(&window);
+        }
+
+        // For unmapped windows the request is ignored: the initial map decides the window's state
+        // via the open-minimized window rule instead.
     }
 
     fn unfullscreen_request(&mut self, toplevel: ToplevelSurface) {

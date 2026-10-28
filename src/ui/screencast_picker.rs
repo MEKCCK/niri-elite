@@ -1,3 +1,9 @@
+use std::time::Duration;
+
+/// Frame-callback interval used for live previews which are rendered by the compositor
+/// but are not part of the regular scanout loop.
+pub const PREVIEW_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
+
 #[cfg(not(feature = "xdp-gnome-screencast"))]
 mod disabled {
     use crate::layout::LayoutElementRenderElement;
@@ -29,12 +35,12 @@ mod enabled {
     use smithay::backend::renderer::element::utils::{
         Relocate, RelocateRenderElement, RescaleRenderElement,
     };
-    use smithay::backend::renderer::element::Kind;
-    use smithay::backend::renderer::element::RenderElement;
+    use smithay::backend::renderer::element::{Kind, RenderElement};
     use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
     use smithay::output::{Output, WeakOutput};
     use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
+    use super::PREVIEW_FRAME_INTERVAL;
     use crate::animation::{Animation, Clock};
     use crate::dbus::mutter_screen_cast::StreamTargetId;
     use crate::dbus::niri_portal_screen_cast::{
@@ -72,8 +78,6 @@ mod enabled {
     const CARD_MIN_PREVIEW_HEIGHT: f64 = 96.;
     const FONT: &str = "sans";
     const BACKDROP_COLOR: [f32; 4] = [0., 0., 0., 0.55];
-    pub const PREVIEW_FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / 30);
-
     trait PickerColorExt {
         fn set_source(self, cr: &cairo::Context);
     }
@@ -203,14 +207,23 @@ mod enabled {
     enum PickerRenderVariant {
         Output = 0,
         Screencast = 1,
+        ScreenCapture = 2,
     }
 
     impl PickerRenderVariant {
         fn from_target(target: RenderTarget) -> Self {
-            if target == RenderTarget::Screencast {
-                Self::Screencast
-            } else {
-                Self::Output
+            match target {
+                RenderTarget::Output => Self::Output,
+                RenderTarget::Screencast => Self::Screencast,
+                RenderTarget::ScreenCapture => Self::ScreenCapture,
+            }
+        }
+
+        fn capture_target(self) -> Option<RenderTarget> {
+            match self {
+                Self::Output => None,
+                Self::Screencast => Some(RenderTarget::Screencast),
+                Self::ScreenCapture => Some(RenderTarget::ScreenCapture),
             }
         }
     }
@@ -280,12 +293,6 @@ mod enabled {
         }
     }
 
-    struct FrozenBackdrop {
-        output: WeakOutput,
-        // Output and screencast variants.
-        buffers: [TextureBuffer<GlesTexture>; 2],
-    }
-
     pub struct DisplayPreviewRequest {
         pub name: String,
         pub size: Size<f64, Logical>,
@@ -348,8 +355,7 @@ mod enabled {
         display_previews: RefCell<HashMap<String, DisplayPreview>>,
         display_preview_last_refresh: Cell<Option<Duration>>,
         window_previews: RefCell<WindowPreviewCache>,
-        frozen_backdrop: RefCell<Option<FrozenBackdrop>>,
-        transition_buffers: [OffscreenBuffer; 2],
+        transition_buffers: [OffscreenBuffer; 3],
         clock: Clock,
         config: Rc<RefCell<Config>>,
     }
@@ -373,8 +379,11 @@ mod enabled {
                 display_previews: RefCell::new(HashMap::new()),
                 display_preview_last_refresh: Cell::new(None),
                 window_previews: RefCell::new(WindowPreviewCache::default()),
-                frozen_backdrop: RefCell::new(None),
-                transition_buffers: [OffscreenBuffer::default(), OffscreenBuffer::default()],
+                transition_buffers: [
+                    OffscreenBuffer::default(),
+                    OffscreenBuffer::default(),
+                    OffscreenBuffer::default(),
+                ],
                 clock,
                 config,
             }
@@ -538,7 +547,6 @@ mod enabled {
             output: Output,
             displays: Vec<PickerCandidate>,
             windows: Vec<PickerCandidate>,
-            frozen_backdrop: Option<[TextureBuffer<GlesTexture>; 2]>,
         ) -> bool {
             if self.is_visible() {
                 request.fail("screen cast picker is already open");
@@ -584,11 +592,6 @@ mod enabled {
                 messages: messages_from_env(),
             };
             self.clear_caches();
-            self.frozen_backdrop
-                .replace(frozen_backdrop.map(|buffers| FrozenBackdrop {
-                    output: output.downgrade(),
-                    buffers,
-                }));
             self.state = PickerUiState::Open {
                 picker,
                 animation: Some(self.animation(0., 1.)),
@@ -818,29 +821,29 @@ mod enabled {
             true
         }
 
+        /// Renders the picker on top of the regular, live output contents.
         pub fn render<R: NiriRenderer>(
             &self,
             niri: &Niri,
             output: &Output,
             mut ctx: RenderCtx<R>,
             push: &mut dyn FnMut(ScreenCastPickerRenderElement<R>),
-        ) -> bool {
+        ) {
             let Some(state) = self.state.visible() else {
-                return false;
+                return;
             };
             let Some(host_output) = state.output.upgrade() else {
-                return false;
+                return;
             };
-            let target = ctx.target;
             let variant = PickerRenderVariant::from_target(ctx.target);
             let progress = self.state.progress() as f32;
             if progress <= 0. {
-                return self.render_frozen_backdrop(output, target, push);
+                return;
             }
 
             if host_output != *output || progress >= 1. {
                 self.render_contents(niri, output, ctx, progress, push);
-                return self.render_frozen_backdrop(output, target, push);
+                return;
             }
 
             let scale = output.current_scale().fractional_scale();
@@ -870,36 +873,6 @@ mod enabled {
                     );
                 }
             }
-            self.render_frozen_backdrop(output, target, push)
-        }
-
-        fn render_frozen_backdrop<R: NiriRenderer>(
-            &self,
-            output: &Output,
-            target: RenderTarget,
-            push: &mut dyn FnMut(ScreenCastPickerRenderElement<R>),
-        ) -> bool {
-            let backdrop = self.frozen_backdrop.borrow();
-            let Some(backdrop) = backdrop.as_ref() else {
-                return false;
-            };
-            if backdrop.output.upgrade().as_ref() != Some(output) {
-                return false;
-            }
-
-            let index = usize::from(target == RenderTarget::Screencast);
-            let element = TextureRenderElement::from_texture_buffer(
-                backdrop.buffers[index].clone(),
-                Point::new(0., 0.),
-                1.,
-                None,
-                Some(output_size(output)),
-                Kind::Unspecified,
-            );
-            push(ScreenCastPickerRenderElement::<R>::Texture(
-                PrimaryGpuTextureRenderElement(element),
-            ));
-            true
         }
 
         fn render_contents<R: NiriRenderer>(
@@ -929,7 +902,7 @@ mod enabled {
             let palette = PickerPalette::from(self.config.borrow().screen_cast_picker);
             let geometry = picker_geometry(output, state);
             let variant = PickerRenderVariant::from_target(ctx.target);
-            let blocked_window_ids = if variant == PickerRenderVariant::Screencast {
+            let blocked_window_ids = if let Some(capture_target) = variant.capture_target() {
                 geometry
                     .cards
                     .iter()
@@ -943,7 +916,7 @@ mod enabled {
                             .layout
                             .windows()
                             .find(|(_, mapped)| mapped.id().get() == id)?;
-                        RenderTarget::Screencast
+                        capture_target
                             .should_block_out(mapped.rules().block_out_from)
                             .then_some(id)
                     })
@@ -1283,7 +1256,6 @@ mod enabled {
             self.display_previews.borrow_mut().clear();
             self.display_preview_last_refresh.set(None);
             self.window_previews.borrow_mut().clear();
-            self.frozen_backdrop.borrow_mut().take();
             for buffer in &self.transition_buffers {
                 buffer.clear();
             }
@@ -2132,14 +2104,14 @@ mod enabled {
         }
 
         #[test]
-        fn screencast_uses_a_separate_picker_render_variant() {
+        fn each_render_target_uses_its_own_picker_render_variant() {
             assert_eq!(
                 PickerRenderVariant::from_target(RenderTarget::Output),
                 PickerRenderVariant::Output
             );
             assert_eq!(
                 PickerRenderVariant::from_target(RenderTarget::ScreenCapture),
-                PickerRenderVariant::Output
+                PickerRenderVariant::ScreenCapture
             );
             assert_eq!(
                 PickerRenderVariant::from_target(RenderTarget::Screencast),

@@ -58,6 +58,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+pub mod agent;
 pub mod socket;
 pub mod state;
 
@@ -119,6 +120,10 @@ pub enum Request {
     OverviewState,
     /// Request information about screencasts.
     Casts,
+    /// Drive the agent seat, a second input seat for automation.
+    ///
+    /// See the [`agent`] module.
+    Agent(agent::AgentAction),
 }
 
 /// Reply from niri to client.
@@ -170,6 +175,14 @@ pub enum Response {
         /// Base64-encoded PNG image data.
         png_base64: String,
     },
+    /// Window image captured for the agent seat.
+    AgentCapture(agent::AgentCapture),
+    /// What an agent action caused.
+    AgentReceipt(agent::AgentReceipt),
+    /// Window of an app launched for the agent seat.
+    AgentLaunched(agent::AgentWindow),
+    /// Facts about a window for agent tools.
+    AgentInfo(agent::AgentInfo),
 }
 
 /// Overview information.
@@ -339,6 +352,39 @@ pub enum Action {
     )]
     ToggleWindowedFullscreen {
         /// Id of the window to toggle windowed fullscreen of.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Minimize a window.
+    #[cfg_attr(feature = "clap", clap(about = "Minimize the focused window"))]
+    MinimizeWindow {
+        /// Id of the window to minimize.
+        ///
+        /// If `None`, uses the focused window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Unminimize (restore) a window.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Unminimize the most recently minimized window")
+    )]
+    UnminimizeWindow {
+        /// Id of the window to unminimize.
+        ///
+        /// If `None`, uses the most recently minimized window.
+        #[cfg_attr(feature = "clap", arg(long))]
+        id: Option<u64>,
+    },
+    /// Toggle the minimized state of a window.
+    #[cfg_attr(
+        feature = "clap",
+        clap(about = "Toggle the minimized state of the focused window")
+    )]
+    ToggleWindowMinimized {
+        /// Id of the window to toggle the minimized state of.
         ///
         /// If `None`, uses the focused window.
         #[cfg_attr(feature = "clap", arg(long))]
@@ -960,6 +1006,22 @@ pub enum Action {
         #[cfg_attr(feature = "clap", arg(allow_hyphen_values = true))]
         delta: f64,
     },
+    /// Move the magnified view left.
+    ///
+    /// Only works while the magnifier is on with `track-cursor false`.
+    MoveMagnifierLeft {},
+    /// Move the magnified view right.
+    ///
+    /// Only works while the magnifier is on with `track-cursor false`.
+    MoveMagnifierRight {},
+    /// Move the magnified view up.
+    ///
+    /// Only works while the magnifier is on with `track-cursor false`.
+    MoveMagnifierUp {},
+    /// Move the magnified view down.
+    ///
+    /// Only works while the magnifier is on with `track-cursor false`.
+    MoveMagnifierDown {},
     /// Open the Overview.
     OpenOverview {},
     /// Close the Overview.
@@ -1409,6 +1471,13 @@ pub struct Window {
     pub is_floating: bool,
     /// Whether this window requests your attention.
     pub is_urgent: bool,
+    /// Whether this window is currently minimized.
+    ///
+    /// Minimized windows remain on their workspace but are hidden from the layout until restored.
+    pub is_minimized: bool,
+    /// Whether this window belongs to an app launched for the agent seat.
+    #[serde(default)]
+    pub is_agent: bool,
     /// Position- and size-related properties of the window.
     pub layout: WindowLayout,
     /// Timestamp when the window was most recently focused.
@@ -1740,6 +1809,13 @@ pub enum Event {
         id: u64,
         /// The new urgency state of the window.
         urgent: bool,
+    },
+    /// Window minimized state changed.
+    WindowMinimizedChanged {
+        /// Id of the window.
+        id: u64,
+        /// The new minimized state of the window.
+        is_minimized: bool,
     },
     /// The layout of one or more windows has changed.
     WindowLayoutsChanged {

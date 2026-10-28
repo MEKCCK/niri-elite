@@ -16,7 +16,9 @@ use smithay::output::Output;
 use smithay::reexports::gbm::Modifier;
 use smithay::utils::{DeviceFd, Physical, Point, Scale, Size};
 
-use crate::dbus::mutter_screen_cast::{self, CursorMode, NodeIdSink, ScreenCastToNiri, StreamTargetId};
+use crate::dbus::mutter_screen_cast::{
+    self, CursorMode, NodeIdSink, ScreenCastToNiri, StreamTargetId,
+};
 use crate::niri::{CastTarget, Niri, OutputRenderElements, PointerRenderElements, State};
 use crate::niri_render_elements;
 use crate::render_helpers::{RenderCtx, RenderIntent, RenderTarget};
@@ -787,7 +789,8 @@ impl Niri {
             let _span = tracy_client::span!("closing portal session");
 
             let server = conn.object_server();
-            if let Ok(iface) = server.interface::<_, crate::dbus::freedesktop_portal::Session>(&path)
+            if let Ok(iface) =
+                server.interface::<_, crate::dbus::freedesktop_portal::Session>(&path)
             {
                 async_io::block_on(async move {
                     let ctxt = iface.signal_emitter().clone();

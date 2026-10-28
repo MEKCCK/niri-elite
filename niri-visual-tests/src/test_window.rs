@@ -27,6 +27,7 @@ struct TestWindowInner {
     pending_sizing_mode: SizingMode,
     csd_shadow_width: i32,
     csd_shadow_buffer: SolidColorBuffer,
+    minimized: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,7 @@ impl TestWindow {
                 pending_sizing_mode: SizingMode::Normal,
                 csd_shadow_width: 0,
                 csd_shadow_buffer: SolidColorBuffer::new((0., 0.), [0., 0., 0., 0.3]),
+                minimized: false,
             })),
             rules: ResolvedWindowRules::default(),
         }
@@ -265,5 +267,13 @@ impl LayoutElement for TestWindow {
 
     fn is_urgent(&self) -> bool {
         false
+    }
+
+    fn is_minimized(&self) -> bool {
+        self.inner.borrow().minimized
+    }
+
+    fn set_minimized(&mut self, minimized: bool) {
+        self.inner.borrow_mut().minimized = minimized;
     }
 }

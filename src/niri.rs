@@ -37,8 +37,6 @@ use smithay::backend::renderer::element::{
     RenderElementStates,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
-#[cfg(feature = "xdp-gnome-screencast")]
-use smithay::backend::renderer::gles::GlesTexture;
 use smithay::backend::renderer::sync::SyncPoint;
 use smithay::backend::renderer::Color32F;
 use smithay::desktop::utils::{
@@ -127,7 +125,7 @@ use wayland_server::protocol::wl_output::WlOutput;
 
 #[cfg(feature = "dbus")]
 use crate::a11y::A11y;
-use crate::animation::Clock;
+use crate::animation::{Animation, Clock};
 use crate::backend::tty::SurfaceDmabufFeedback;
 use crate::backend::{Backend, Headless, RenderResult, Tty, Winit};
 use crate::cursor::{CursorManager, CursorTextureCache, RenderCursor, XCursor};
@@ -178,8 +176,9 @@ use crate::render_helpers::surface::push_elements_from_surface_tree;
 use crate::render_helpers::texture::{TextureBuffer, TextureRenderElement};
 use crate::render_helpers::xray::{Xray, XrayPos};
 use crate::render_helpers::{
-    encompassing_geo, render_to_dmabuf, render_to_encompassing_texture, render_to_shm,
-    render_to_texture, render_to_vec, shaders, RenderCtx, RenderIntent, RenderTarget,
+    encompassing_geo, render_and_download, render_to_dmabuf, render_to_encompassing_texture,
+    render_to_shm, render_to_texture, render_to_vec, shaders, RenderCtx, RenderIntent,
+    RenderTarget,
 };
 #[cfg(feature = "xdp-gnome-screencast")]
 use crate::screencasting::Screencasting;
@@ -187,10 +186,11 @@ use crate::ui::config_error_notification::ConfigErrorNotification;
 use crate::ui::exit_confirm_dialog::{ExitConfirmDialog, ExitConfirmDialogRenderElement};
 use crate::ui::hotkey_overlay::HotkeyOverlay;
 use crate::ui::mru::{MruCloseRequest, WindowMruUi, WindowMruUiRenderElement};
+use crate::ui::pick_color_ui::{clamp_to_output, PickColorUi, Region as PickColorRegion};
 use crate::ui::screen_transition::{self, ScreenTransition};
-use crate::ui::screencast_picker::ScreenCastPickerRenderElement;
 #[cfg(feature = "xdp-gnome-screencast")]
-use crate::ui::screencast_picker::{PickerCandidate, ScreenCastPickerUi, PREVIEW_FRAME_INTERVAL};
+use crate::ui::screencast_picker::{PickerCandidate, ScreenCastPickerUi};
+use crate::ui::screencast_picker::{ScreenCastPickerRenderElement, PREVIEW_FRAME_INTERVAL};
 use crate::ui::screenshot_ui::{
     OutputScreenshot, ScreenshotPathReplySender, ScreenshotPortalError, ScreenshotReplySender,
     ScreenshotSelectionReplySender, ScreenshotUi, ScreenshotUiRenderElement,
@@ -318,7 +318,11 @@ pub struct Niri {
     pub magnifier_zoom: f64,
     pub magnifier_animation: Option<crate::animation::Animation>,
     pub magnifier_capture: Cell<bool>,
+    /// Set while capturing the screen for the color picker magnifier, to leave it out.
+    pub pick_color_capture: Cell<bool>,
     pub magnifier_center: RefCell<Option<(WeakOutput, Point<i32, Physical>)>>,
+    /// Movement of the shown magnifier center towards `magnifier_center`.
+    pub magnifier_center_anim: Option<MagnifierCenterAnim>,
 
     /// Output capture sessions. Kept out of the protocol state because each one needs a damage
     /// tracker and is handled in the redraw loop.
@@ -367,6 +371,10 @@ pub struct Niri {
     pub ext_data_control_state: ExtDataControlState,
     pub popups: PopupManager,
     pub popup_grab: Option<PopupGrabState>,
+    /// The agent seat, unless turned off in the config. Only read at startup, since clients like
+    /// GTK 3 ignore seats that appear later.
+    #[cfg(feature = "agent")]
+    pub agent: Option<crate::agent::AgentState>,
     pub presentation_state: PresentationState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
@@ -397,6 +405,7 @@ pub struct Niri {
     pub bind_repeat_timer: Option<RegistrationToken>,
     pub keyboard_focus: KeyboardFocus,
     pub layer_shell_on_demand_focus: Option<LayerSurface>,
+    pub grid_mouse_focus: GridMouseFocus,
     pub idle_inhibiting_surfaces: HashSet<WlSurface>,
     pub is_fdo_idle_inhibited: Arc<AtomicBool>,
     pub keyboard_shortcuts_inhibiting_surfaces: HashMap<WlSurface, KeyboardShortcutsInhibitor>,
@@ -463,7 +472,6 @@ pub struct Niri {
     pub vertical_finger_scroll_tracker: ScrollTracker,
     pub horizontal_finger_scroll_tracker: ScrollTracker,
     pub mods_with_finger_scroll_binds: HashSet<Modifiers>,
-    pub pending_default_mod_tap: Option<Keycode>,
 
     pub lock_state: LockState,
 
@@ -471,6 +479,7 @@ pub struct Niri {
     pub locked_hint: Option<bool>,
 
     pub screenshot_ui: ScreenshotUi,
+    pub pick_color_ui: PickColorUi,
     pub config_error_notification: ConfigErrorNotification,
     pub hotkey_overlay: HotkeyOverlay,
     pub exit_confirm_dialog: ExitConfirmDialog,
@@ -624,6 +633,22 @@ pub enum KeyboardFocus {
     Mru,
 }
 
+/// State of `grid-overview { focus-follows-mouse }`.
+///
+/// The pointer only takes the grid focus over once it moved far enough from where it was when the
+/// focus was last set some other way: when the grid opened, by keyboard navigation, or by a layout
+/// change. Then the focus follows every motion until it is set some other way again.
+#[derive(Debug, Default)]
+pub struct GridMouseFocus {
+    /// The grid session this state belongs to, from [`Layout::grid_overview_open_count`].
+    open_count: u64,
+    /// The grid focus as of the last pointer motion.
+    focus: Option<Window>,
+    /// Where the pointer was when the focus was last set some other way, while the pointer
+    /// hasn't moved far enough from there yet.
+    anchor: Option<Point<f64, Logical>>,
+}
+
 #[derive(Default, Clone, PartialEq)]
 pub struct PointContents {
     // Output under point.
@@ -637,7 +662,7 @@ pub struct PointContents {
     pub window: Option<(Window, HitType)>,
     // If surface belongs to a layer surface, this is that layer surface.
     pub layer: Option<LayerSurface>,
-    // Pointer is over a hot corner.
+    // Point is over a hot corner.
     pub hot_corner: Option<HotCornerAction>,
     // Point is over the overview.
     pub overview: bool,
@@ -732,6 +757,38 @@ pub struct PendingMruCommit {
     id: MappedId,
     token: RegistrationToken,
     stamp: Duration,
+}
+
+/// Animated movement of the locked magnifier center.
+#[derive(Debug)]
+pub struct MagnifierCenterAnim {
+    output: WeakOutput,
+    x: Animation,
+    y: Animation,
+}
+
+impl MagnifierCenterAnim {
+    /// Whether this animation moves the center of `output` towards `target`.
+    ///
+    /// Anything that sets the center some other way leaves a stale animation behind, which this
+    /// tells apart.
+    fn heads_to(&self, output: &Output, target: Point<i32, Physical>) -> bool {
+        self.output.upgrade().as_ref() == Some(output)
+            && self.x.to() == f64::from(target.x)
+            && self.y.to() == f64::from(target.y)
+    }
+
+    fn value(&self) -> Point<f64, Physical> {
+        Point::from((self.x.value(), self.y.value()))
+    }
+
+    fn current_velocity(&self) -> Point<f64, Physical> {
+        Point::from((self.x.current_velocity(), self.y.current_velocity()))
+    }
+
+    fn is_done(&self) -> bool {
+        self.x.is_done() && self.y.is_done()
+    }
 }
 
 impl RedrawState {
@@ -873,6 +930,15 @@ impl State {
         }
 
         self.niri.redraw_queued_outputs(&mut self.backend);
+
+        // Follow changing screen contents in the color picker magnifier: recapture right after
+        // a frame was rendered. This only redraws when the captured pixels change, so it settles
+        // once the screen stops changing.
+        if self.niri.pick_color_ui.take_rendered() {
+            let location = self.niri.seat.get_pointer().unwrap().current_location();
+            self.update_pick_color_magnifier(location);
+            self.niri.redraw_queued_outputs(&mut self.backend);
+        }
 
         {
             let _span = tracy_client::span!("flush_clients");
@@ -1175,7 +1241,11 @@ impl State {
     pub fn focus_window(&mut self, window: &Window) {
         let active_output = self.niri.layout.active_output().cloned();
 
-        self.niri.layout.activate_window(window);
+        // A window shown in the grid overview is focused like picking its cell there: the grid
+        // closes and the window is activated.
+        if !self.niri.layout.confirm_grid_selection_for_window(window) {
+            self.niri.layout.activate_window(window);
+        }
 
         let new_active = self.niri.layout.active_output().cloned();
         if new_active != active_output {
@@ -1883,7 +1953,6 @@ impl State {
                 mods_with_tablet_stylus_binds(new_mod_key, &config.binds);
             self.niri.mods_with_finger_scroll_binds =
                 mods_with_finger_scroll_binds(new_mod_key, &config.binds);
-            self.niri.pending_default_mod_tap = None;
         }
         if hotkey_overlay_changed {
             self.niri
@@ -2372,19 +2441,10 @@ impl State {
             })
             .collect();
 
-        self.niri.update_render_elements(Some(&output));
-        let frozen_backdrop = self
-            .backend
-            .with_primary_renderer(|renderer| {
-                self.niri
-                    .capture_screen_cast_picker_backdrop(renderer, &output)
-            })
-            .flatten();
-
         if self
             .niri
             .screen_cast_picker
-            .open(request, output, displays, windows, frozen_backdrop)
+            .open(request, output, displays, windows)
         {
             self.niri.seat.get_pointer().unwrap().unset_grab(
                 self,
@@ -2532,20 +2592,97 @@ impl State {
         }
     }
 
-    pub fn handle_pick_color(&mut self, tx: async_channel::Sender<Option<niri_ipc::PickedColor>>) {
+    pub fn handle_pick_color(
+        &mut self,
+        tx: async_channel::Sender<Option<niri_ipc::PickedColor>>,
+        copy_to_clipboard: bool,
+    ) {
+        if self.niri.is_locked()
+            || self.niri.screenshot_ui.is_open()
+            || self.niri.pick_color_ui.is_open()
+            || self.niri.screen_cast_picker_is_visible()
+        {
+            let _ = tx.try_send(None);
+            return;
+        }
+
+        self.niri.pick_color_ui.open();
+
         let pointer = self.niri.seat.get_pointer().unwrap();
+        let location = pointer.current_location();
         let start_data = PointerGrabStartData {
             focus: None,
             button: 0,
-            location: pointer.current_location(),
+            location,
         };
-        let grab = PickColorGrab::new(start_data);
+        let grab = PickColorGrab::new(start_data, copy_to_clipboard);
         pointer.set_grab(self, grab, SERIAL_COUNTER.next_serial(), Focus::Clear);
         self.niri.pick_color = Some(tx);
+        // The magnifier replaces the cursor.
         self.niri
             .cursor_manager
-            .set_cursor_image(CursorImageStatus::Named(CursorIcon::Crosshair));
+            .set_cursor_image(CursorImageStatus::Hidden);
+        self.update_pick_color_magnifier(location);
         self.niri.queue_redraw_all();
+    }
+
+    /// Captures the screen around the pointer and updates the color picker magnifier.
+    ///
+    /// Must not lock the pointer: this is called from inside the pointer grab.
+    pub fn update_pick_color_magnifier(&mut self, location: Point<f64, Logical>) {
+        if !self.niri.pick_color_ui.is_open() {
+            return;
+        }
+
+        let Some((output, pos)) = self
+            .niri
+            .output_under(location)
+            .map(|(output, pos)| (output.clone(), pos))
+        else {
+            if self.niri.pick_color_ui.clear() {
+                self.niri.queue_redraw_all();
+            }
+            return;
+        };
+
+        let scale = output.current_scale().fractional_scale();
+        let output_size = output
+            .current_transform()
+            .transform_size(output.current_mode().unwrap().size);
+        let half = self.niri.pick_color_ui.capture_half(scale);
+        let center = clamp_to_output(pos.to_physical_precise_floor(scale), output_size);
+        let origin = center - Point::from((half, half));
+        let side = half * 2 + 1;
+
+        self.niri.update_render_elements(Some(&output));
+        let niri = &self.niri;
+        let Some(pixels) = self
+            .backend
+            .with_primary_renderer(|renderer| {
+                niri.capture_pick_color_region(renderer, &output, origin, side)
+            })
+            .flatten()
+        else {
+            return;
+        };
+
+        let region = PickColorRegion {
+            output: output.clone(),
+            scale,
+            pos,
+            output_size,
+            origin,
+            side,
+            pixels,
+        };
+        let ui = &mut self.niri.pick_color_ui;
+        let changed = self
+            .backend
+            .with_primary_renderer(|renderer| ui.set_region(renderer, region))
+            .unwrap_or(false);
+        if changed {
+            self.niri.queue_redraw(&output);
+        }
     }
 
     pub fn cancel_screenshot(&mut self) {
@@ -2822,6 +2959,64 @@ impl State {
         });
     }
 
+    /// Minimizes a window, playing the window-close animation for the disappearing tile.
+    pub fn minimize_window(&mut self, window: &Window) {
+        if self.niri.layout.is_window_minimized(window) {
+            return;
+        }
+
+        let surface = window.toplevel().expect("no X11 support").wl_surface();
+        let Some((_, output)) = self.niri.layout.find_window_and_output(surface) else {
+            return;
+        };
+        let output = output.cloned();
+
+        // Play the window-close animation for the disappearing window; the layout handles the
+        // neighbors sliding in.
+        self.store_unmap_snapshot(window, output.as_ref());
+
+        let transaction = crate::utils::transaction::Transaction::new();
+        let blocker = transaction.blocker();
+        self.backend.with_primary_renderer(|renderer| {
+            self.niri
+                .layout
+                .start_close_animation_for_window(renderer, window, blocker);
+        });
+
+        let active_window = self.niri.layout.focus().map(|m| &m.window);
+        let was_active = active_window == Some(window);
+
+        self.niri.layout.set_window_minimized(window, true);
+
+        if !transaction.is_last() {
+            transaction.register_deadline_timer(&self.niri.event_loop);
+        }
+
+        if was_active {
+            self.maybe_warp_cursor_to_focus();
+        }
+
+        // FIXME: granular.
+        self.niri.queue_redraw_all();
+    }
+
+    /// Restores a minimized window, optionally focusing it.
+    pub fn unminimize_window(&mut self, window: &Window, activate: bool) {
+        if !self.niri.layout.is_window_minimized(window) {
+            return;
+        }
+
+        self.niri.layout.unminimize_window(window, activate);
+
+        if activate {
+            self.niri.layer_shell_on_demand_focus = None;
+            self.maybe_warp_cursor_to_focus();
+        }
+
+        // FIXME: granular.
+        self.niri.queue_redraw_all();
+    }
+
     #[cfg(not(feature = "xdp-gnome-screencast"))]
     pub fn set_dynamic_cast_target(&mut self, _target: CastTarget) {}
 
@@ -2859,7 +3054,7 @@ impl State {
                 self.cancel_screenshot();
             }
             ScreenshotToNiri::PickColor(tx) => {
-                self.handle_pick_color(tx);
+                self.handle_pick_color(tx, false);
             }
         }
     }
@@ -3068,7 +3263,7 @@ impl Niri {
         }
     }
 
-    fn screen_cast_picker_is_visible(&self) -> bool {
+    pub(crate) fn screen_cast_picker_is_visible(&self) -> bool {
         #[cfg(feature = "xdp-gnome-screencast")]
         {
             self.screen_cast_picker.is_visible()
@@ -3114,7 +3309,11 @@ impl Niri {
         let compositor_state = CompositorState::new_v6::<State>(&display_handle);
         let xdg_shell_state = XdgShellState::new_with_capabilities::<State>(
             &display_handle,
-            [WmCapabilities::Fullscreen, WmCapabilities::Maximize],
+            [
+                WmCapabilities::Fullscreen,
+                WmCapabilities::Maximize,
+                WmCapabilities::Minimize,
+            ],
         );
         let xdg_decoration_state =
             XdgDecorationState::new_with_filter::<State, _>(&display_handle, |client| {
@@ -3235,6 +3434,14 @@ impl Niri {
         #[cfg(test)]
         let single_pixel_buffer_state = SinglePixelBufferState::new::<State>(&display_handle);
 
+        // Apps launched for the agent see only the agent seat.
+        #[cfg(feature = "agent")]
+        let mut seat: Seat<State> = seat_state.new_wl_seat_with_filter(
+            &display_handle,
+            backend.seat_name(),
+            crate::agent::sees_user_seat,
+        );
+        #[cfg(not(feature = "agent"))]
         let mut seat: Seat<State> = seat_state.new_wl_seat(&display_handle, backend.seat_name());
         let keyboard = match seat.add_keyboard(
             config_.input.keyboard.xkb.to_xkb_config(),
@@ -3262,6 +3469,10 @@ impl Niri {
             keyboard.set_modifier_state(modifier_state);
         }
         seat.add_pointer();
+
+        #[cfg(feature = "agent")]
+        let mut agent = (!config_.agent.off)
+            .then(|| crate::agent::AgentState::new(&mut seat_state, &display_handle, &config_));
 
         let cursor_shape_manager_state = CursorShapeManagerState::new::<State>(&display_handle);
         let cursor_manager =
@@ -3317,6 +3528,11 @@ impl Niri {
                 .unwrap();
             socket_name
         });
+
+        #[cfg(feature = "agent")]
+        if let (Some(agent), Some(socket_name)) = (&mut agent, &socket_name) {
+            agent.create_socket(&event_loop, socket_name);
+        }
 
         let ipc_server = match IpcServer::start(&event_loop, socket_name.as_deref()) {
             Ok(server) => Some(server),
@@ -3400,7 +3616,9 @@ impl Niri {
             magnifier_zoom: magnifier_zoom_factor,
             magnifier_animation: None,
             magnifier_capture: Cell::new(false),
+            pick_color_capture: Cell::new(false),
             magnifier_center: RefCell::new(None),
+            magnifier_center_anim: None,
 
             compositor_state,
             xdg_shell_state,
@@ -3443,6 +3661,8 @@ impl Niri {
             ext_data_control_state,
             popups: PopupManager::default(),
             popup_grab: None,
+            #[cfg(feature = "agent")]
+            agent,
             suppressed_keys: HashSet::new(),
             suppressed_buttons: HashSet::new(),
             pending_release_binds: HashMap::new(),
@@ -3461,6 +3681,7 @@ impl Niri {
             seat,
             keyboard_focus: KeyboardFocus::Layout { surface: None },
             layer_shell_on_demand_focus: None,
+            grid_mouse_focus: GridMouseFocus::default(),
             idle_inhibiting_surfaces: HashSet::new(),
             is_fdo_idle_inhibited: Arc::new(AtomicBool::new(false)),
             keyboard_shortcuts_inhibiting_surfaces: HashMap::new(),
@@ -3492,12 +3713,12 @@ impl Niri {
             vertical_finger_scroll_tracker: ScrollTracker::new(10),
             horizontal_finger_scroll_tracker: ScrollTracker::new(10),
             mods_with_finger_scroll_binds,
-            pending_default_mod_tap: None,
 
             lock_state: LockState::Unlocked,
             locked_hint: None,
 
             screenshot_ui,
+            pick_color_ui: PickColorUi::new(),
             config_error_notification,
             hotkey_overlay,
             exit_confirm_dialog,
@@ -3541,6 +3762,19 @@ impl Niri {
     }
 
     pub fn insert_client(&mut self, client: NewClient) {
+        self.insert_client_inner(client, false);
+    }
+
+    /// Inserts a client that connected through the agent socket.
+    #[cfg(feature = "agent")]
+    pub fn insert_agent_client(&mut self, client: NewClient) {
+        self.insert_client_inner(client, true);
+    }
+
+    fn insert_client_inner(&mut self, client: NewClient, agent: bool) {
+        #[cfg(not(feature = "agent"))]
+        let _ = agent;
+
         let NewClient {
             client,
             restricted,
@@ -3554,6 +3788,10 @@ impl Niri {
             primary_selection_disabled: config.clipboard.disable_primary,
             restricted,
             credentials_unknown,
+            #[cfg(feature = "agent")]
+            hide_agent_seat: crate::agent::hides_agent_seat(&client, &config),
+            #[cfg(feature = "agent")]
+            agent_client: agent,
         });
 
         if let Err(err) = self.display_handle.insert_client(client, data) {
@@ -4027,10 +4265,19 @@ impl Niri {
         None
     }
 
-    pub fn trigger_hot_corner(&mut self, action: HotCornerAction) {
+    pub fn trigger_hot_corner(&mut self, action: HotCornerAction, output: Option<&Output>) {
         match action {
             HotCornerAction::Overview => self.layout.toggle_overview(),
-            HotCornerAction::GridOverview => self.layout.toggle_grid_overview(),
+            HotCornerAction::GridOverview => {
+                // Without grid-all-monitors, the grid toggles on the active monitor, so make that
+                // the monitor whose hot corner was hit.
+                if !self.config.borrow().grid_overview.grid_all_monitors {
+                    if let Some(output) = output {
+                        self.layout.focus_output(output);
+                    }
+                }
+                self.layout.toggle_grid_overview();
+            }
         }
     }
 
@@ -4412,6 +4659,43 @@ impl Niri {
         self.global_space.output_under(pos).next().cloned()
     }
 
+    /// Returns the output that pointer motion from `pos` must stay within, because the focused
+    /// window on it is fullscreen (`confine-mouse-to-fullscreen`).
+    pub fn fullscreen_output_confining_pointer(&self, pos: Point<f64, Logical>) -> Option<Output> {
+        if !self.config.borrow().input.confine_mouse_to_fullscreen {
+            return None;
+        }
+
+        // Compositor UIs and the lock screen may need the pointer on other outputs.
+        if self.is_locked()
+            || self.screenshot_ui.is_open()
+            || self.screen_cast_picker_is_visible()
+            || self.exit_confirm_dialog.is_open()
+            || self.window_mru_ui.is_open()
+        {
+            return None;
+        }
+
+        let output = self.global_space.output_under(pos).next()?;
+        if self.layout.active_output() != Some(output) {
+            return None;
+        }
+
+        // A floating window focused above the fullscreen one lets the pointer go.
+        if !self
+            .layout
+            .focus()
+            .is_some_and(|win| win.sizing_mode().is_fullscreen())
+        {
+            return None;
+        }
+
+        // This is the same check that puts the fullscreen window above the top layer: its column
+        // is active and the view is stationary, outside the overview and the grid overview.
+        let mon = self.layout.monitor_for_output(output)?;
+        mon.render_above_top_layer().then(|| output.clone())
+    }
+
     pub fn output_left_of(&self, current: &Output) -> Option<Output> {
         let current_geo = self.global_space.output_geometry(current)?;
         let extended_geo = Rectangle::new(
@@ -4773,6 +5057,11 @@ impl Niri {
                 self.magnifier_animation = None;
             }
         }
+        if let Some(anim) = &self.magnifier_center_anim {
+            if anim.is_done() {
+                self.magnifier_center_anim = None;
+            }
+        }
     }
 
     pub fn adjust_magnifier_zoom(&mut self, delta: f64) {
@@ -4823,7 +5112,8 @@ impl Niri {
                 let output = weak.upgrade()?;
                 let output_geo = self.global_space.output_geometry(&output)?;
                 if output_geo.to_f64().contains(location) {
-                    let center = self.clamp_magnifier_center_to_output(&output, *center);
+                    // Grab the view where it is shown, even halfway through a move.
+                    let center = self.shown_magnifier_center(&output, *center);
                     return Some((output, center));
                 }
 
@@ -4849,8 +5139,82 @@ impl Niri {
 
         let center = self.clamp_magnifier_center_to_output(output, center);
         *self.magnifier_center.borrow_mut() = Some((output.downgrade(), center));
+        self.magnifier_center_anim = None;
         self.queue_redraw(&output);
         true
+    }
+
+    /// Moves the locked magnifier center by `dx` and `dy` steps.
+    pub fn move_magnifier_center(&mut self, dx: f64, dy: f64) {
+        if !self.can_drag_magnifier_center() {
+            return;
+        }
+
+        let locked = self
+            .magnifier_center
+            .borrow()
+            .as_ref()
+            .and_then(|(weak, center)| Some((weak.upgrade()?, *center)));
+        let (output, center) = match locked {
+            Some(locked) => locked,
+            None => {
+                // The center locks on the first magnified frame. If that frame hasn't happened
+                // yet, start from the pointer, like compute_magnifier_params() would.
+                let pointer_pos = self
+                    .tablet_cursor_location
+                    .unwrap_or_else(|| self.seat.get_pointer().unwrap().current_location());
+                let Some((output, pos_within_output)) = self.output_under(pointer_pos) else {
+                    return;
+                };
+                let output_scale = Scale::from(output.current_scale().fractional_scale());
+                let center = pos_within_output.to_physical_precise_round(output_scale);
+                (output.clone(), center)
+            }
+        };
+
+        let size = output.current_mode().unwrap().size;
+        let size = output.current_transform().transform_size(size);
+        let zoom = self.magnifier_zoom;
+        let step = self.config.borrow().magnifier.move_step;
+        let delta = Point::<f64, Physical>::from((
+            dx * magnifier_move_step(size.w, zoom, step),
+            dy * magnifier_move_step(size.h, zoom, step),
+        ));
+        let target = (center.to_f64() + delta).to_i32_round();
+        let target = self.clamp_magnifier_center_to_output(&output, target);
+
+        // Continue from where the view is shown, at its current speed, so that the steps of a
+        // held key chain into one smooth movement.
+        let (from, velocity) = match &self.magnifier_center_anim {
+            Some(anim) if anim.heads_to(&output, center) => (anim.value(), anim.current_velocity()),
+            _ => (center.to_f64(), Point::default()),
+        };
+        let config = self.config.borrow().animations.magnifier.0;
+        let anim = |from, to: i32, velocity| {
+            Animation::new(self.clock.clone(), from, f64::from(to), velocity, config)
+        };
+        self.magnifier_center_anim = Some(MagnifierCenterAnim {
+            output: output.downgrade(),
+            x: anim(from.x, target.x, velocity.x),
+            y: anim(from.y, target.y, velocity.y),
+        });
+
+        *self.magnifier_center.borrow_mut() = Some((output.downgrade(), target));
+        self.queue_redraw(&output);
+    }
+
+    /// Returns where the magnifier shows the locked `center` of `output`, which differs from it
+    /// while the center is moving.
+    fn shown_magnifier_center(
+        &self,
+        output: &Output,
+        center: Point<i32, Physical>,
+    ) -> Point<i32, Physical> {
+        let shown = match &self.magnifier_center_anim {
+            Some(anim) if anim.heads_to(output, center) => anim.value().to_i32_round(),
+            _ => center,
+        };
+        self.clamp_magnifier_center_to_output(output, shown)
     }
 
     fn clamp_magnifier_center_to_output(
@@ -5519,49 +5883,6 @@ impl Niri {
     }
 
     #[cfg(feature = "xdp-gnome-screencast")]
-    fn capture_screen_cast_picker_backdrop(
-        &self,
-        renderer: &mut GlesRenderer,
-        output: &Output,
-    ) -> Option<[TextureBuffer<GlesTexture>; 2]> {
-        let mode = output.current_mode()?;
-        let size = output.current_transform().transform_size(mode.size);
-        let scale = Scale::from(output.current_scale().fractional_scale());
-        let targets = [RenderTarget::Output, RenderTarget::Screencast];
-        let buffers = targets.map(|target| {
-            let ctx = RenderCtx {
-                renderer: &mut *renderer,
-                target,
-                intent: RenderIntent::Normal,
-                xray: None,
-            };
-            let elements = self.render_to_vec(ctx, output, false);
-            let result = render_to_texture(
-                renderer,
-                size,
-                scale,
-                Transform::Normal,
-                Fourcc::Abgr8888,
-                elements.iter().rev(),
-            );
-            if let Err(err) = &result {
-                warn!(
-                    "error capturing screen cast picker backdrop for {}: {err:?}",
-                    output.name()
-                );
-            }
-            result.ok().map(|(texture, _)| {
-                TextureBuffer::from_texture(renderer, texture, scale, Transform::Normal, Vec::new())
-            })
-        });
-
-        if buffers.iter().any(Option::is_none) {
-            return None;
-        }
-        Some(buffers.map(Option::unwrap))
-    }
-
-    #[cfg(feature = "xdp-gnome-screencast")]
     fn refresh_screen_cast_picker_display_previews(
         &self,
         renderer: &mut GlesRenderer,
@@ -5678,7 +5999,7 @@ impl Niri {
                 })
             };
             if let Some(c) = center {
-                return Some((zoom, c));
+                return Some((zoom, self.shown_magnifier_center(output, c)));
             }
             if !output_geo.to_f64().contains(pointer_pos) {
                 return None;
@@ -5832,6 +6153,13 @@ impl Niri {
         )
         .into();
 
+        // Draw the color picker magnifier on top, unless capturing the screen for it.
+        if self.pick_color_ui.is_open() && !self.pick_color_capture.get() {
+            self.pick_color_ui.render_output(output, &mut |elem| {
+                push(OutputRenderElements::Texture(elem))
+            });
+        }
+
         // If the screenshot UI is open, draw it.
         if self.screenshot_ui.is_open() {
             if self.compute_magnifier_params(output).is_some() {
@@ -5890,15 +6218,12 @@ impl Niri {
 
         #[cfg(feature = "xdp-gnome-screencast")]
         if self.screen_cast_picker.is_visible()
-            && should_render_screen_cast_picker(_rendering_output, ctx.target, ctx.intent)
+            && should_render_screen_cast_picker(_rendering_output, ctx.intent)
         {
-            let frozen = self
-                .screen_cast_picker
+            // Render the picker on top of the live output contents, so that the background
+            // keeps updating while the picker is open.
+            self.screen_cast_picker
                 .render(self, output, ctx.r(), &mut |elem| push(elem.into()));
-            if frozen {
-                push(backdrop);
-                return;
-            }
         }
 
         // Draw the hotkey overlay on top.
@@ -6248,6 +6573,10 @@ impl Niri {
                 .as_ref()
                 .map(|a| !a.is_done())
                 .unwrap_or(false);
+            let magnifier_center_anim_ongoing = self
+                .magnifier_center_anim
+                .as_ref()
+                .is_some_and(|a| a.output.upgrade().as_ref() == Some(output) && !a.is_done());
 
             let state = self.output_state.get_mut(output).unwrap();
             state.unfinished_animations_remain = self.layout.are_animations_ongoing(Some(output));
@@ -6270,6 +6599,7 @@ impl Niri {
 
             state.unfinished_animations_remain |= pointer_anim_ongoing;
             state.unfinished_animations_remain |= magnifier_anim_ongoing;
+            state.unfinished_animations_remain |= magnifier_center_anim_ongoing;
 
             // Also check layer surfaces.
             if !state.unfinished_animations_remain {
@@ -6695,6 +7025,7 @@ impl Niri {
     pub fn send_frame_callbacks(&mut self, output: &Output) {
         let _span = tracy_client::span!("Niri::send_frame_callbacks");
 
+        let mindbg = std::env::var_os("NIRI_MINDBG").is_some();
         let state = self.output_state.get(output).unwrap();
         let sequence = state.frame_callback_sequence;
 
@@ -6742,9 +7073,41 @@ impl Niri {
 
         let frame_callback_time = get_monotonic_time();
 
+        // While the grid overview is open, minimized windows show live previews in it, so they
+        // need frame callbacks despite not being part of any output's scanout.
+        let minimized_grid_previews = self.layout.is_grid_overview_open_on(output);
+
         for mapped in self.layout.windows_for_output_mut(output) {
             #[cfg(feature = "xdp-gnome-screencast")]
             if picker_display_preview || picker_window_previews.contains(&mapped.id().get()) {
+                // Surfaces visible behind the picker keep their regular frame callbacks, while
+                // ones visible only in previews are throttled to the preview interval.
+                mapped.send_frame(
+                    output,
+                    frame_callback_time,
+                    Some(PREVIEW_FRAME_INTERVAL),
+                    should_send,
+                );
+                continue;
+            }
+            // Fast-track callbacks also flow to minimized windows that haven't been suspended
+            // yet: their client may still be responding to the minimize configure (e.g. the
+            // default-size resize when expelling out of a multi-window column), and
+            // callback-paced clients like Chromium won't commit it on idle throttling alone.
+            // The commit suspends them (suspend_minimized_hidden), dropping them back to the
+            // regular throttling.
+            if mapped.is_minimized() && (minimized_grid_previews || !mapped.is_suspended()) {
+                if mindbg {
+                    debug!(
+                        target: "niri::mindbg",
+                        "frame->min id={:?} out={} suspended={} grid_preview={} size={:?}",
+                        mapped.id(),
+                        output.name(),
+                        mapped.is_suspended(),
+                        minimized_grid_previews,
+                        mapped.window.geometry().size,
+                    );
+                }
                 mapped.send_frame(
                     output,
                     frame_callback_time,
@@ -6768,7 +7131,7 @@ impl Niri {
                     output,
                     frame_callback_time,
                     Some(PREVIEW_FRAME_INTERVAL),
-                    |_, _| None,
+                    should_send,
                 );
                 continue;
             }
@@ -7564,6 +7927,50 @@ impl Niri {
         self.queue_redraw_all();
     }
 
+    /// Renders a square region of the output, without the color picker magnifier, and downloads
+    /// its RGBA8 pixels.
+    pub fn capture_pick_color_region(
+        &self,
+        renderer: &mut GlesRenderer,
+        output: &Output,
+        origin: Point<i32, Physical>,
+        side: i32,
+    ) -> Option<Vec<u8>> {
+        use smithay::backend::renderer::ExportMem as _;
+
+        let _span = tracy_client::span!("Niri::capture_pick_color_region");
+
+        let scale = Scale::from(output.current_scale().fractional_scale());
+        let ctx = RenderCtx {
+            renderer,
+            // This is an interactive operation so we can render without blocking out.
+            target: RenderTarget::Output,
+            intent: RenderIntent::Normal,
+            xray: None,
+        };
+        let was_capture = self.pick_color_capture.replace(true);
+        let elements = self.render_to_vec(ctx, output, false);
+        self.pick_color_capture.set(was_capture);
+
+        let mapping = render_and_download(
+            renderer,
+            Size::from((side, side)),
+            scale,
+            Transform::Normal,
+            Fourcc::Abgr8888,
+            elements.iter().rev().map(|elem| {
+                RelocateRenderElement::from_element(elem, origin.upscale(-1), Relocate::Relative)
+            }),
+        )
+        .map_err(|err| warn!("error capturing screen for color picking: {err:?}"))
+        .ok()?;
+        let pixels = renderer
+            .map_texture(&mapping)
+            .map_err(|err| warn!("error mapping color picker capture: {err:?}"))
+            .ok()?;
+        Some(pixels.to_vec())
+    }
+
     pub fn capture_screenshots<'a>(
         &'a self,
         renderer: &'a mut GlesRenderer,
@@ -8172,37 +8579,8 @@ impl Niri {
             .context("error mapping texture")?;
         let pixels = copy.to_vec();
 
-        let path = make_screenshot_path(&self.config.borrow())
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                let mut path = env::temp_dir();
-                path.push("screenshot.png");
-                path
-            });
-        debug!("saving screenshot to {path:?}");
-
-        thread::spawn(move || {
-            let file = match std::fs::File::create(&path) {
-                Ok(file) => file,
-                Err(err) => {
-                    warn!("error creating file: {err:?}");
-                    return;
-                }
-            };
-
-            let w = std::io::BufWriter::new(file);
-            if let Err(err) = write_png_rgba8(w, geo.size.w as u32, geo.size.h as u32, &pixels) {
-                warn!("error encoding screenshot image: {err:?}");
-                return;
-            }
-
-            if let Err(err) = path_reply.try_send(Ok(path)) {
-                warn!("error replying with screenshot path: {err:?}");
-            }
-        });
-
-        Ok(())
+        self.save_screenshot_with_replies(geo.size, pixels, true, None, None, Some(path_reply))
+            .context("error saving screenshot")
     }
 
     pub fn clear_input_state(&mut self) {
@@ -8580,6 +8958,60 @@ impl Niri {
         }
     }
 
+    /// Moves the grid focus to the cell under the pointer as the pointer moves.
+    ///
+    /// Call this before the pointer moves to `new_pos`, with `under` the contents there.
+    pub fn handle_grid_focus_follows_mouse(
+        &mut self,
+        new_pos: Point<f64, Logical>,
+        under: &PointContents,
+    ) {
+        let ffm = self.config.borrow().grid_overview.focus_follows_mouse;
+        let Some(ffm) = ffm.filter(|_| self.layout.is_grid_overview_open()) else {
+            self.grid_mouse_focus = GridMouseFocus::default();
+            return;
+        };
+
+        // Drags and the MRU switcher own the pointer.
+        let pointer = self.seat.get_pointer().unwrap();
+        if pointer.is_grabbed() || self.window_mru_ui.is_open() {
+            return;
+        }
+
+        let old_pos = pointer.current_location();
+        let open_count = self.layout.grid_overview_open_count();
+        let focus = self.layout.grid_focused_window_id();
+
+        let state = &mut self.grid_mouse_focus;
+        if state.open_count != open_count || state.focus != focus {
+            // A new grid, or the focus was set some other way since the last motion.
+            state.open_count = open_count;
+            state.focus = focus.clone();
+            state.anchor = Some(old_pos);
+        }
+
+        if let Some(anchor) = state.anchor {
+            let delta = new_pos - anchor;
+            if delta.x.hypot(delta.y) < ffm.min_distance() {
+                return;
+            }
+            state.anchor = None;
+        }
+
+        // Over a gap or over a window that isn't in the grid, the focus stays where it is.
+        let Some((window, _)) = &under.window else {
+            return;
+        };
+        if focus.as_ref() == Some(window) || !self.layout.window_is_in_open_grid_overview(window) {
+            return;
+        }
+
+        if self.layout.focus_grid_cell_for_window(window) {
+            self.grid_mouse_focus.focus = self.layout.grid_focused_window_id();
+            self.queue_redraw_all();
+        }
+    }
+
     pub fn handle_focus_follows_mouse(&mut self, new_focus: &PointContents) {
         let Some(ffm) = self.config.borrow().input.focus_follows_mouse else {
             return;
@@ -8604,7 +9036,12 @@ impl Niri {
         }
 
         if let Some(window) = &new_focus.window {
-            if !self.layout.is_overview_open() && current_focus.window.as_ref() != Some(window) {
+            // Like in the overview, hovering grid cells doesn't focus them: that would activate
+            // windows behind the grid without the grid focus following.
+            if !self.layout.is_overview_open()
+                && !self.layout.window_is_in_open_grid_overview(&window.0)
+                && current_focus.window.as_ref() != Some(window)
+            {
                 let (window, hit) = window;
 
                 // Don't trigger focus-follows-mouse over the tab indicator.
@@ -8882,6 +9319,12 @@ pub struct ClientState {
     pub restricted: bool,
     /// We cannot retrieve this client's socket credentials.
     pub credentials_unknown: bool,
+    /// Whether the agent seat global is hidden from this client.
+    #[cfg(feature = "agent")]
+    pub hide_agent_seat: bool,
+    /// Whether this client connected through the agent socket.
+    #[cfg(feature = "agent")]
+    pub agent_client: bool,
 }
 
 impl ClientData for ClientState {
@@ -9073,13 +9516,22 @@ impl<'render>
     }
 }
 
+/// Returns how far one move-magnifier step moves the center across an output `size` pixels long,
+/// for a step that is `step` of the visible area.
+///
+/// The magnifier center is the zoom pivot rather than the middle of the view: moving it by `d`
+/// moves the view by `d * (1 - 1 / zoom)`. Dividing by that keeps a step at the same fraction of
+/// the visible area at any zoom level.
+fn magnifier_move_step(size: i32, zoom: f64, step: f64) -> f64 {
+    let visible = f64::from(size) / zoom;
+    visible * step / (1. - 1. / zoom)
+}
+
 #[cfg(feature = "xdp-gnome-screencast")]
-fn should_render_screen_cast_picker(
-    rendering_output: bool,
-    target: RenderTarget,
-    intent: RenderIntent,
-) -> bool {
-    rendering_output || (target == RenderTarget::Screencast && intent == RenderIntent::Normal)
+fn should_render_screen_cast_picker(rendering_output: bool, intent: RenderIntent) -> bool {
+    // Render the picker into screencasts and screen captures (screencopy, i.e. wf-recorder and
+    // friends), but never into its own window/display previews.
+    rendering_output || intent == RenderIntent::Normal
 }
 
 #[cfg(feature = "xdp-gnome-screencast")]
@@ -9108,26 +9560,35 @@ mod screen_cast_picker_preview_tests {
     }
 
     #[test]
-    fn picker_is_visible_to_outputs_and_real_monitor_casts_only() {
-        assert!(should_render_screen_cast_picker(
-            true,
-            RenderTarget::Output,
-            RenderIntent::Normal
-        ));
+    fn picker_is_visible_to_outputs_and_normal_captures_only() {
+        assert!(should_render_screen_cast_picker(true, RenderIntent::Normal));
         assert!(should_render_screen_cast_picker(
             false,
-            RenderTarget::Screencast,
             RenderIntent::Normal
         ));
         assert!(!should_render_screen_cast_picker(
             false,
-            RenderTarget::Screencast,
             RenderIntent::PickerPreview
         ));
-        assert!(!should_render_screen_cast_picker(
-            false,
-            RenderTarget::ScreenCapture,
-            RenderIntent::Normal
-        ));
+    }
+}
+
+#[cfg(test)]
+mod magnifier_tests {
+    use super::*;
+
+    #[test]
+    fn move_step_is_the_same_share_of_the_view_at_any_zoom() {
+        let size = 2560;
+        let step = 0.05;
+        for zoom in [1.2, 2., 3., 10.] {
+            // Zooming around pivot p shows the area starting at p * (1 - 1 / zoom).
+            let view_x = |pivot: f64| pivot * (1. - 1. / zoom);
+
+            let pivot = 1000.;
+            let moved = view_x(pivot + magnifier_move_step(size, zoom, step)) - view_x(pivot);
+            let visible = f64::from(size) / zoom;
+            assert!((moved - visible * step).abs() < 1e-9, "zoom {zoom}");
+        }
     }
 }

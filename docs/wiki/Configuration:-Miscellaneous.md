@@ -349,14 +349,128 @@ grid-overview {
 }
 ```
 
-#### `focused-column-scale`
+#### `min-scale`
 
-Scale the focused column relative to its cell.
-Ranges from 1 to 2, where higher values make the focused column larger.
+<sup>Since: 26.04 (fork)</sup>
+
+The grid shows every window at one scale, so that window sizes compare like they do on the workspace; it picks the largest scale at which all windows fit.
+This is the smallest scale it goes down to: with more windows than fit at it, they overlap instead.
+Ranges from 0 to 1, and defaults to 0.08.
 
 ```kdl
 grid-overview {
-    focused-column-scale 1.08
+    min-scale 0.15
+}
+```
+
+#### `grid-all-monitors`
+
+<sup>Since: 26.04 (fork)</sup>
+
+When `true` (the default), the Grid Overview opens and closes on all monitors at once, and a monitor connected while it is open joins it.
+Set this to `false` to open it only on the focused monitor; each monitor then has its own grid, and mouse input such as the scroll wheel, middle click and hot corners acts on the monitor under the pointer.
+
+```kdl
+grid-overview {
+    grid-all-monitors false
+}
+```
+
+#### `focus-ring-width`
+
+<sup>Since: 26.04 (fork)</sup>
+
+The focused cell is marked by the focus ring of its window, drawn at a fixed on-screen width rather than scaled down with the cell.
+By default, that is the width of the window's own focus ring; this setting picks another width for the grid, in logical pixels.
+The ring changes between the two widths as the grid opens and closes.
+The ring is always drawn around the window rather than as a background behind it, so it doesn't show through semitransparent windows in the grid.
+
+The colors are the focus ring's, so there is no separate setting for them.
+If the focus ring is off, nothing marks the focused cell.
+
+```kdl
+grid-overview {
+    focus-ring-width 8
+}
+```
+
+#### `focus-ring-transition`
+
+<sup>Since: 26.04 (fork)</sup>
+
+How the focus ring goes from one cell to another when the focus moves.
+
+- `"grow"` (the default): the new cell's ring grows out from its edge, while the old one shrinks back and fades out. Each ring stays on its own cell.
+- `"slide"`: one ring slides and resizes from the old cell to the new one, over the cells in between. Its leading edges set off slightly ahead of the trailing ones, so the ring stretches a little on the way.
+- `"none"`: the ring appears on the new cell right away.
+
+The timing is the [`focus-ring`](./Configuration:-Animations.md#focus-ring) animation; turning it off works like `"none"`.
+
+```kdl
+grid-overview {
+    focus-ring-transition "slide"
+}
+```
+
+#### `focus-follows-mouse`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Moving the mouse moves the grid focus to the cell under the pointer.
+Off by default.
+
+The pointer takes the focus over once it moved more than `min-distance` logical pixels (8 by default) from where it was when the focus was last set some other way: when the grid opened, by keyboard navigation, or when the grid rearranged.
+From then on the focus follows every motion, until the keyboard moves it again.
+Over the gaps between cells, the focus stays where it is.
+
+This is separate from `focus-follows-mouse` in the `input` section, which doesn't act on grid cells.
+
+```kdl
+grid-overview {
+    focus-follows-mouse min-distance=8
+}
+```
+
+#### `minimized-highlight`
+
+<sup>Since: 26.04 (fork)</sup>
+
+Minimized windows are only visible in the Grid Overview, where they otherwise look like any other window.
+This setting controls how their cells are marked so you can tell them apart: a frame around the cell, and a dark layer over the window.
+
+The frame is a filled rectangle drawn behind the cell, extending `padding` logical pixels past it on every side, so the window's own opacity and background effects are untouched.
+Its thickness does not change with the grid scale.
+Its corners follow the window's rounded corners (as set by `geometry-corner-radius`), the way the focus ring's do; `corner-radius` sets a fixed radius instead.
+The knobs mirror the [recent-windows highlight](./Configuration:-Recent-Windows.md), and so do the colors; only `padding` is smaller, since it has to fit inside the `gap` between cells.
+
+Colors may carry an alpha channel, which blends the frame into the backdrop; the default is 70% opaque.
+Alpha here only affects the frame — the window's own opacity and background effects are untouched.
+
+`dim` sets how dark the layer over the window is, from 0 (no layer) to 1 (black); the default is 0.4.
+The layer covers the window rather than making it see-through, so background effects like blur keep working, and since it sits inside the cell, it stays visible under the focus ring, which covers most of the frame of a focused cell.
+Both the frame and the layer fade in and out as a window is minimized or restored in the grid.
+To mark minimized windows with the layer alone, set `padding 0`.
+
+```kdl
+grid-overview {
+    minimized-highlight {
+        color "#999999b3"
+        urgent-color "#ff9999"
+        padding 6
+        dim 0.4
+    }
+}
+```
+
+`color` takes any CSS color, so these all give the same 70% grey: `"#999999b3"`, `"rgba(153, 153, 153, 0.7)"`, or the unquoted 4-argument RGBA form `color 153 153 153 179`.
+
+Use `off` to remove the marker, and `on` to bring it back when an earlier (for example `include`d) config turned it off:
+
+```kdl
+grid-overview {
+    minimized-highlight {
+        off
+    }
 }
 ```
 
@@ -559,7 +673,7 @@ magnifier {
 #### `track-cursor`
 
 When enabled (default), the magnifier follows the cursor position. Set to `false` to lock the magnification center to the cursor position at first activation, keeping the screen fixed regardless of cursor movement.
-When the magnifier is active with `track-cursor false`, hold the middle mouse button and drag to move the locked center.
+When the magnifier is active with `track-cursor false`, hold the middle mouse button and drag to move the locked center, or use the [`move-magnifier-*`](./Configuration:-Key-Bindings.md#move-magnifier-left-move-magnifier-right-move-magnifier-up-move-magnifier-down) actions.
 
 ```kdl
 magnifier {
@@ -579,7 +693,61 @@ magnifier {
 }
 ```
 
-The toggle animation can be customized in the [`animations`](./Configuration:-Animations.md) section under `magnifier`:
+#### `move-step`
+
+<sup>Since: next release</sup>
+
+How far one [`move-magnifier-*`](./Configuration:-Key-Bindings.md#move-magnifier-left-move-magnifier-right-move-magnifier-up-move-magnifier-down) step moves the view, as a fraction of the visible area, from `0.0` to `1.0`.
+The step looks the same at any zoom level.
+Defaults to `0.05`.
+
+Holding a key repeats the step at your keyboard [repeat rate](./Configuration:-Input.md#repeat), so this also sets how fast the view moves while you hold the key.
+
+```kdl
+magnifier {
+    track-cursor false
+    move-step 0.1
+}
+```
+
+#### `binds`
+
+<sup>Since: next release</sup>
+
+Binds that only work while the magnifier is on.
+While it is on, they take precedence over the [regular binds](./Configuration:-Key-Bindings.md), so they can reuse keys that normally do something else.
+While it is off, they do nothing and the keys work as usual.
+
+Only these actions are allowed here:
+
+- `move-magnifier-left`, `move-magnifier-right`, `move-magnifier-up`, `move-magnifier-down`: move the magnified view by [`move-step`](#move-step) of the visible area.
+They only apply with `track-cursor false`; with the magnifier following the cursor, these keys work as usual.
+Holding the key repeats the step.
+- `toggle-magnifier`: turn the magnifier off.
+Unlike other binds, it doesn't repeat by default, so holding the key doesn't turn the magnifier back on.
+
+Binds here support the `repeat` and `allow-inhibiting` properties of the regular binds.
+They must use keyboard keys; mouse buttons, the scroll wheel and touchpad gestures are not supported.
+They don't work while the screenshot UI or the lock screen is open.
+
+```kdl
+magnifier {
+    track-cursor false
+
+    binds {
+        // While magnifying, these move the view instead of the focus.
+        Mod+H { move-magnifier-left; }
+        Mod+J { move-magnifier-down; }
+        Mod+K { move-magnifier-up; }
+        Mod+L { move-magnifier-right; }
+
+        // Keys without modifiers work too, but applications don't get them while magnifying.
+        Escape { toggle-magnifier; }
+    }
+}
+```
+
+The toggle and move animations can be customized in the [`animations`](./Configuration:-Animations.md) section under `magnifier`:
 
 ```kdl
 animations {

@@ -452,7 +452,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
 
         win.request_size_once(size, true);
 
-        if activate || self.tiles.is_empty() {
+        if activate || self.active_window_id.is_none() {
             self.active_window_id = Some(win.id().clone());
         }
 
@@ -528,8 +528,12 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if self.tiles.is_empty() {
             self.active_window_id = None;
         } else if Some(tile.window().id()) == self.active_window_id.as_ref() {
-            // The active tile was removed, make the topmost tile active.
-            self.active_window_id = Some(self.tiles[0].window().id().clone());
+            // The active tile was removed, make the topmost visible tile active.
+            self.active_window_id = self
+                .tiles
+                .iter()
+                .find(|tile| !tile.window().is_minimized())
+                .map(|tile| tile.window().id().clone());
         }
 
         // Stop interactive resize.
@@ -868,22 +872,50 @@ impl<W: LayoutElement> FloatingSpace<W> {
         win.request_size_once(win_size, animate);
     }
 
-    fn focus_directional(
-        &mut self,
-        distance: impl Fn(Point<f64, Logical>, Point<f64, Logical>) -> f64,
-    ) -> bool {
+    /// Focuses the window next to the active one in a direction, `dir` being a unit vector.
+    ///
+    /// Windows that line up with the active one across the direction come first, like a window
+    /// further left at about the same height for focus-left; past those, the nearest one in that
+    /// direction, weighing the distance along it far more than the one across it. A window counts
+    /// as being in a direction when both its edges are further that way than the active window's;
+    /// floating windows often overlap, so the distances go by their centers.
+    fn focus_directional(&mut self, dir: (f64, f64)) -> bool {
         let Some(active_id) = &self.active_window_id else {
             return false;
         };
         let active_idx = self.idx_of(active_id).unwrap();
-        let center = self.data[active_idx].center();
+        let active = &self.data[active_idx];
+        let center = active.center();
+        // The extent of a window along the direction, increasing in it, and across it.
+        let extents = |data: &Data| {
+            let (x0, x1) = (data.logical_pos.x, data.logical_pos.x + data.size.w);
+            let (y0, y1) = (data.logical_pos.y, data.logical_pos.y + data.size.h);
+            if dir.0 != 0. {
+                let along = if dir.0 > 0. { (x0, x1) } else { (-x1, -x0) };
+                (along, (y0, y1))
+            } else {
+                let along = if dir.1 > 0. { (y0, y1) } else { (-y1, -y0) };
+                (along, (x0, x1))
+            }
+        };
+        let ((start, end), (lo, hi)) = extents(active);
 
         let result = zip(&self.tiles, &self.data)
-            .filter(|(tile, _)| tile.window().id() != active_id)
-            .map(|(tile, data)| (tile, distance(center, data.center())))
-            .filter(|(_, dist)| *dist > 0.)
-            .min_by(|(_, dist_a), (_, dist_b)| f64::total_cmp(dist_a, dist_b));
-        if let Some((tile, _)) = result {
+            .filter(|(tile, _)| tile.window().id() != active_id && !tile.window().is_minimized())
+            .filter_map(|(tile, data)| {
+                let ((other_start, other_end), _) = extents(data);
+                if other_start <= start || other_end <= end {
+                    return None;
+                }
+                let offset = data.center() - center;
+                let along = offset.x * dir.0 + offset.y * dir.1;
+                let off_axis = (offset.x * dir.1 - offset.y * dir.0).abs();
+                let (_, (other_lo, other_hi)) = extents(data);
+                let lines_up = other_lo < hi && lo < other_hi;
+                Some((tile, !lines_up, 13. * along * along + off_axis * off_axis))
+            })
+            .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        if let Some((tile, _, _)) = result {
             let id = tile.window().id().clone();
             self.activate_window(&id);
             true
@@ -893,24 +925,25 @@ impl<W: LayoutElement> FloatingSpace<W> {
     }
 
     pub fn focus_left(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.x - other.x)
+        self.focus_directional((-1., 0.))
     }
 
     pub fn focus_right(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.x - focus.x)
+        self.focus_directional((1., 0.))
     }
 
     pub fn focus_up(&mut self) -> bool {
-        self.focus_directional(|focus, other| focus.y - other.y)
+        self.focus_directional((0., -1.))
     }
 
     pub fn focus_down(&mut self) -> bool {
-        self.focus_directional(|focus, other| other.y - focus.y)
+        self.focus_directional((0., 1.))
     }
 
     pub fn focus_leftmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.window().is_minimized())
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -921,6 +954,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_rightmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.window().is_minimized())
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.x, &pos_b.x));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -931,6 +965,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_topmost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.window().is_minimized())
             .min_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -941,6 +976,7 @@ impl<W: LayoutElement> FloatingSpace<W> {
     pub fn focus_bottommost(&mut self) {
         let result = self
             .tiles_with_offsets()
+            .filter(|(tile, _)| !tile.window().is_minimized())
             .max_by(|(_, pos_a), (_, pos_b)| f64::total_cmp(&pos_a.y, &pos_b.y));
         if let Some((tile, _)) = result {
             let id = tile.window().id().clone();
@@ -1092,38 +1128,83 @@ impl<W: LayoutElement> FloatingSpace<W> {
         &self,
         mut ctx: RenderCtx<R>,
         xray_pos: XrayPos,
-        view_rect: Rectangle<f64, Logical>,
         focus_ring: bool,
         layer: RenderLayer,
         push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
     ) {
-        let scale = Scale::from(self.scale);
-
-        // Draw the closing windows on top of the other windows.
-        //
-        // FIXME: I guess this should rather preserve the stacking order when the window is closed.
-        if layer.is_normal() {
-            for closing in self.closing_windows.iter().rev() {
-                let elem = closing.render(ctx.as_gles(), view_rect, scale);
-                push(elem.into());
-            }
-        }
-
-        let active = self.active_window_id.clone();
         for (tile, tile_pos) in self.tiles_with_render_positions() {
-            // Skip tiles belonging to a different render layer.
-            if layer.is_normal() == tile.is_moving_between_workspaces() {
+            // Skip tiles belonging to a different render layer, and minimized tiles.
+            if layer.is_normal() == tile.is_moving_between_workspaces()
+                || tile.window().is_minimized()
+            {
                 continue;
             }
 
             // For the active tile, draw the focus ring.
-            let focus_ring = focus_ring && Some(tile.window().id()) == active.as_ref();
+            // The active tile shows its focus ring, and a tile that lost the focus shows it while
+            // it shrinks back.
+            let focus_ring = focus_ring && tile.focus_ring_visible();
 
             let xray_pos = xray_pos.offset(tile_pos);
             tile.render(ctx.r(), tile_pos, xray_pos, focus_ring, &mut |elem| {
                 push(elem.into())
             });
         }
+    }
+
+    /// Renders the closing windows, which go on top of the other windows.
+    ///
+    /// FIXME: I guess this should rather preserve the stacking order when the window is closed.
+    pub fn render_closing_windows<R: NiriRenderer>(
+        &self,
+        mut ctx: RenderCtx<R>,
+        view_rect: Rectangle<f64, Logical>,
+        push: &mut dyn FnMut(FloatingSpaceRenderElement<R>),
+    ) {
+        let scale = Scale::from(self.scale);
+        for closing in self.closing_windows.iter().rev() {
+            let elem = closing.render(ctx.as_gles(), view_rect, scale);
+            push(elem.into());
+        }
+    }
+
+    /// Minimizes or restores a floating window in place.
+    ///
+    /// The tile keeps its position and stacking slot; the window itself is never resized.
+    pub fn set_window_minimized(&mut self, window: &W::Id, minimize: bool) -> bool {
+        let Some(idx) = self
+            .tiles
+            .iter()
+            .position(|tile| tile.window().id() == window)
+        else {
+            return false;
+        };
+        if self.tiles[idx].window().is_minimized() == minimize {
+            return false;
+        }
+
+        let tile = &mut self.tiles[idx];
+        tile.window_mut().set_minimized(minimize);
+        if minimize {
+            tile.minimized_at = Some(super::tile::next_minimize_seq());
+
+            // Keep the active window on a visible window (topmost first).
+            if self.active_window_id.as_ref() == Some(window) {
+                self.active_window_id = self
+                    .tiles
+                    .iter()
+                    .find(|tile| !tile.window().is_minimized())
+                    .map(|tile| tile.window().id().clone());
+            }
+        } else {
+            tile.minimized_at = None;
+
+            if self.active_window_id.is_none() {
+                self.active_window_id = Some(window.clone());
+            }
+        }
+
+        true
     }
 
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
@@ -1416,8 +1497,16 @@ impl<W: LayoutElement> FloatingSpace<W> {
         if let Some(id) = &self.active_window_id {
             assert!(!self.tiles.is_empty());
             assert!(self.contains(id), "active window must be present in tiles");
+            let active = self.tiles.iter().find(|t| t.window().id() == id).unwrap();
+            assert!(
+                !active.window().is_minimized(),
+                "the active floating window must not be minimized"
+            );
         } else {
-            assert!(self.tiles.is_empty());
+            assert!(
+                self.tiles.iter().all(|t| t.window().is_minimized()),
+                "with no active window, all floating tiles must be minimized"
+            );
         }
 
         if let Some(resize) = &self.interactive_resize {

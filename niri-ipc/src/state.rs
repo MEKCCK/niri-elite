@@ -241,6 +241,14 @@ impl EventStreamStatePart for WindowsState {
                     }
                 }
             }
+            Event::WindowMinimizedChanged { id, is_minimized } => {
+                for win in self.windows.values_mut() {
+                    if win.id == id {
+                        win.is_minimized = is_minimized;
+                        break;
+                    }
+                }
+            }
             Event::WindowLayoutsChanged { changes } => {
                 for (id, update) in changes {
                     let win = self.windows.get_mut(&id);

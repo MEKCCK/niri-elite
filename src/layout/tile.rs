@@ -35,17 +35,42 @@ use crate::utils::{
     baba_is_float_offset, round_logical_in_physical, round_logical_in_physical_max1,
 };
 
+static MINIMIZE_SEQ_COUNTER: crate::utils::id::IdCounter = crate::utils::id::IdCounter::new();
+
+/// Returns the next most-recently-minimized ordering value.
+pub(super) fn next_minimize_seq() -> u64 {
+    MINIMIZE_SEQ_COUNTER.next()
+}
+
 /// Toplevel window with decorations.
 #[derive(Debug)]
 pub struct Tile<W: LayoutElement> {
     /// The toplevel window itself.
     window: W,
 
+    /// Monotonic sequence number assigned when this tile's window was minimized, if it is.
+    ///
+    /// The minimized state itself lives on the window ([`LayoutElement::is_minimized`]); this
+    /// sequence provides most-recently-minimized ordering for restore.
+    pub(super) minimized_at: Option<u64>,
+
     /// The border around the window.
     border: FocusRing,
 
     /// The focus ring around the window.
     focus_ring: FocusRing,
+
+    /// Whether the focus ring shows, as last set with [`Tile::set_focus_ring_shown`].
+    ///
+    /// `None` until first set, so that a window that just showed up doesn't grow its ring in.
+    focus_ring_shown: Option<bool>,
+
+    /// The focus ring growing in or shrinking back after `focus_ring_shown` changed.
+    focus_ring_anim: Option<Animation>,
+
+    /// Whether the focus ring had its active colors when it last showed, which it keeps while
+    /// shrinking back.
+    focus_ring_was_active: bool,
 
     /// The shadow around the window.
     shadow: Shadow,
@@ -61,6 +86,10 @@ pub struct Tile<W: LayoutElement> {
 
     /// Whether the tile should float upon unfullscreening.
     pub(super) restore_to_floating: bool,
+
+    /// Whether this tiled window was focused since a floating window last was, which keeps it
+    /// above the floating windows with `focused-window-above-floating`.
+    pub(super) above_floating: bool,
 
     /// The size that the window should assume when going floating.
     ///
@@ -195,12 +224,17 @@ impl<W: LayoutElement> Tile<W> {
 
         Self {
             window,
+            minimized_at: None,
             border: FocusRing::new(border_config.into()),
             focus_ring: FocusRing::new(focus_ring_config),
+            focus_ring_shown: None,
+            focus_ring_anim: None,
+            focus_ring_was_active: false,
             shadow: Shadow::new(shadow_config),
             sizing_mode,
             fullscreen_backdrop: SolidColorBuffer::new((0., 0.), fullscreen_backdrop_color),
             restore_to_floating: false,
+            above_floating: false,
             floating_window_size: None,
             floating_pos: None,
             floating_preset_width_idx: None,
@@ -447,10 +481,67 @@ impl<W: LayoutElement> Tile<W> {
                 self.alpha_animation = None;
             }
         }
+
+        if self
+            .focus_ring_anim
+            .as_ref()
+            .is_some_and(|anim| anim.is_done())
+        {
+            self.focus_ring_anim = None;
+        }
     }
 
     pub fn are_animations_ongoing(&self) -> bool {
-        self.are_transitions_ongoing() || self.window.rules().baba_is_float == Some(true)
+        self.are_transitions_ongoing()
+            || self.focus_ring_anim.is_some()
+            || self.window.rules().baba_is_float == Some(true)
+    }
+
+    /// Shows or hides the focus ring, growing it in or shrinking it back if `animate`.
+    pub fn set_focus_ring_shown(&mut self, shown: bool, animate: bool) {
+        let from = self.focus_ring_progress();
+        let prev = self.focus_ring_shown.replace(shown);
+
+        if !animate {
+            self.focus_ring_anim = None;
+            return;
+        }
+        if prev.is_none_or(|prev| prev == shown) {
+            return;
+        }
+
+        // Start from wherever an ongoing animation has got to.
+        let to = if shown { 1. } else { 0. };
+        let config = self.options.animations.focus_ring.0;
+        self.focus_ring_anim = Some(Animation::new(self.clock.clone(), from, to, 0., config));
+    }
+
+    /// How far the focus ring is grown in: 1 when shown, 0 when hidden.
+    ///
+    /// A spring can take it past 1.
+    fn focus_ring_progress(&self) -> f64 {
+        match &self.focus_ring_anim {
+            Some(anim) => anim.value(),
+            None => {
+                if self.focus_ring_shown == Some(true) {
+                    1.
+                } else {
+                    0.
+                }
+            }
+        }
+    }
+
+    /// Whether the focus ring is on screen: shown, or still shrinking back.
+    pub fn focus_ring_visible(&self) -> bool {
+        self.focus_ring_shown == Some(true) || self.focus_ring_anim.is_some()
+    }
+
+    /// The scale and the opacity of the window opening animation, if one is ongoing.
+    pub fn open_animation_scale_and_alpha(&self) -> Option<(f64, f64)> {
+        self.open_animation
+            .as_ref()
+            .map(|open| open.scale_and_alpha())
     }
 
     pub fn has_open_animation(&self) -> bool {
@@ -546,16 +637,35 @@ impl<W: LayoutElement> Tile<W> {
         } else {
             false
         };
+
+        // Grow the ring in from the window's edge and shrink it back, fading with it.
+        let ring_progress = self.focus_ring_progress();
+        if ring_progress == 1. {
+            self.focus_ring.clear_width_override();
+        } else {
+            let width = self.focus_ring.config().width * ring_progress.max(0.);
+            self.focus_ring.set_width_override(width);
+        }
+        if self.focus_ring_shown == Some(true) {
+            self.focus_ring_was_active = is_active;
+        }
+        let ring_is_active = if self.focus_ring_shown == Some(true) {
+            is_active
+        } else {
+            self.focus_ring_was_active
+        };
+        let ring_alpha = (1. - expanded_progress) * ring_progress.clamp(0., 1.);
+
         let radius = radius.expanded_by(self.focus_ring.width() as f32);
         self.focus_ring.update_render_elements(
             animated_tile_size,
-            is_active,
+            ring_is_active,
             !draw_focus_ring_with_background,
             self.window.is_urgent(),
             view_rect,
             radius,
             self.scale,
-            1. - expanded_progress as f32,
+            ring_alpha as f32,
         );
 
         self.fullscreen_backdrop.resize(animated_tile_size);
@@ -736,7 +846,7 @@ impl<W: LayoutElement> Tile<W> {
         }
     }
 
-    fn expanded_progress(&self) -> f64 {
+    pub fn expanded_progress(&self) -> f64 {
         if let Some(resize) = &self.resize_animation {
             if let Some(anim) = &resize.expanded_progress {
                 return anim.clamped_value().clamp(0., 1.);
@@ -878,6 +988,14 @@ impl<W: LayoutElement> Tile<W> {
         }
 
         size
+    }
+
+    /// Corner radius of the tile's outline, which its focus ring goes around.
+    pub fn outline_corner_radius(&self) -> CornerRadius {
+        let border_width = self.visual_border_width().unwrap_or(0.);
+        self.window
+            .geometry_corner_radius()
+            .expanded_by(border_width as f32)
     }
 
     pub fn animated_tile_size(&self) -> Size<f64, Logical> {
@@ -1271,6 +1389,8 @@ impl<W: LayoutElement> Tile<W> {
                     error!("background effect clipping is unimplemented");
                     elem.into()
                 }
+                // Drawn above the window, not clipped to it.
+                elem @ LayoutElementRenderElement::AgentCursor(_) => elem.into(),
             };
 
             if clip_to_geometry && clip_shader.is_some() {

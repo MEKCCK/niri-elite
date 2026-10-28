@@ -53,7 +53,7 @@ use self::spatial_movement_grab::SpatialMovementGrab;
 use crate::dbus::freedesktop_a11y::KbMonBlock;
 use crate::layout::scrolling::ScrollDirection;
 use crate::layout::{ActivateWindow, LayoutElement as _};
-use crate::niri::{CastTarget, KeyboardFocus, Niri, PointerVisibility, State};
+use crate::niri::{CastTarget, KeyboardFocus, Niri, PointContents, PointerVisibility, State};
 use crate::ui::mru::{WindowMru, WindowMruUi};
 use crate::ui::screenshot_ui::ScreenshotUi;
 use crate::utils::spawning::{spawn, spawn_sh};
@@ -186,10 +186,6 @@ impl State {
 
         let hide_exit_confirm_dialog =
             self.niri.exit_confirm_dialog.is_open() && should_hide_exit_confirm_dialog(&event);
-
-        if should_cancel_pending_modifier_bind(&event) {
-            self.niri.pending_default_mod_tap = None;
-        }
 
         let mut consumed_by_a11y = false;
         use InputEvent::*;
@@ -644,52 +640,6 @@ impl State {
                     return ShouldInterceptResult::InterceptOnly;
                 }
 
-                // Tapping the mod key without pressing another key runs the default mod action
-                // (grid overview), unless the user bound the bare mod key themselves. Binds with a
-                // bare modifier trigger are handled by the regular bind lookup above.
-                if let Some(raw) = raw_sym {
-                    let is_mod_key_tap = pressed && modifier_from_keysym(raw) == Some(mod_key.to_modifiers());
-                    if is_mod_key_tap {
-                        let track_mod_tap = {
-                            let config = this.niri.config.borrow();
-
-                            // Binds that key off the bare mod key (however it is spelled) or off
-                            // a modifier combination like `Mod+Shift` take precedence over the
-                            // built-in tap action.
-                            let has_mod_key_bind = config.binds.0.iter().any(|bind| {
-                                let trigger_is_mod_key = match bind.key.trigger {
-                                    Trigger::CompositorMod => true,
-                                    Trigger::Modifier(modifier) => modifier == mod_key,
-                                    Trigger::Keysym(keysym) => mod_key.matches_keysym(keysym),
-                                    _ => false,
-                                };
-
-                                let is_modifier_combo = matches!(
-                                    bind.key.trigger,
-                                    Trigger::CompositorMod | Trigger::Modifier(_)
-                                ) && (bind.key.modifiers.contains(Modifiers::COMPOSITOR)
-                                    || bind.key.modifiers.contains(mod_key.to_modifiers()));
-
-                                trigger_is_mod_key || is_modifier_combo
-                            });
-                            !has_mod_key_bind
-                                && config.grid_overview.default_mod_action
-                                && !this.niri.screenshot_ui.is_open()
-                                && !is_inhibiting_shortcuts
-                        };
-                        if track_mod_tap {
-                            this.niri.pending_default_mod_tap = Some(key_code);
-                        }
-                    } else if let Some(res) = finish_pending_default_mod_tap(
-                        &mut this.niri.pending_default_mod_tap,
-                        key_code,
-                        pressed,
-                    ) {
-                        this.do_action(Action::ToggleGridOverview, false);
-                        return res;
-                    }
-                }
-
                 if this.niri.exit_confirm_dialog.is_open() && pressed {
                     if modified == Some(Keysym::Return) {
                         info!("quitting after confirming exit dialog");
@@ -729,10 +679,14 @@ impl State {
                         if changed {
                             this.niri.queue_redraw_all();
                         }
-                    } else {
-                        this.niri.suppressed_keys.remove(&key_code);
+                        return ShouldInterceptResult::InterceptOnly;
                     }
-                    return ShouldInterceptResult::InterceptOnly;
+
+                    // The picker takes the key releases too, but a pending release action recorded
+                    // for the key must still run.
+                    this.niri.suppressed_keys.remove(&key_code);
+                    let bind = this.niri.pending_release_binds.remove(&key_code);
+                    return bind_intercept_result(bind, false);
                 }
 
                 // Check if all modifiers were released while the MRU UI was open. If so, close the
@@ -749,7 +703,14 @@ impl State {
                     );
                 }
 
-                let is_grid_overview_open = this.niri.layout.is_grid_overview_open();
+                // The grid takes the keys of the layout focus, except when that is a window outside
+                // the grid (an ignore-grid-overview window the user clicked): it gets its keys.
+                let is_grid_overview_open = this.niri.layout.is_grid_overview_open()
+                    && this.niri.layout.focus().is_none_or(|mapped| {
+                        this.niri
+                            .layout
+                            .window_is_in_open_grid_overview(&mapped.window)
+                    });
 
                 if pressed && raw_sym == Some(Keysym::Escape) {
                     // Close grid overview on Escape.
@@ -775,7 +736,10 @@ impl State {
                     }
                 }
 
-                if pressed && raw_sym == Some(Keysym::Return) {
+                // Return is the hardcoded grid-activation key only when pressed without
+                // modifiers. With modifiers held (e.g. Mod+Return bound to a user action), the
+                // configured binding below must take precedence.
+                if pressed && modifiers.is_empty() && raw_sym == Some(Keysym::Return) {
                     if grid_should_confirm_on_return(
                         is_grid_overview_open,
                         &this.niri.keyboard_focus,
@@ -799,11 +763,13 @@ impl State {
                 let is_locked = this.niri.is_locked();
                 let is_in_screenshot = this.niri.screenshot_ui.is_open();
                 let res = {
+                    let magnifier = MagnifierBindsFilter::new(&this.niri);
                     let config = this.niri.config.borrow();
                     let bindings = make_binds_iter(
                         &config,
                         &this.niri.screenshot_ui,
                         &mut this.niri.window_mru_ui,
+                        magnifier,
                         modifiers,
                     );
 
@@ -824,6 +790,24 @@ impl State {
                         is_in_screenshot,
                     )
                 };
+
+                // Tapping the mod key alone toggles the grid overview when no bind takes it, like
+                // an implicit `Mod { release { toggle-grid-overview; } }` bind. Any other key
+                // press cancels it through the regular interrupted-release-binds handling.
+                if pressed
+                    && matches!(res, ShouldInterceptResult::Forward)
+                    && !this.niri.pending_release_binds.contains_key(&key_code)
+                    && !is_inhibiting_shortcuts
+                    && !this.niri.window_mru_ui.is_open()
+                    && !this.niri.screenshot_ui.is_open()
+                    && this.niri.config.borrow().grid_overview.default_mod_action
+                    && raw_sym.is_some_and(|raw| mod_key.matches_keysym(raw))
+                    && modifiers == mod_key.to_modifiers()
+                {
+                    this.niri
+                        .pending_release_binds
+                        .insert(key_code, default_mod_tap_bind());
+                }
 
                 if matches!(res, ShouldInterceptResult::Forward) {
                     // If we didn't find any bind, try other hardcoded keys.
@@ -1212,9 +1196,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_fullscreen(&window);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                     self.niri.queue_redraw_all();
                 }
             }
@@ -1233,10 +1214,65 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_windowed_fullscreen(&window);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                     self.niri.queue_redraw_all();
+                }
+            }
+            Action::MinimizeWindow => {
+                let focus = self.niri.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    // The grid overview is where minimized windows live, so there the key doubles
+                    // as a toggle: pressing it on an already-minimized cell puts the window back
+                    // into the layout, in place, with the grid staying open on it.
+                    if self.niri.layout.is_grid_overview_open()
+                        && self.niri.layout.is_window_minimized(&window)
+                    {
+                        self.unminimize_window(&window, false);
+                    } else {
+                        self.minimize_window(&window);
+                    }
+                }
+            }
+            Action::MinimizeWindowById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.minimize_window(&window);
+                }
+            }
+            Action::UnminimizeWindow => {
+                let window = self.niri.layout.last_minimized_window();
+                if let Some(window) = window {
+                    self.unminimize_window(&window, true);
+                }
+            }
+            Action::UnminimizeWindowById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    self.unminimize_window(&window, true);
+                }
+            }
+            Action::ToggleWindowMinimized => {
+                let focus = self.niri.layout.focus().map(|m| m.window.clone());
+                if let Some(window) = focus {
+                    if self.niri.layout.is_window_minimized(&window) {
+                        // Restoring from inside the grid overview keeps it open on the window.
+                        let activate = !self.niri.layout.is_grid_overview_open();
+                        self.unminimize_window(&window, activate);
+                    } else {
+                        self.minimize_window(&window);
+                    }
+                }
+            }
+            Action::ToggleWindowMinimizedById(id) => {
+                let window = self.niri.layout.windows().find(|(_, m)| m.id().get() == id);
+                let window = window.map(|(_, m)| m.window.clone());
+                if let Some(window) = window {
+                    if self.niri.layout.is_window_minimized(&window) {
+                        self.unminimize_window(&window, true);
+                    } else {
+                        self.minimize_window(&window);
+                    }
                 }
             }
             Action::FocusWindow(id) => {
@@ -1996,9 +2032,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), true);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SwitchPresetWindowWidthBackById(id) => {
@@ -2006,9 +2039,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.toggle_window_width(Some(&window), false);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SwitchPresetWindowHeight => {
@@ -2412,9 +2442,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_width(Some(&window), change);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::SetWindowHeight(change) => {
@@ -2433,9 +2460,6 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.set_window_height(Some(&window), change);
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::ResetWindowHeight => {
@@ -2449,16 +2473,15 @@ impl State {
                 let window = window.map(|(_, m)| m.window.clone());
                 if let Some(window) = window {
                     self.niri.layout.reset_window_height(Some(&window));
-                    if self.niri.layout.is_grid_overview_open() {
-                        self.niri.layout.confirm_grid_selection();
-                    }
                 }
             }
             Action::ExpandColumnToAvailableWidth => {
-                self.niri.layout.expand_column_to_available_width();
+                // This acts on the active column, so in the grid, activate the selected window
+                // first.
                 if self.niri.layout.is_grid_overview_open() {
                     self.niri.layout.confirm_grid_selection();
                 }
+                self.niri.layout.expand_column_to_available_width();
             }
             Action::ShowHotkeyOverlay => {
                 if self.niri.hotkey_overlay.show() {
@@ -2691,6 +2714,18 @@ impl State {
             }
             Action::AdjustMagnifierZoom(delta) => {
                 self.niri.adjust_magnifier_zoom(delta);
+            }
+            Action::MoveMagnifierLeft => {
+                self.niri.move_magnifier_center(-1., 0.);
+            }
+            Action::MoveMagnifierRight => {
+                self.niri.move_magnifier_center(1., 0.);
+            }
+            Action::MoveMagnifierUp => {
+                self.niri.move_magnifier_center(0., -1.);
+            }
+            Action::MoveMagnifierDown => {
+                self.niri.move_magnifier_center(0., 1.);
             }
             Action::ToggleOverview => {
                 self.niri.layout.toggle_overview();
@@ -2959,6 +2994,16 @@ impl State {
             }
         }
 
+        if let Some(output) = self.niri.fullscreen_output_confining_pointer(pos) {
+            let geom = self.niri.global_space.output_geometry(&output).unwrap();
+            new_pos.x = new_pos
+                .x
+                .clamp(geom.loc.x as f64, (geom.loc.x + geom.size.w - 1) as f64);
+            new_pos.y = new_pos
+                .y
+                .clamp(geom.loc.y as f64, (geom.loc.y + geom.size.h - 1) as f64);
+        }
+
         if self
             .niri
             .global_space
@@ -3054,6 +3099,7 @@ impl State {
         }
 
         self.niri.handle_focus_follows_mouse(&under);
+        self.niri.handle_grid_focus_follows_mouse(new_pos, &under);
 
         self.niri.pointer_contents.clone_from(&under);
 
@@ -3090,7 +3136,7 @@ impl State {
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.trigger_hot_corner(action);
+                self.niri.trigger_hot_corner(action, under.output.as_ref());
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -3174,6 +3220,7 @@ impl State {
         let under = self.niri.contents_under(pos);
 
         self.niri.handle_focus_follows_mouse(&under);
+        self.niri.handle_grid_focus_follows_mouse(pos, &under);
 
         self.niri.pointer_contents.clone_from(&under);
 
@@ -3200,7 +3247,7 @@ impl State {
                     .with_grab(|_, grab| grab_allows_hot_corner(grab))
                     .unwrap_or(true)
             {
-                self.niri.trigger_hot_corner(action);
+                self.niri.trigger_hot_corner(action, under.output.as_ref());
             }
             self.niri.pointer_inside_hot_corner = true;
         }
@@ -3241,11 +3288,13 @@ impl State {
     ) -> Option<Bind> {
         let modifiers = modifiers_from_state(mods);
 
+        let magnifier = MagnifierBindsFilter::new(&self.niri);
         let config = self.niri.config.borrow();
         let bindings = make_binds_iter(
             &config,
             &self.niri.screenshot_ui,
             &mut self.niri.window_mru_ui,
+            magnifier,
             modifiers,
         );
 
@@ -3367,13 +3416,19 @@ impl State {
             self.niri.tablet_cursor_location = None;
 
             let is_overview_open = self.niri.layout.is_overview_open();
-            let is_grid_overview_open = self.niri.layout.is_grid_overview_open();
+            // Grid cells close on a middle click; windows outside the grid don't, be it on a
+            // monitor without the grid, or an ignore-grid-overview window over it.
+            let window_under_is_in_grid = self.niri.window_under_cursor().is_some_and(|mapped| {
+                self.niri
+                    .layout
+                    .window_is_in_open_grid_overview(&mapped.window)
+            });
 
             let magnifier_can_drag = self.niri.can_drag_magnifier_center();
 
             if should_close_window_on_middle_click(
                 button,
-                is_grid_overview_open,
+                window_under_is_in_grid,
                 is_overview_open,
                 pointer.is_grabbed(),
                 mod_down,
@@ -3556,7 +3611,12 @@ impl State {
                     }
                 }
                 // Check if we need to start an interactive resize.
-                else if button == Some(MouseButton::Right) && !pointer.is_grabbed() && mod_down {
+                // Grid cells are scaled previews: their edges aren't the window's edges.
+                else if button == Some(MouseButton::Right)
+                    && !pointer.is_grabbed()
+                    && mod_down
+                    && !self.niri.layout.window_is_in_open_grid_overview(&window)
+                {
                     let location = pointer.current_location();
                     let (output, pos_within_output) = self.niri.output_under(location).unwrap();
                     let edges = self
@@ -3630,12 +3690,16 @@ impl State {
 
                 // FIXME: granular.
                 self.niri.queue_redraw_all();
-            } else if !is_overview_open
-                && self.niri.layout.is_grid_overview_open()
-                && button == Some(MouseButton::Left)
-                && !pointer.is_grabbed()
-                && !self.niri.screenshot_ui.is_open()
-            {
+            } else if grid_should_handle_empty_click(
+                self.niri.layout.is_grid_overview_open(),
+                is_overview_open,
+                button,
+                pointer.is_grabbed(),
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open()
+                    || self.niri.window_mru_ui.is_open(),
+            ) {
                 let output_under_cursor = self.niri.output_under_cursor();
                 let active_output = self.niri.layout.active_output().cloned();
                 if let Some(output) =
@@ -3733,10 +3797,10 @@ impl State {
 
         let horizontal_amount_v120 = event.amount_v120(Axis::Horizontal);
         let vertical_amount_v120 = event.amount_v120(Axis::Vertical);
-        let vertical_amount = event.amount(Axis::Vertical);
 
         #[cfg(feature = "xdp-gnome-screencast")]
         if self.niri.screen_cast_picker.is_open() {
+            let vertical_amount = event.amount(Axis::Vertical);
             let delta = if source == AxisSource::Wheel {
                 vertical_amount_v120
                     .map(|amount| amount / 120.)
@@ -3765,12 +3829,9 @@ impl State {
         //
         // Recompute rather than using self.niri.pointer_contents in order to take into account
         // making the pointer visible and unsetting the tablet cursor location.
+        let contents = self.niri.contents_under(pointer.current_location());
+        let should_handle_in_overview = contents.overview;
         let is_overview_open = self.niri.layout.is_overview_open();
-        let should_handle_in_overview = self
-            .niri
-            .contents_under(pointer.current_location())
-            .overview;
-
         let is_mru_open = self.niri.window_mru_ui.is_open();
 
         // Handle wheel scroll bindings.
@@ -3779,17 +3840,30 @@ impl State {
             // Wayland. If there's no bind, reset the accumulator.
             let mods = self.niri.seat.get_keyboard().unwrap().modifier_state();
             let modifiers = modifiers_from_state(mods);
-            let use_builtin_bindings = should_handle_in_overview || is_mru_open;
-            let has_wheel_binds = self.niri.mods_with_horizontal_wheel_binds.contains(&modifiers)
-                || self.niri.mods_with_vertical_wheel_binds.contains(&modifiers);
+            let has_vertical_wheel_binds = self
+                .niri
+                .mods_with_vertical_wheel_binds
+                .contains(&modifiers);
             let should_handle_grid_workspace_scroll = grid_should_handle_workspace_wheel(
-                self.niri.layout.is_grid_overview_open(),
+                contents
+                    .output
+                    .as_ref()
+                    .is_some_and(|output| self.niri.layout.is_grid_overview_open_on(output)),
                 is_overview_open,
                 is_mru_open,
-                self.niri.screenshot_ui.is_open(),
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open(),
+                contents.layer.is_some()
+                    || contents.window.as_ref().is_some_and(|(window, _)| {
+                        !self.niri.layout.window_is_in_open_grid_overview(window)
+                    }),
                 modifiers,
-                has_wheel_binds,
+                has_vertical_wheel_binds,
             );
+            let use_builtin_bindings =
+                should_handle_in_overview || is_mru_open || should_handle_grid_workspace_scroll;
+
             if use_builtin_bindings
                 || self.niri.mods_with_horizontal_wheel_binds.contains(&modifiers)
                 || should_handle_grid_workspace_scroll
@@ -3848,12 +3922,7 @@ impl State {
                 self.niri.horizontal_wheel_tracker.reset();
             }
 
-            if use_builtin_bindings
-                || self
-                    .niri
-                    .mods_with_vertical_wheel_binds
-                    .contains(&modifiers)
-            {
+            if use_builtin_bindings || has_vertical_wheel_binds {
                 let vertical = vertical_amount_v120.unwrap_or(0.);
                 let ticks = self.niri.vertical_wheel_tracker.accumulate(vertical);
                 if ticks != 0 {
@@ -4073,7 +4142,10 @@ impl State {
                     .niri
                     .mods_with_horizontal_wheel_binds
                     .contains(&modifiers)
-                || self.niri.mods_with_vertical_wheel_binds.contains(&modifiers)
+                || self
+                    .niri
+                    .mods_with_vertical_wheel_binds
+                    .contains(&modifiers)
             {
                 let ticks = self
                     .niri
@@ -4084,6 +4156,13 @@ impl State {
                         self.find_pointer_bind(mod_key, Trigger::TouchpadScrollLeft, mods),
                         self.find_pointer_bind(mod_key, Trigger::TouchpadScrollRight, mods),
                     );
+                    // Touchpad scrolling falls back to the wheel binds.
+                    let bind_left = bind_left.or_else(|| {
+                        self.find_pointer_bind(mod_key, Trigger::WheelScrollLeft, mods)
+                    });
+                    let bind_right = bind_right.or_else(|| {
+                        self.find_pointer_bind(mod_key, Trigger::WheelScrollRight, mods)
+                    });
 
                     if let Some(right) = bind_right {
                         for _ in 0..ticks {
@@ -4106,6 +4185,12 @@ impl State {
                         self.find_pointer_bind(mod_key, Trigger::TouchpadScrollUp, mods),
                         self.find_pointer_bind(mod_key, Trigger::TouchpadScrollDown, mods),
                     );
+                    // Touchpad scrolling falls back to the wheel binds.
+                    let bind_up = bind_up
+                        .or_else(|| self.find_pointer_bind(mod_key, Trigger::WheelScrollUp, mods));
+                    let bind_down = bind_down.or_else(|| {
+                        self.find_pointer_bind(mod_key, Trigger::WheelScrollDown, mods)
+                    });
 
                     if let Some(down) = bind_down {
                         for _ in 0..ticks {
@@ -4365,6 +4450,18 @@ impl State {
                                 window,
                             );
                             tool.set_grab(self, grab, time, serial, Focus::Clear);
+                        } else if let Some((window, _)) =
+                            under.window.as_ref().filter(|(window, _)| {
+                                !mod_down
+                                    && self.niri.layout.window_is_in_open_grid_overview(window)
+                            })
+                        {
+                            // A tap on a grid cell picks it, like a click.
+                            self.niri.layout.confirm_grid_selection_for_window(window);
+                            self.niri.queue_redraw_all();
+                        } else if self.grid_tap_closes_grid(&under) {
+                            self.niri.layout.close_grid_overview();
+                            self.niri.queue_redraw_all();
                         } else if let Some((window, _)) = under.window {
                             self.niri.layout.activate_window(&window);
 
@@ -4591,7 +4688,15 @@ impl State {
                 // We handled this event.
                 return;
             } else if event.fingers() == 4 {
-                self.niri.layout.overview_gesture_begin();
+                // Four fingers open and close the grid overview, following the fingers. Like
+                // the hot corner, it opens on the monitor under the cursor unless it opens on
+                // all of them.
+                if !self.niri.config.borrow().grid_overview.grid_all_monitors {
+                    if let Some(output) = self.niri.output_under_cursor() {
+                        self.niri.layout.focus_output(&output);
+                    }
+                }
+                self.niri.layout.grid_gesture_begin();
                 self.niri.queue_redraw_all();
 
                 // We handled this event.
@@ -4709,7 +4814,7 @@ impl State {
         let res = self
             .niri
             .layout
-            .overview_gesture_update(-uninverted_delta_y, timestamp);
+            .grid_gesture_update(-uninverted_delta_y, timestamp);
         if let Some(redraw) = res {
             if redraw {
                 self.niri.queue_redraw_all();
@@ -4753,7 +4858,7 @@ impl State {
             handled = true;
         }
 
-        let res = self.niri.layout.overview_gesture_end();
+        let res = self.niri.layout.grid_gesture_end();
         if res {
             self.niri.queue_redraw_all();
             handled = true;
@@ -5002,6 +5107,15 @@ impl State {
                     window,
                 );
                 handle.set_grab(self, grab, serial);
+            } else if let Some((window, _)) = under.window.as_ref().filter(|(window, _)| {
+                !mod_down && self.niri.layout.window_is_in_open_grid_overview(window)
+            }) {
+                // A tap on a grid cell picks it, like a click.
+                self.niri.layout.confirm_grid_selection_for_window(window);
+                self.niri.queue_redraw_all();
+            } else if self.grid_tap_closes_grid(&under) {
+                self.niri.layout.close_grid_overview();
+                self.niri.queue_redraw_all();
             } else if let Some((window, _)) = under.window {
                 self.niri.layout.activate_window(&window);
 
@@ -5449,31 +5563,19 @@ fn bind_matches_trigger(bind: &Bind, trigger: Trigger, mod_key: ModKey, mods: Mo
     required_modifiers == held_modifiers
 }
 
-fn finish_pending_default_mod_tap(
-    pending_default_mod_tap: &mut Option<Keycode>,
-    key_code: Keycode,
-    pressed: bool,
-) -> Option<ShouldInterceptResult> {
-    if pressed || pending_default_mod_tap.as_ref() != Some(&key_code) {
-        return None;
-    }
-
-    *pending_default_mod_tap = None;
-
-    // The modifier press was forwarded, so its matching release must be forwarded too.
-    Some(ShouldInterceptResult::Forward)
-}
-
-fn modifier_from_keysym(keysym: Keysym) -> Option<Modifiers> {
-    #[allow(non_upper_case_globals)]
-    match keysym.raw() {
-        keysyms::KEY_Shift_L | keysyms::KEY_Shift_R => Some(Modifiers::SHIFT),
-        keysyms::KEY_Control_L | keysyms::KEY_Control_R => Some(Modifiers::CTRL),
-        keysyms::KEY_Alt_L | keysyms::KEY_Alt_R => Some(Modifiers::ALT),
-        keysyms::KEY_Super_L | keysyms::KEY_Super_R => Some(Modifiers::SUPER),
-        keysyms::KEY_ISO_Level3_Shift => Some(Modifiers::ISO_LEVEL3_SHIFT),
-        keysyms::KEY_ISO_Level5_Shift => Some(Modifiers::ISO_LEVEL5_SHIFT),
-        _ => None,
+/// The bind behind the `default-mod-action` grid overview toggle on a mod key tap.
+fn default_mod_tap_bind() -> Bind {
+    Bind {
+        key: Key {
+            trigger: Trigger::CompositorMod,
+            modifiers: Modifiers::COMPOSITOR,
+        },
+        action: BoundAction::Release(Action::ToggleGridOverview),
+        repeat: false,
+        cooldown: None,
+        allow_when_locked: false,
+        allow_inhibiting: true,
+        hotkey_overlay_title: None,
     }
 }
 
@@ -5568,23 +5670,6 @@ fn should_hide_exit_confirm_dialog<I: InputBackend>(event: &InputEvent<I>) -> bo
     }
 }
 
-fn should_cancel_pending_modifier_bind<I: InputBackend>(event: &InputEvent<I>) -> bool {
-    match event {
-        InputEvent::PointerButton { event } => event.state() == ButtonState::Pressed,
-        InputEvent::PointerAxis { .. }
-        | InputEvent::GestureSwipeBegin { .. }
-        | InputEvent::GesturePinchBegin { .. }
-        | InputEvent::GestureHoldBegin { .. }
-        | InputEvent::TouchDown { .. }
-        | InputEvent::TouchMotion { .. }
-        | InputEvent::TouchUp { .. }
-        | InputEvent::TouchCancel { .. }
-        | InputEvent::TabletToolButton { .. } => true,
-        InputEvent::TabletToolTip { event } => event.tip_state() == TabletToolTipState::Down,
-        _ => false,
-    }
-}
-
 fn should_notify_activity<I: InputBackend>(event: &InputEvent<I>) -> bool {
     !matches!(
         event,
@@ -5664,9 +5749,13 @@ fn allowed_during_screenshot(action: &Action) -> bool {
             // Intended for binds such as volume up/down, lock the screen, etc.
             | Action::Spawn(_)
             | Action::SpawnSh(_)
-            // Magnifier can be toggled and adjusted during screenshot.
+            // Magnifier can be toggled, adjusted and moved during screenshot.
             | Action::ToggleMagnifier
             | Action::AdjustMagnifierZoom(_)
+            | Action::MoveMagnifierLeft
+            | Action::MoveMagnifierRight
+            | Action::MoveMagnifierUp
+            | Action::MoveMagnifierDown
             // The screenshot UI can handle these.
             | Action::MoveColumnLeft
             | Action::MoveColumnLeftOrToMonitorLeft
@@ -5717,25 +5806,74 @@ fn grid_should_confirm_on_return(
         && (keyboard_focus.is_layout() || keyboard_focus.is_overview())
 }
 
+impl State {
+    /// Whether a touch or tablet tap at `under` hits the empty space of an open grid, which closes
+    /// it like a click there.
+    fn grid_tap_closes_grid(&self, under: &PointContents) -> bool {
+        under.window.is_none()
+            && under.layer.is_none()
+            && under
+                .output
+                .as_ref()
+                .is_some_and(|output| self.niri.layout.is_grid_overview_open_on(output))
+            && grid_should_handle_empty_click(
+                true,
+                self.niri.layout.is_overview_open(),
+                Some(MouseButton::Left),
+                false,
+                self.niri.screenshot_ui.is_open()
+                    || self.niri.is_locked()
+                    || self.niri.exit_confirm_dialog.is_open()
+                    || self.niri.window_mru_ui.is_open(),
+            )
+    }
+}
+
+/// Whether a click outside any grid cell should close the grid overview (or focus the output
+/// under the pointer).
+///
+/// The lock screen and compositor UIs take such clicks for themselves: with the screen locked,
+/// clicking the password field used to close the grid behind it and activate its focused window.
+fn grid_should_handle_empty_click(
+    is_grid_overview_open: bool,
+    is_overview_open: bool,
+    button: Option<MouseButton>,
+    pointer_is_grabbed: bool,
+    is_compositor_ui_open: bool,
+) -> bool {
+    is_grid_overview_open
+        && !is_overview_open
+        && button == Some(MouseButton::Left)
+        && !pointer_is_grabbed
+        && !is_compositor_ui_open
+}
+
+/// Whether an unbound wheel scroll in the grid overview should switch workspaces.
+///
+/// `is_grid_overview_open` is about the output under the pointer. Surfaces that aren't part of
+/// the grid keep their scrolling: layer-shell surfaces such as bars, matching how a click on them
+/// doesn't close the grid overview, and `ignore-grid-overview` windows.
 fn grid_should_handle_workspace_wheel(
     is_grid_overview_open: bool,
     is_overview_open: bool,
     is_mru_open: bool,
-    is_screenshot_open: bool,
+    is_compositor_ui_open: bool,
+    pointer_over_non_grid_surface: bool,
     modifiers: Modifiers,
     has_wheel_binds: bool,
 ) -> bool {
     is_grid_overview_open
         && !is_overview_open
         && !is_mru_open
-        && !is_screenshot_open
+        && !is_compositor_ui_open
+        && !pointer_over_non_grid_surface
         && modifiers.is_empty()
         && !has_wheel_binds
 }
 
 fn should_close_window_on_middle_click(
     button: Option<MouseButton>,
-    is_grid_overview_open: bool,
+    window_is_in_grid: bool,
     is_overview_open: bool,
     pointer_is_grabbed: bool,
     mod_down: bool,
@@ -5744,7 +5882,7 @@ fn should_close_window_on_middle_click(
     button == Some(MouseButton::Middle)
         && !pointer_is_grabbed
         && !mod_down
-        && (is_grid_overview_open || is_overview_open)
+        && (window_is_in_grid || is_overview_open)
         && !magnifier_can_drag
 }
 
@@ -6250,10 +6388,51 @@ fn grab_allows_hot_corner(grab: &(dyn PointerGrab<State> + 'static)) -> bool {
 /// Returns an iterator over bindings.
 ///
 /// Includes dynamically populated bindings like the MRU UI.
+/// Which of the `magnifier { binds {} }` binds currently apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MagnifierBindsFilter {
+    /// The magnifier is off: none of them.
+    None,
+    /// The magnifier is on, but its view follows the cursor: all but the move binds.
+    NoMove,
+    /// All of them.
+    All,
+}
+
+impl MagnifierBindsFilter {
+    fn new(niri: &Niri) -> Self {
+        // The screenshot UI and the lock screen handle keys on their own.
+        if !niri.magnifier_active || niri.screenshot_ui.is_open() || niri.is_locked() {
+            Self::None
+        } else if niri.can_drag_magnifier_center() {
+            Self::All
+        } else {
+            Self::NoMove
+        }
+    }
+
+    fn allows(self, bind: &Bind) -> bool {
+        match self {
+            Self::None => false,
+            Self::NoMove => !matches!(
+                bind.press_action(),
+                Some(
+                    Action::MoveMagnifierLeft
+                        | Action::MoveMagnifierRight
+                        | Action::MoveMagnifierUp
+                        | Action::MoveMagnifierDown
+                )
+            ),
+            Self::All => true,
+        }
+    }
+}
+
 fn make_binds_iter<'a>(
     config: &'a Config,
     screenshot_ui: &'a ScreenshotUi,
     mru: &'a mut WindowMruUi,
+    magnifier: MagnifierBindsFilter,
     mods: Modifiers,
 ) -> impl Iterator<Item = &'a Bind> + Clone {
     let general_binds = config.binds.0.iter();
@@ -6261,6 +6440,14 @@ fn make_binds_iter<'a>(
     // Figure out the binds to use depending on whether the MRU is enabled and/or open.
     let general_binds = (!mru.is_open()).then_some(general_binds);
     let general_binds = general_binds.into_iter().flatten();
+
+    // Binds that don't apply fall through to the general binds, so that the magnifier can reuse
+    // their keys.
+    let magnifier_binds = (!mru.is_open()).then_some(config.magnifier.binds.iter());
+    let magnifier_binds = magnifier_binds
+        .into_iter()
+        .flatten()
+        .filter(move |bind| magnifier.allows(bind));
 
     let mru_binds =
         (config.recent_windows.on || mru.is_open()).then_some(config.recent_windows.binds.iter());
@@ -6272,8 +6459,9 @@ fn make_binds_iter<'a>(
     // Screenshot UI binds already disable themselves when it's closed.
     let screenshot_binds = screenshot_ui.binds();
 
-    // The precedence is screenshot UI, then general, then MRU binds.
+    // The precedence is screenshot UI, magnifier, general, then MRU binds.
     screenshot_binds
+        .chain(magnifier_binds)
         .chain(general_binds)
         .chain(mru_binds)
         .chain(mru_open_binds)
@@ -6281,7 +6469,330 @@ fn make_binds_iter<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
     use super::*;
+
+    #[test]
+    fn magnifier_binds_take_precedence_only_while_they_apply() {
+        let config = Config::parse_mem(
+            r#"
+            binds {
+                Mod+H { focus-column-left; }
+            }
+
+            magnifier {
+                binds {
+                    Mod+H { move-magnifier-left; }
+                    Escape { toggle-magnifier; }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let config = Rc::new(RefCell::new(config));
+        let mut mru = WindowMruUi::new(config.clone());
+        let screenshot_ui = ScreenshotUi::new(crate::animation::Clock::default(), config.clone());
+        let config = config.borrow();
+        let mut find = |filter, keysym, mods| {
+            let bindings =
+                make_binds_iter(&config, &screenshot_ui, &mut mru, filter, Modifiers::empty());
+            find_configured_bind(bindings, ModKey::Super, Trigger::Keysym(keysym), mods)
+                .and_then(|bind| bind.press_action().cloned())
+        };
+        let logo = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let none = ModifiersState::default();
+
+        use MagnifierBindsFilter::{All, NoMove, None as Off};
+        assert_eq!(find(Off, Keysym::h, logo), Some(Action::FocusColumnLeft));
+        assert_eq!(find(Off, Keysym::Escape, none), None);
+        assert_eq!(find(NoMove, Keysym::h, logo), Some(Action::FocusColumnLeft));
+        assert_eq!(
+            find(NoMove, Keysym::Escape, none),
+            Some(Action::ToggleMagnifier)
+        );
+        assert_eq!(find(All, Keysym::h, logo), Some(Action::MoveMagnifierLeft));
+        assert_eq!(
+            find(All, Keysym::Escape, none),
+            Some(Action::ToggleMagnifier)
+        );
+    }
+
+    #[test]
+    fn grid_return_confirm_handles_overview_focus() {
+        let layout_focus = KeyboardFocus::Layout { surface: None };
+
+        assert!(grid_should_confirm_on_return(true, &layout_focus, true));
+        assert!(grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Overview,
+            true
+        ));
+        assert!(!grid_should_confirm_on_return(
+            false,
+            &KeyboardFocus::Overview,
+            true
+        ));
+        assert!(!grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Overview,
+            false
+        ));
+        assert!(!grid_should_confirm_on_return(
+            true,
+            &KeyboardFocus::Mru,
+            true
+        ));
+
+        assert!(grid_should_close_on_escape(true, &layout_focus));
+        assert!(!grid_should_close_on_escape(true, &KeyboardFocus::Overview));
+        assert!(!grid_should_close_on_escape(false, &layout_focus));
+    }
+
+    #[test]
+    fn grid_empty_click_is_left_for_lock_screen_and_compositor_uis() {
+        let left = Some(MouseButton::Left);
+        assert!(grid_should_handle_empty_click(
+            true, false, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            false, false, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true, true, left, false, false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true,
+            false,
+            Some(MouseButton::Right),
+            false,
+            false
+        ));
+        assert!(!grid_should_handle_empty_click(
+            true, false, left, true, false
+        ));
+        // Lock screen, exit dialog, screenshot UI or MRU switcher.
+        assert!(!grid_should_handle_empty_click(
+            true, false, left, false, true
+        ));
+    }
+
+    #[test]
+    fn grid_workspace_wheel_is_fallback_only() {
+        assert!(grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            false,
+            false,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            true,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Modifiers::SHIFT,
+            false,
+        ));
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            false,
+            Modifiers::empty(),
+            true,
+        ));
+        // Screenshot UI, lock screen or exit dialog.
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            true,
+            false,
+            Modifiers::empty(),
+            false,
+        ));
+        // Pointer over a bar, another layer-shell surface or an ignore-grid-overview window.
+        assert!(!grid_should_handle_workspace_wheel(
+            true,
+            false,
+            false,
+            false,
+            true,
+            Modifiers::empty(),
+            false,
+        ));
+    }
+
+    #[test]
+    fn grid_and_overview_hjkl_are_hardcoded_focus_binds() {
+        let no_mods = ModifiersState::default();
+        let with_mod = ModifiersState {
+            logo: true,
+            ..Default::default()
+        };
+        let overview_focus = KeyboardFocus::Overview;
+
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::h, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::j, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::k, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+        assert!(matches!(
+            hardcoded_grid_overview_bind(Keysym::l, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusColumnRight)
+        ));
+        assert!(hardcoded_grid_overview_bind(Keysym::h, with_mod).is_none());
+
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::h, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::j, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::k, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+        assert!(matches!(
+            hardcoded_overview_bind(Keysym::l, no_mods)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusColumnRight)
+        ));
+        assert!(hardcoded_overview_bind(Keysym::h, with_mod).is_none());
+
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::j, no_mods, true, &overview_focus)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceDown)
+        ));
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::k, no_mods, true, &overview_focus)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusWindowOrWorkspaceUp)
+        ));
+    }
+
+    #[test]
+    fn grid_without_a_matching_bind_falls_back_to_overview() {
+        let no_mods = ModifiersState::default();
+        let overview_focus = KeyboardFocus::Overview;
+
+        for keysym in [Keysym::Return, Keysym::Escape] {
+            assert!(matches!(
+                hardcoded_grid_or_overview_bind(keysym, no_mods, true, &overview_focus)
+                    .and_then(|bind| bind.press_action().cloned()),
+                Some(Action::ToggleOverview)
+            ));
+        }
+
+        assert!(matches!(
+            hardcoded_grid_or_overview_bind(Keysym::Left, no_mods, true, &overview_focus)
+                .and_then(|bind| bind.press_action().cloned()),
+            Some(Action::FocusColumnLeft)
+        ));
+        assert!(hardcoded_grid_or_overview_bind(
+            Keysym::Return,
+            no_mods,
+            true,
+            &KeyboardFocus::Layout { surface: None },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn middle_click_close_is_limited_to_grid_and_overview() {
+        assert!(should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            false,
+            true,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            false,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Middle),
+            true,
+            false,
+            false,
+            true,
+            false,
+        ));
+        assert!(!should_close_window_on_middle_click(
+            Some(MouseButton::Left),
+            true,
+            false,
+            false,
+            false,
+            false,
+        ));
+    }
 
     const CLOSE_KEYSYM: Keysym = Keysym::q;
     const CLOSE_KEY_CODE: Keycode = Keycode::new(CLOSE_KEYSYM.raw());
@@ -6385,216 +6896,10 @@ mod tests {
         };
     }
 
-    #[test]
-    fn grid_return_confirm_handles_overview_focus() {
-        let layout_focus = KeyboardFocus::Layout { surface: None };
 
-        assert!(grid_should_confirm_on_return(true, &layout_focus, true));
-        assert!(grid_should_confirm_on_return(
-            true,
-            &KeyboardFocus::Overview,
-            true
-        ));
-        assert!(!grid_should_confirm_on_return(
-            false,
-            &KeyboardFocus::Overview,
-            true
-        ));
-        assert!(!grid_should_confirm_on_return(
-            true,
-            &KeyboardFocus::Overview,
-            false
-        ));
-        assert!(!grid_should_confirm_on_return(
-            true,
-            &KeyboardFocus::Mru,
-            true
-        ));
 
-        assert!(grid_should_close_on_escape(true, &layout_focus));
-        assert!(!grid_should_close_on_escape(true, &KeyboardFocus::Overview));
-        assert!(!grid_should_close_on_escape(false, &layout_focus));
-    }
 
-    #[test]
-    fn grid_workspace_wheel_is_fallback_only() {
-        assert!(grid_should_handle_workspace_wheel(
-            true,
-            false,
-            false,
-            false,
-            Modifiers::empty(),
-            false,
-        ));
-        assert!(!grid_should_handle_workspace_wheel(
-            false,
-            false,
-            false,
-            false,
-            Modifiers::empty(),
-            false,
-        ));
-        assert!(!grid_should_handle_workspace_wheel(
-            true,
-            true,
-            false,
-            false,
-            Modifiers::empty(),
-            false,
-        ));
-        assert!(!grid_should_handle_workspace_wheel(
-            true,
-            false,
-            false,
-            false,
-            Modifiers::SHIFT,
-            false,
-        ));
-        assert!(!grid_should_handle_workspace_wheel(
-            true,
-            false,
-            false,
-            false,
-            Modifiers::empty(),
-            true,
-        ));
-    }
 
-    #[test]
-    fn grid_and_overview_hjkl_are_hardcoded_focus_binds() {
-        let no_mods = ModifiersState::default();
-        let with_mod = ModifiersState {
-            logo: true,
-            ..Default::default()
-        };
-        let overview_focus = KeyboardFocus::Overview;
-
-        assert!(matches!(
-            hardcoded_grid_overview_bind(Keysym::h, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusColumnLeft)
-        ));
-        assert!(matches!(
-            hardcoded_grid_overview_bind(Keysym::j, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceDown)
-        ));
-        assert!(matches!(
-            hardcoded_grid_overview_bind(Keysym::k, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceUp)
-        ));
-        assert!(matches!(
-            hardcoded_grid_overview_bind(Keysym::l, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusColumnRight)
-        ));
-        assert!(hardcoded_grid_overview_bind(Keysym::h, with_mod).is_none());
-
-        assert!(matches!(
-            hardcoded_overview_bind(Keysym::h, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusColumnLeft)
-        ));
-        assert!(matches!(
-            hardcoded_overview_bind(Keysym::j, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceDown)
-        ));
-        assert!(matches!(
-            hardcoded_overview_bind(Keysym::k, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceUp)
-        ));
-        assert!(matches!(
-            hardcoded_overview_bind(Keysym::l, no_mods).and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusColumnRight)
-        ));
-        assert!(hardcoded_overview_bind(Keysym::h, with_mod).is_none());
-
-        assert!(matches!(
-            hardcoded_grid_or_overview_bind(Keysym::j, no_mods, true, &overview_focus)
-                .and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceDown)
-        ));
-        assert!(matches!(
-            hardcoded_grid_or_overview_bind(Keysym::k, no_mods, true, &overview_focus)
-                .and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusWindowOrWorkspaceUp)
-        ));
-    }
-
-    #[test]
-    fn grid_without_a_matching_bind_falls_back_to_overview() {
-        let no_mods = ModifiersState::default();
-        let overview_focus = KeyboardFocus::Overview;
-
-        for keysym in [Keysym::Return, Keysym::Escape] {
-            assert!(matches!(
-                hardcoded_grid_or_overview_bind(keysym, no_mods, true, &overview_focus)
-                    .and_then(|bind| bind.into_action(true)),
-                Some(Action::ToggleOverview)
-            ));
-        }
-
-        assert!(matches!(
-            hardcoded_grid_or_overview_bind(Keysym::Left, no_mods, true, &overview_focus)
-                .and_then(|bind| bind.into_action(true)),
-            Some(Action::FocusColumnLeft)
-        ));
-        assert!(hardcoded_grid_or_overview_bind(
-            Keysym::Return,
-            no_mods,
-            true,
-            &KeyboardFocus::Layout { surface: None },
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn middle_click_close_is_limited_to_grid_and_overview() {
-        assert!(should_close_window_on_middle_click(
-            Some(MouseButton::Middle),
-            true,
-            false,
-            false,
-            false,
-            false,
-        ));
-        assert!(should_close_window_on_middle_click(
-            Some(MouseButton::Middle),
-            false,
-            true,
-            false,
-            false,
-            false,
-        ));
-        assert!(!should_close_window_on_middle_click(
-            Some(MouseButton::Middle),
-            false,
-            false,
-            false,
-            false,
-            false,
-        ));
-        assert!(!should_close_window_on_middle_click(
-            Some(MouseButton::Middle),
-            true,
-            false,
-            true,
-            false,
-            false,
-        ));
-        assert!(!should_close_window_on_middle_click(
-            Some(MouseButton::Middle),
-            true,
-            false,
-            false,
-            true,
-            false,
-        ));
-        assert!(!should_close_window_on_middle_click(
-            Some(MouseButton::Left),
-            true,
-            false,
-            false,
-            false,
-            false,
-        ));
-    }
 
     #[test]
     fn comp_mod_handling() {

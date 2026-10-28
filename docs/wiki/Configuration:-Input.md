@@ -105,6 +105,7 @@ input {
     // disable-power-key-handling
     // warp-mouse-to-focus
     // focus-follows-mouse max-scroll-amount="0%"
+    // confine-mouse-to-fullscreen
     // workspace-auto-back-and-forth
 
     // mod-key "Super"
@@ -366,6 +367,25 @@ input {
 input {
     // Allow focus-follows-mouse only when it will not scroll the view.
     focus-follows-mouse max-scroll-amount="0%"
+}
+```
+
+#### `confine-mouse-to-fullscreen`
+
+<sup>Since: next release</sup>
+
+Keeps the mouse on the monitor of the focused window while that window is fullscreen, so it doesn't slip onto another monitor during a game or a video.
+
+This applies once the fullscreen window covers the monitor and the view is still.
+It doesn't apply in the overview or the grid overview, and it lets go while the lock screen, the screenshot UI or another niri UI is open.
+The `focus-monitor-*` actions still move the mouse to another monitor, and it also comes free once you focus a window that isn't fullscreen.
+Tablets and other absolute pointing devices are not confined.
+
+[Windowed fullscreen](./Fullscreen-and-Maximize.md#windowed-fullscreen) windows don't count as fullscreen here.
+
+```kdl
+input {
+    confine-mouse-to-fullscreen
 }
 ```
 

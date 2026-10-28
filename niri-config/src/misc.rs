@@ -1,6 +1,10 @@
+use std::collections::HashSet;
+
+use knuffel::errors::DecodeError;
+
 use crate::appearance::{Color, WorkspaceShadow, WorkspaceShadowPart, DEFAULT_BACKDROP_COLOR};
-use crate::utils::{parse_arg_node, Flag, MergeWith};
-use crate::FloatOrInt;
+use crate::utils::{expect_only_children, parse_arg_node, Flag, MergeWith};
+use crate::{Action, Bind, BoundAction, FloatOrInt, Key, Trigger};
 
 #[derive(knuffel::Decode, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnAtStartup {
@@ -182,12 +186,16 @@ impl MergeWith<ClipboardPart> for Clipboard {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Magnifier {
     pub off: bool,
     pub zoom_factor: f64,
     pub track_cursor: bool,
     pub scale_cursor: bool,
+    /// Fraction of the visible area that one move-magnifier step moves the view by.
+    pub move_step: f64,
+    /// Binds that take precedence over the regular binds while the magnifier is on.
+    pub binds: Vec<Bind>,
 }
 
 impl Default for Magnifier {
@@ -197,6 +205,8 @@ impl Default for Magnifier {
             zoom_factor: 2.0,
             track_cursor: true,
             scale_cursor: true,
+            move_step: 0.05,
+            binds: Vec::new(),
         }
     }
 }
@@ -213,6 +223,10 @@ pub struct MagnifierPart {
     pub track_cursor: Option<Flag>,
     #[knuffel(child)]
     pub scale_cursor: Option<Flag>,
+    #[knuffel(child, unwrap(argument))]
+    pub move_step: Option<FloatOrInt<0, 1>>,
+    #[knuffel(child)]
+    pub binds: Option<MagnifierBinds>,
 }
 
 impl MergeWith<MagnifierPart> for Magnifier {
@@ -221,7 +235,211 @@ impl MergeWith<MagnifierPart> for Magnifier {
         if part.on {
             self.off = false;
         }
-        merge!((self, part), zoom_factor, track_cursor, scale_cursor);
+        merge!(
+            (self, part),
+            zoom_factor,
+            track_cursor,
+            scale_cursor,
+            move_step
+        );
+
+        if let Some(part) = &part.binds {
+            // Remove existing binds matching any new bind.
+            self.binds
+                .retain(|bind| !part.0.iter().any(|new| new.key == bind.key));
+            // Add all new binds.
+            self.binds.extend(part.0.iter().cloned().map(Bind::from));
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MagnifierBind {
+    pub key: Key,
+    pub action: MagnifierAction,
+    /// Explicit `repeat`; the default depends on the action.
+    pub repeat: Option<bool>,
+    pub allow_inhibiting: bool,
+}
+
+impl From<MagnifierBind> for Bind {
+    fn from(x: MagnifierBind) -> Self {
+        Self {
+            key: x.key,
+            action: BoundAction::Press(Action::from(x.action)),
+            // Key repeat replays the bind, so a repeating toggle would turn the magnifier back on.
+            repeat: x
+                .repeat
+                .unwrap_or(x.action != MagnifierAction::ToggleMagnifier),
+            cooldown: None,
+            allow_when_locked: false,
+            allow_inhibiting: x.allow_inhibiting,
+            hotkey_overlay_title: None,
+        }
+    }
+}
+
+/// Actions allowed in the magnifier binds.
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MagnifierAction {
+    MoveMagnifierLeft,
+    MoveMagnifierRight,
+    MoveMagnifierUp,
+    MoveMagnifierDown,
+    ToggleMagnifier,
+}
+
+impl From<MagnifierAction> for Action {
+    fn from(x: MagnifierAction) -> Self {
+        match x {
+            MagnifierAction::MoveMagnifierLeft => Self::MoveMagnifierLeft,
+            MagnifierAction::MoveMagnifierRight => Self::MoveMagnifierRight,
+            MagnifierAction::MoveMagnifierUp => Self::MoveMagnifierUp,
+            MagnifierAction::MoveMagnifierDown => Self::MoveMagnifierDown,
+            MagnifierAction::ToggleMagnifier => Self::ToggleMagnifier,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MagnifierBinds(pub Vec<MagnifierBind>);
+
+impl<S> knuffel::Decode<S> for MagnifierBinds
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        expect_only_children(node, ctx);
+
+        let mut seen_keys = HashSet::new();
+
+        let mut binds = Vec::new();
+
+        for child in node.children() {
+            match MagnifierBind::decode_node(child, ctx) {
+                Ok(bind) => {
+                    if !seen_keys.insert(bind.key) {
+                        ctx.emit_error(DecodeError::unexpected(
+                            &child.node_name,
+                            "keybind",
+                            "duplicate keybind",
+                        ));
+                        continue;
+                    }
+
+                    binds.push(bind);
+                }
+                Err(e) => {
+                    ctx.emit_error(e);
+                }
+            }
+        }
+
+        Ok(Self(binds))
+    }
+}
+
+impl<S> knuffel::Decode<S> for MagnifierBind
+where
+    S: knuffel::traits::ErrorSpan,
+{
+    fn decode_node(
+        node: &knuffel::ast::SpannedNode<S>,
+        ctx: &mut knuffel::decode::Context<S>,
+    ) -> Result<Self, DecodeError<S>> {
+        if let Some(type_name) = &node.type_name {
+            ctx.emit_error(DecodeError::unexpected(
+                type_name,
+                "type name",
+                "no type name expected for this node",
+            ));
+        }
+
+        for val in node.arguments.iter() {
+            ctx.emit_error(DecodeError::unexpected(
+                &val.literal,
+                "argument",
+                "no arguments expected for this node",
+            ));
+        }
+
+        let key = node
+            .node_name
+            .parse::<Key>()
+            .map_err(|e| DecodeError::conversion(&node.node_name, e.wrap_err("invalid keybind")))?;
+
+        // FIXME: To support this, all the mods_with_mouse_binds()/mods_with_wheel_binds()/etc.
+        // will need to learn about magnifier bindings.
+        if !matches!(key.trigger, Trigger::Keysym(_)) {
+            ctx.emit_error(DecodeError::unexpected(
+                &node.node_name,
+                "key",
+                "key must be a keyboard key (others are unsupported here for now)",
+            ));
+        }
+
+        let mut repeat = None;
+        let mut allow_inhibiting = true;
+        for (name, val) in &node.properties {
+            match &***name {
+                "repeat" => {
+                    repeat = Some(knuffel::traits::DecodeScalar::decode(val, ctx)?);
+                }
+                "allow-inhibiting" => {
+                    allow_inhibiting = knuffel::traits::DecodeScalar::decode(val, ctx)?;
+                }
+                name_str => {
+                    ctx.emit_error(DecodeError::unexpected(
+                        name,
+                        "property",
+                        format!("unexpected property `{}`", name_str.escape_default()),
+                    ));
+                }
+            }
+        }
+
+        let mut children = node.children();
+
+        // If the action is invalid but the key is fine, we still want to return something.
+        // That way, the parent can handle the existence of duplicate keybinds,
+        // even if their contents are not valid.
+        let dummy = Self {
+            key,
+            action: MagnifierAction::ToggleMagnifier,
+            repeat: None,
+            allow_inhibiting: true,
+        };
+
+        if let Some(child) = children.next() {
+            for unwanted_child in children {
+                ctx.emit_error(DecodeError::unexpected(
+                    unwanted_child,
+                    "node",
+                    "only one action is allowed per keybind",
+                ));
+            }
+            match MagnifierAction::decode_node(child, ctx) {
+                Ok(action) => Ok(Self {
+                    key,
+                    action,
+                    repeat,
+                    allow_inhibiting,
+                }),
+                Err(e) => {
+                    ctx.emit_error(e);
+                    Ok(dummy)
+                }
+            }
+        } else {
+            ctx.emit_error(DecodeError::missing(
+                node,
+                "expected an action for this keybind",
+            ));
+            Ok(dummy)
+        }
     }
 }
 
@@ -263,10 +481,122 @@ impl MergeWith<OverviewPart> for Overview {
 pub struct GridOverview {
     pub gap: f64,
     pub padding: GridOverviewPadding,
+    /// The smallest scale the grid shows windows at; below it, they overlap instead.
     pub min_scale: f64,
-    pub focused_column_scale: f64,
+    /// On-screen width of the focus ring around the focused cell, in logical pixels.
+    ///
+    /// `None` keeps the width of the window's own focus ring. Either way, the width doesn't shrink
+    /// with the cells.
+    pub focus_ring_width: Option<f64>,
+    pub focus_ring_transition: GridFocusRingTransition,
+    pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     pub grid_all_monitors: bool,
     pub default_mod_action: bool,
+    pub minimized_highlight: GridMinimizedHighlight,
+}
+
+/// How the focus ring goes from one grid cell to another.
+///
+/// Timing comes from `animations { focus-ring }`.
+#[derive(knuffel::DecodeScalar, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum GridFocusRingTransition {
+    /// The ring appears on the new cell right away.
+    None,
+    /// The new cell's ring grows out from its edge while the old one shrinks back and fades.
+    #[default]
+    Grow,
+    /// One ring slides from the old cell to the new one.
+    Slide,
+}
+
+/// Moving the mouse moves the grid focus to the cell under the pointer.
+#[derive(knuffel::Decode, Debug, Clone, Copy, PartialEq)]
+pub struct GridFocusFollowsMouse {
+    /// How far the pointer has to move after the focus was last set some other way, in logical
+    /// pixels, before the focus follows it.
+    #[knuffel(property)]
+    pub min_distance: Option<FloatOrInt<0, 65535>>,
+}
+
+impl GridFocusFollowsMouse {
+    pub fn min_distance(&self) -> f64 {
+        self.min_distance.map_or(8., |d| d.0)
+    }
+}
+
+/// Highlight drawn behind the grid cell of a minimized window.
+///
+/// Minimized windows only exist in the Grid Overview, where they otherwise look exactly like
+/// normal windows. The highlight extends past the cell on every side, so it reads as a colored
+/// frame around the thumbnail without touching the window's own opacity.
+///
+/// Mirrors the recent-windows [`MruHighlight`](crate::recent_windows::MruHighlight), values
+/// included.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridMinimizedHighlight {
+    pub off: bool,
+    pub color: Color,
+    pub urgent_color: Color,
+    /// How far the highlight extends past the cell, in logical pixels.
+    pub padding: f64,
+    /// Corner radius of the frame.
+    ///
+    /// `None` keeps the frame concentric with the window's rounded corners, like the focus ring.
+    pub corner_radius: Option<f64>,
+    /// Opacity of the dark layer over minimized thumbnails, from 0 (none) to 1.
+    ///
+    /// Unlike the frame, it sits on the thumbnail itself, so it stays visible under the focus
+    /// ring, and it doesn't make the window see-through, which background effects like blur
+    /// couldn't follow.
+    pub dim: f64,
+}
+
+impl Default for GridMinimizedHighlight {
+    fn default() -> Self {
+        Self {
+            off: false,
+            // Recent-windows' grey, at 70% alpha so the frame blends into the backdrop.
+            color: Color::from_rgba8_unpremul(153, 153, 153, 179),
+            urgent_color: Color::new_unpremul(1., 0.6, 0.6, 1.),
+            // Recent-windows uses 30, which is sized for full-screen previews. Grid cells sit a
+            // `gap` apart (16 by default), so the frame has to stay inside half of that.
+            padding: 6.,
+            corner_radius: None,
+            dim: 0.4,
+        }
+    }
+}
+
+#[derive(knuffel::Decode, Debug, Default, Clone, Copy, PartialEq)]
+pub struct GridMinimizedHighlightPart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+    #[knuffel(child)]
+    pub color: Option<Color>,
+    #[knuffel(child)]
+    pub urgent_color: Option<Color>,
+    #[knuffel(child, unwrap(argument))]
+    pub padding: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child, unwrap(argument))]
+    pub corner_radius: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child, unwrap(argument))]
+    pub dim: Option<FloatOrInt<0, 1>>,
+}
+
+impl MergeWith<GridMinimizedHighlightPart> for GridMinimizedHighlight {
+    fn merge_with(&mut self, part: &GridMinimizedHighlightPart) {
+        self.off |= part.off;
+        if part.on {
+            self.off = false;
+        }
+        merge_clone!((self, part), color, urgent_color);
+        merge!((self, part), padding, dim);
+        if let Some(corner_radius) = part.corner_radius {
+            self.corner_radius = Some(corner_radius.0);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -300,9 +630,14 @@ impl Default for GridOverview {
             gap: 16.,
             padding: GridOverviewPadding::default(),
             min_scale: 0.08,
-            focused_column_scale: 1.04,
+            // The focus ring marks the focused cell; scaling it up would misrepresent the window's
+            // size next to the others.
+            focus_ring_width: None,
+            focus_ring_transition: GridFocusRingTransition::default(),
+            focus_follows_mouse: None,
             grid_all_monitors: true,
             default_mod_action: true,
+            minimized_highlight: GridMinimizedHighlight::default(),
         }
     }
 }
@@ -435,11 +770,17 @@ pub struct GridOverviewPart {
     #[knuffel(child, unwrap(argument))]
     pub min_scale: Option<FloatOrInt<0, 1>>,
     #[knuffel(child, unwrap(argument))]
-    pub focused_column_scale: Option<FloatOrInt<1, 2>>,
+    pub focus_ring_width: Option<FloatOrInt<0, 65535>>,
+    #[knuffel(child, unwrap(argument))]
+    pub focus_ring_transition: Option<GridFocusRingTransition>,
+    #[knuffel(child)]
+    pub focus_follows_mouse: Option<GridFocusFollowsMouse>,
     #[knuffel(child, unwrap(argument))]
     pub grid_all_monitors: Option<bool>,
     #[knuffel(child, unwrap(argument))]
     pub default_mod_action: Option<bool>,
+    #[knuffel(child)]
+    pub minimized_highlight: Option<GridMinimizedHighlightPart>,
 }
 
 impl MergeWith<GridOverviewPart> for GridOverview {
@@ -453,8 +794,14 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         if let Some(min_scale) = &part.min_scale {
             self.min_scale = min_scale.0;
         }
-        if let Some(focused_column_scale) = &part.focused_column_scale {
-            self.focused_column_scale = focused_column_scale.0;
+        if let Some(focus_ring_width) = &part.focus_ring_width {
+            self.focus_ring_width = Some(focus_ring_width.0);
+        }
+        if let Some(focus_ring_transition) = part.focus_ring_transition {
+            self.focus_ring_transition = focus_ring_transition;
+        }
+        if let Some(focus_follows_mouse) = part.focus_follows_mouse {
+            self.focus_follows_mouse = Some(focus_follows_mouse);
         }
         if let Some(grid_all_monitors) = part.grid_all_monitors {
             self.grid_all_monitors = grid_all_monitors;
@@ -462,6 +809,7 @@ impl MergeWith<GridOverviewPart> for GridOverview {
         if let Some(default_mod_action) = part.default_mod_action {
             self.default_mod_action = default_mod_action;
         }
+        merge!((self, part), minimized_highlight);
     }
 }
 
@@ -499,6 +847,37 @@ pub struct XwaylandSatellitePart {
     pub on: bool,
     #[knuffel(child, unwrap(argument))]
     pub path: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Agent {
+    pub off: bool,
+    /// Executable names of clients that don't see the agent seat, in addition to the built-in
+    /// list of clients known to switch to the last seat they see.
+    pub hide_seat_from: Vec<String>,
+}
+
+#[derive(knuffel::Decode, Debug, Clone, PartialEq, Eq)]
+pub struct AgentPart {
+    #[knuffel(child)]
+    pub off: bool,
+    #[knuffel(child)]
+    pub on: bool,
+    #[knuffel(child, unwrap(arguments))]
+    pub hide_seat_from: Option<Vec<String>>,
+}
+
+impl MergeWith<AgentPart> for Agent {
+    fn merge_with(&mut self, part: &AgentPart) {
+        self.off |= part.off;
+        if part.on {
+            self.off = false;
+        }
+
+        if let Some(names) = &part.hide_seat_from {
+            self.hide_seat_from.extend(names.iter().cloned());
+        }
+    }
 }
 
 impl MergeWith<XwaylandSatellitePart> for XwaylandSatellite {

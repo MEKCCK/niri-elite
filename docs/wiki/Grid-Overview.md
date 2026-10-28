@@ -3,15 +3,66 @@
 The Grid Overview is a grid-based view of your windows.
 It shows every window as a tile in a grid, letting you quickly navigate between them.
 
-Open it with the `toggle-grid-overview` bind, or by tapping the `Mod` key (pressing and releasing it without pressing any other key in between). The `Mod` key tap behavior is built in and works even without an explicit binding, controlled by the `default-mod-action` setting (enabled by default).
+Open it with the `toggle-grid-overview` bind, with a touchpad four-finger swipe up (it follows the fingers, and a swipe down closes it), or by tapping the `Mod` key (pressing and releasing it without pressing any other key in between). The `Mod` key tap behavior is built in and works even without an explicit binding, controlled by the `default-mod-action` setting (enabled by default).
 
-Note that the bundled default config binds bare `Mod` to `toggle-overview`, and an explicit bind takes precedence over the built-in tap. To use tap-to-grid with the default config, remove that bind (or change its action to `toggle-grid-overview`).
-
-While in the grid overview, all keyboard shortcuts keep working.
-Use the arrow keys to navigate between windows.
-If a column contains multiple windows, use Up/Down to switch between them within the same cell.
+While in the grid overview, all keyboard shortcuts keep working, and the focus actions (like `focus-column-left` or `focus-window-down`) move between cells.
+On top of that, <kbd>H</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> without modifiers navigate between windows; bare arrow keys are not built in, they still go to the window.
+Navigation goes by where the cells are on screen: to the next cell in that direction, preferring one that lines up with the current cell, so it reaches floating windows as well as tiled ones.
+If a column contains multiple windows, use <kbd>J</kbd>/<kbd>K</kbd> to switch between them within the same cell.
+The tabs of a tabbed column get a cell each; a small tab indicator along the left edge of each of those cells, in the band where the focus ring goes, shows that they belong to one column and which tab each one is. On a focused cell it sits in a slot cut into the ring, so that the lit tab stands out from the ring. It follows the `tab-indicator` settings.
+<kbd>Return</kbd> activates the selected window, and <kbd>Escape</kbd> closes the grid.
 
 Click a window to activate it and close the grid overview.
+Focusing a window from elsewhere, like a taskbar or `niri msg action focus-window`, does the same.
+
+With `focus-follows-mouse` in the `grid-overview` section, moving the mouse also moves the focus to the cell under the pointer, so closing the grid activates that window.
+The pointer only takes the focus over once it moved a few pixels (`min-distance`, 8 by default) from where it was when the grid opened or the keyboard last moved the focus, so nudging the mouse while navigating with the keyboard keeps the keyboard's choice.
+Cells moving under a still pointer, for example as the grid opens, don't take the focus either.
+
+```kdl
+grid-overview {
+    focus-follows-mouse min-distance=8
+}
+```
+
+### Layout
+
+With room to spare, every window shows at the same scale, so windows keep their sizes relative to each other.
+As it gets tight, small windows shrink less than big ones, like in the window overviews of other desktops, so that terminals and dialogs stay readable: a window with a fraction `a` of the screen's area shows at `scale ^ (a ^ 0.25)`.
+The tiled windows shrink alike, so they stay alike in height; and no window shows larger than it is.
+
+Tiled windows form a block in the middle of the grid, in the order of the scrolling layout, left to right, wrapped into rows like text.
+The tabs of a tabbed column stay together in one row.
+
+Floating windows go around the block in bands, on the side of the screen they are on, judged by thirds of the screen: above the block for windows at the top, below it for windows at the bottom or in the middle, and beside it for windows on the left or the right.
+In a band, they keep their order on the screen, each as close to where it is as the others let it.
+A band that runs out of room gets another line further out; a window stays in the line it was in for as long as there's room for it there, so a new window never moves an older one to another line.
+A window on the left or the right can also take the room beside a short row of the block: one at the top beside the first row, one at the bottom beside the last.
+The grid tries three arrangements: windows in the corners above and below the block, windows in the corners beside it, and every window beside it, on its side of the screen, with the block wrapping into more rows; there, a window in the middle goes to the side with less on it, or the side it was on before.
+How wide the rows get and which arrangement it uses are picked to show the windows as large as possible.
+On a workspace with only floating windows, they go in rows, like in the window overviews of other desktops: top to bottom and left to right by where they are on the screen, every row centered.
+A window stays in the row it was in, and a new one joins the row closest to it, or another row if that shows the windows clearly larger; a row that gets too wide splits in two, and two rows with room merge, before the windows go into new rows altogether.
+
+When windows come and go, the grid keeps the width the rows wrap at and the arrangement as long as they show the windows at least 85% as large as others would, and keeps its scale unless the windows could grow by more than about 7%.
+Opening the grid again starts from what it showed when it closed, the same way, so with nothing changed it shows the same.
+
+Dragging a tiled window in the grid moves it in the scrolling layout: drop it on a tiled cell to put it into that column, at the edge of one to put it beside it, or anywhere else, floating cells included, to put it beside the nearest tiled cell.
+Dragging a floating window moves it on the screen: its middle goes where you let go of it, and the grid shows it there first, then moves it on to its place in the band on that side.
+As outside the grid, clicking the right mouse button during the drag switches the window between floating and tiling.
+[`toggle-window-floating`](./Configuration:-Key-Bindings.md) switches the window in the focused cell.
+
+### Minimized windows
+
+The grid overview is where [minimized windows](./Configuration:-Key-Bindings.md#minimize-window) live: a minimized window keeps its place in the layout and only shows up here, as a darkened cell marked with a colored frame.
+Activating that cell restores the window, and so does closing the grid while that cell is selected.
+
+Minimized cells count as normal cells for navigation *and* for moving:
+moving a window with `move-column-left`/`move-column-right` steps onto the minimized cell instead of jumping over it, and moving a minimized cell itself reorders it without restoring it.
+Outside the grid overview minimized windows are invisible, so moves there jump over them as before.
+
+Pressing [`minimize-window`](./Configuration:-Key-Bindings.md#minimize-window) on a minimized cell restores the window in place: it goes back into the layout, loses its frame and its dark layer, and the grid stays open on it.
+Minimizing works the same way round, so the grid focus stays on the cell you acted on either way, and the two are each other's undo.
+Activating the cell (`Return`, or a click) restores it too, but also focuses it and closes the grid.
 
 ### Configuration
 
@@ -44,10 +95,33 @@ grid-overview {
 }
 ```
 
-To change the focused column scale, use the `focused-column-scale` setting:
+The focused cell is marked by the focus ring of its window.
+In the grid, the ring keeps its on-screen width instead of shrinking with the cell, so it stays easy to see however many windows the grid shows.
+To make it thicker in the grid, use the `focus-ring-width` setting:
 
 ```kdl
 grid-overview {
-    focused-column-scale 1.08
+    focus-ring-width 8
+}
+```
+
+When the focus moves, the new cell's ring grows in while the old one shrinks back.
+`focus-ring-transition` picks another way, `"slide"` or `"none"`, and the `focus-ring` animation sets the timing:
+
+```kdl
+grid-overview {
+    focus-ring-transition "slide"
+}
+```
+
+To change how minimized cells are marked, use the `minimized-highlight` setting:
+
+```kdl
+grid-overview {
+    minimized-highlight {
+        color "#999999b3"
+        padding 6
+        corner-radius 0
+    }
 }
 ```

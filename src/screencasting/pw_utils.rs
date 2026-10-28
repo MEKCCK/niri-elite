@@ -480,7 +480,7 @@ impl PipeWire {
                                 if inner.node_id.is_none() {
                                     let id = stream.node_id();
                                     inner.node_id = Some(id);
-                                    debug!("sending signal with {id}");
+                                    debug!("delivering node id {id}");
 
                                     let _span = tracy_client::span!("delivering PipeWire node id");
                                     if let Err(err) = node_sink.deliver(id) {

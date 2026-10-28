@@ -37,7 +37,7 @@ use crate::input::pick_window_grab::PickWindowGrab;
 use crate::layout::workspace::WorkspaceId;
 use crate::niri::State;
 use crate::utils::{version, with_toplevel_role};
-use crate::window::Mapped;
+use crate::window::{Mapped, WindowRef};
 
 // If an event stream client fails to read events fast enough that we accumulate more than this
 // number in our buffer, we drop that event stream client.
@@ -72,6 +72,18 @@ struct EventStreamSender {
 }
 
 impl IpcServer {
+    /// The active window of the focused workspace, as last sent over the event stream.
+    #[cfg(test)]
+    pub fn focused_workspace_active_window(&self) -> Option<u64> {
+        let state = self.event_stream_state.borrow();
+        state
+            .workspaces
+            .workspaces
+            .values()
+            .find(|ws| ws.is_focused)
+            .and_then(|ws| ws.active_window_id)
+    }
+
     pub fn start(
         event_loop: &LoopHandle<'static, State>,
         wayland_socket_name: Option<&OsStr>,
@@ -374,7 +386,7 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
         Request::PickColor => {
             let (tx, rx) = async_channel::bounded(1);
             ctx.event_loop.insert_idle(move |state| {
-                state.handle_pick_color(tx);
+                state.handle_pick_color(tx, true);
             });
             let result = rx.recv().await;
             let color = result.map_err(|_| String::from("error getting picked color"))?;
@@ -462,6 +474,23 @@ async fn process(ctx: &ClientCtx, request: Request) -> Reply {
             let state = ctx.event_stream_state.borrow();
             let casts = state.casts.casts.values().cloned().collect();
             Response::Casts(casts)
+        }
+        Request::Agent(action) => {
+            #[cfg(feature = "agent")]
+            {
+                let (tx, rx) = async_channel::bounded(1);
+                ctx.event_loop.insert_idle(move |state| {
+                    state.agent_action(action, tx);
+                });
+                let result = rx.recv().await;
+                return result.map_err(|_| String::from("error running agent action"))?;
+            }
+
+            #[cfg(not(feature = "agent"))]
+            {
+                let _ = action;
+                return Err(String::from("niri was built without the agent feature"));
+            }
         }
     };
 
@@ -559,6 +588,8 @@ fn make_ipc_window(
         is_focused: mapped.is_focused(),
         is_floating: mapped.is_floating(),
         is_urgent: mapped.is_urgent(),
+        is_minimized: mapped.is_minimized(),
+        is_agent: WindowRef::Mapped(mapped).is_agent(),
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
     })
@@ -656,7 +687,7 @@ impl State {
                 break;
             }
 
-            let active_window_id = ws.active_window().map(|win| win.id().get());
+            let active_window_id = ipc_active_window_id(ws);
             if ipc_ws.active_window_id != active_window_id {
                 events.push(Event::WorkspaceActiveWindowChanged {
                     workspace_id: id,
@@ -704,7 +735,7 @@ impl State {
                         is_urgent: ws.is_urgent(),
                         is_active: mon.is_some_and(|mon| mon.active_workspace_idx() == ws_idx),
                         is_focused: Some(id) == focused_ws_id,
-                        active_window_id: ws.active_window().map(|win| win.id().get()),
+                        active_window_id: ipc_active_window_id(ws),
                     }
                 })
                 .collect();
@@ -734,10 +765,11 @@ impl State {
         let mut batch_change_layouts: Vec<(u64, WindowLayout)> = Vec::new();
 
         // While the grid overview is open, report the grid-focused window as focused so that
-        // IPC consumers (e.g. waybar's focused-window title) follow the selection.
+        // IPC consumers (e.g. waybar's focused-window title) follow the selection. The layout
+        // focus is that, or an ignore-grid-overview window that the user clicked.
         let grid_focused_window = (self.niri.keyboard_focus.is_layout()
             && layout.is_grid_overview_open())
-        .then(|| layout.grid_focused_window_id())
+        .then(|| layout.focus().map(|mapped| mapped.window.clone()))
         .flatten();
 
         // Check for window changes.
@@ -796,6 +828,11 @@ impl State {
             let urgent = mapped.is_urgent();
             if urgent != ipc_win.is_urgent {
                 events.push(Event::WindowUrgencyChanged { id, urgent })
+            }
+
+            let is_minimized = mapped.is_minimized();
+            if is_minimized != ipc_win.is_minimized {
+                events.push(Event::WindowMinimizedChanged { id, is_minimized })
             }
         });
 
@@ -1046,4 +1083,24 @@ impl State {
         state.apply(event.clone());
         server.send_event(event);
     }
+}
+
+/// The active window of a workspace for IPC.
+///
+/// While the grid overview is open on it, that's the window in the focused cell, which closing the
+/// grid activates, or an ignore-grid-overview window that the user clicked, so that IPC consumers
+/// that show the active window of the focused workspace (e.g. waybar's window title) follow the
+/// selection, like they do the focused window.
+fn ipc_active_window_id(ws: &crate::layout::workspace::Workspace<Mapped>) -> Option<u64> {
+    if ws.is_grid_overview_open() {
+        if let Some(win) = ws.active_ignored_floating_window_in_grid() {
+            return Some(win.id().get());
+        }
+        if let Some(window) = ws.grid_focused_window_id() {
+            if let Some(mapped) = ws.windows().find(|mapped| mapped.window == window) {
+                return Some(mapped.id().get());
+            }
+        }
+    }
+    ws.active_window().map(|win| win.id().get())
 }

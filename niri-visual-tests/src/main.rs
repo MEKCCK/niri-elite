@@ -4,33 +4,29 @@ extern crate tracing;
 use std::env;
 
 use adw::prelude::{AdwApplicationWindowExt, NavigationPageExt};
-use cases::Args;
 use gtk::prelude::{ApplicationExt, ApplicationExtManual, BoxExt, GtkWindowExt, WidgetExt};
 use gtk::{gdk, gio, glib};
+use niri_visual_tests::cases::gradient_angle::GradientAngle;
+use niri_visual_tests::cases::gradient_area::GradientArea;
+use niri_visual_tests::cases::gradient_oklab::GradientOklab;
+use niri_visual_tests::cases::gradient_oklab_alpha::GradientOklabAlpha;
+use niri_visual_tests::cases::gradient_oklch_alpha::GradientOklchAlpha;
+use niri_visual_tests::cases::gradient_oklch_decreasing::GradientOklchDecreasing;
+use niri_visual_tests::cases::gradient_oklch_increasing::GradientOklchIncreasing;
+use niri_visual_tests::cases::gradient_oklch_longer::GradientOklchLonger;
+use niri_visual_tests::cases::gradient_oklch_shorter::GradientOklchShorter;
+use niri_visual_tests::cases::gradient_srgb::GradientSrgb;
+use niri_visual_tests::cases::gradient_srgb_alpha::GradientSrgbAlpha;
+use niri_visual_tests::cases::gradient_srgblinear::GradientSrgbLinear;
+use niri_visual_tests::cases::gradient_srgblinear_alpha::GradientSrgbLinearAlpha;
+use niri_visual_tests::cases::layout::Layout;
+use niri_visual_tests::cases::tile::Tile;
+use niri_visual_tests::cases::window::Window;
+use niri_visual_tests::cases::{Args, TestCase};
 use smithay_view::SmithayView;
 use tracing_subscriber::EnvFilter;
 
-use crate::cases::gradient_angle::GradientAngle;
-use crate::cases::gradient_area::GradientArea;
-use crate::cases::gradient_oklab::GradientOklab;
-use crate::cases::gradient_oklab_alpha::GradientOklabAlpha;
-use crate::cases::gradient_oklch_alpha::GradientOklchAlpha;
-use crate::cases::gradient_oklch_decreasing::GradientOklchDecreasing;
-use crate::cases::gradient_oklch_increasing::GradientOklchIncreasing;
-use crate::cases::gradient_oklch_longer::GradientOklchLonger;
-use crate::cases::gradient_oklch_shorter::GradientOklchShorter;
-use crate::cases::gradient_srgb::GradientSrgb;
-use crate::cases::gradient_srgb_alpha::GradientSrgbAlpha;
-use crate::cases::gradient_srgblinear::GradientSrgbLinear;
-use crate::cases::gradient_srgblinear_alpha::GradientSrgbLinearAlpha;
-use crate::cases::layout::Layout;
-use crate::cases::tile::Tile;
-use crate::cases::window::Window;
-use crate::cases::TestCase;
-
-mod cases;
 mod smithay_view;
-mod test_window;
 
 fn main() -> glib::ExitCode {
     let directives =
@@ -81,6 +77,7 @@ fn build_ui(app: &adw::Application) {
         anim_adjustment: anim_adjustment.clone(),
     };
 
+    s.add(Layout::grid_move_to_workspace, "Grid - Move to Workspace");
     s.add(Window::freeform, "Freeform Window");
     s.add(Window::fixed_size, "Fixed Size Window");
     s.add(

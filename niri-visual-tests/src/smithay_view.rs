@@ -1,9 +1,8 @@
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
+use niri_visual_tests::cases::{Args, TestCase};
 use smithay::utils::Size;
-
-use crate::cases::{Args, TestCase};
 
 mod imp {
     use std::cell::{Cell, OnceCell, RefCell};

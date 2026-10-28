@@ -322,8 +322,8 @@ fn interactive_move_unfullscreen_to_floating_stops_dnd_scroll() {
             px: 0.0,
             py: 0.0,
         },
-        // This will cause the window to unfullscreen to floating, and should stop the DnD scroll
-        // since we're no longer dragging a tiled window, but rather a floating one.
+        // The window stays fullscreen (and so tiled) through the move. This used to unfullscreen
+        // it to floating, which had to stop the DnD scroll.
         Op::InteractiveMoveUpdate {
             window: 4,
             dx: 0.0,
@@ -375,7 +375,7 @@ fn interactive_move_restore_to_floating_animates_view_offset() {
             px: 100.,
             py: 100.,
         },
-        // Update with a large delta to trigger the unmaximize.
+        // Update with a large delta to lift the window out of the layout.
         Op::InteractiveMoveUpdate {
             window: 1,
             dx: 1000.,

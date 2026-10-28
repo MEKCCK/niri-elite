@@ -297,6 +297,24 @@ impl Animation {
         self.value_at(self.clock.now())
     }
 
+    /// Returns the current velocity, in the units that [`Animation::new()`] takes.
+    ///
+    /// Useful for retargeting an ongoing animation without a jump in speed.
+    pub fn current_velocity(&self) -> f64 {
+        let now = self.clock.now();
+        if self.is_off || self.start_time + self.duration <= now {
+            return 0.;
+        }
+
+        let dt = Duration::from_millis(1);
+        let velocity =
+            (self.value_at(now) - self.value_at(now.saturating_sub(dt))) / dt.as_secs_f64();
+
+        // value_at() runs on the clock time, while Animation::new() takes the velocity in real
+        // time and divides it by the rate.
+        velocity * self.clock.rate()
+    }
+
     /// Returns a value that stops at the target value after first reaching it.
     ///
     /// Best effort; not always exactly precise.
@@ -362,5 +380,31 @@ impl From<niri_config::animations::Curve> for Curve {
                 Curve::CubicBezier(CubicBezier::new(x1, y1, x2, y2))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_velocity_is_in_real_time() {
+        let mut clock = Clock::with_time(Duration::ZERO);
+        let anim = Animation::ease(clock.clone(), 0., 100., 0., 100, Curve::Linear);
+
+        clock.set_unadjusted(Duration::from_millis(50));
+        assert!((anim.current_velocity() - 1000.).abs() < 1e-6);
+
+        clock.set_unadjusted(Duration::from_millis(200));
+        assert_eq!(anim.current_velocity(), 0.);
+
+        // At half rate, 1000 units per second of animation time are 500 per second of real time,
+        // which Animation::new() turns back into 1000.
+        let mut clock = Clock::with_time(Duration::ZERO);
+        clock.set_rate(0.5);
+        let anim = Animation::ease(clock.clone(), 0., 100., 0., 100, Curve::Linear);
+
+        clock.set_unadjusted(Duration::from_millis(100));
+        assert!((anim.current_velocity() - 500.).abs() < 1e-6);
     }
 }

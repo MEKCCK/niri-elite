@@ -1,10 +1,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::env;
-use std::fs;
 use std::io::Read;
 use std::path::{Component, Path};
 use std::rc::Rc;
+use std::{env, fs};
 
 use anyhow::{anyhow, Context};
 use serde::Deserialize;

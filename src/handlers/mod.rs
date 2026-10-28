@@ -94,7 +94,12 @@ impl SeatHandler for State {
         &mut self.niri.seat_state
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, mut image: CursorImageStatus) {
+    fn cursor_image(&mut self, seat: &Seat<Self>, mut image: CursorImageStatus) {
+        // Only the user's seat has a visible cursor.
+        if seat != &self.niri.seat {
+            return;
+        }
+
         // FIXME: this hack should be removable once the screenshot UI is tracked with a
         // PointerFocus properly.
         if self.niri.screenshot_ui.is_open() {
@@ -325,10 +330,14 @@ impl WaylandDndGrabHandler for State {
         serial: Serial,
         type_: dnd::GrabType,
     ) {
-        self.niri.dnd_icon = icon.map(|surface| DndIcon {
-            surface,
-            offset: Point::new(0, 0),
-        });
+        // Drags from other seats (the agent seat) neither show an icon at the user's cursor nor
+        // affect the user's focus when they end.
+        if seat == self.niri.seat {
+            self.niri.dnd_icon = icon.map(|surface| DndIcon {
+                surface,
+                offset: Point::new(0, 0),
+            });
+        }
 
         match type_ {
             dnd::GrabType::Pointer => {
@@ -356,11 +365,15 @@ impl DndGrabHandler for State {
         &mut self,
         target: Option<DndTarget<'_, Self>>,
         validated: bool,
-        _seat: Seat<Self>,
+        seat: Seat<Self>,
         location: Point<f64, Logical>,
     ) {
         let target: Option<&WlSurface> = target.map(DndTarget::into_inner);
         trace!("dnd dropped, target: {target:?}, validated: {validated}");
+
+        if seat != self.niri.seat {
+            return;
+        }
 
         // End DnD before activating a specific window below so that it takes precedence.
         self.niri.on_maybe_dnd_ended();
@@ -387,8 +400,12 @@ impl DndGrabHandler for State {
         }
     }
 
-    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+    fn cancelled(&mut self, seat: Seat<Self>, _location: Point<f64, Logical>) {
         trace!("dnd cancelled");
+
+        if seat != self.niri.seat {
+            return;
+        }
 
         self.niri.on_maybe_dnd_ended();
     }
@@ -527,7 +544,17 @@ impl ForeignToplevelHandler for State {
     fn activate(&mut self, wl_surface: WlSurface) {
         if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
-            self.niri.layout.activate_window(&window);
+            // In the grid overview, activating a window picks its cell: the grid closes and the
+            // window is activated, restored first if it was minimized.
+            if self.niri.layout.confirm_grid_selection_for_window(&window) {
+                self.maybe_warp_cursor_to_focus();
+            // Activating a minimized window restores it first. This makes taskbars that only know
+            // how to send activate work with minimized windows.
+            } else if self.niri.layout.is_window_minimized(&window) {
+                self.unminimize_window(&window, true);
+            } else {
+                self.niri.layout.activate_window(&window);
+            }
             self.niri.layer_shell_on_demand_focus = None;
             self.niri.queue_redraw_all();
         }
@@ -579,6 +606,20 @@ impl ForeignToplevelHandler for State {
         if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
             let window = mapped.window.clone();
             self.niri.layout.set_maximized(&window, false);
+        }
+    }
+
+    fn set_minimized(&mut self, wl_surface: WlSurface) {
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+            let window = mapped.window.clone();
+            self.minimize_window(&window);
+        }
+    }
+
+    fn unset_minimized(&mut self, wl_surface: WlSurface) {
+        if let Some((mapped, _)) = self.niri.layout.find_window_and_output(&wl_surface) {
+            let window = mapped.window.clone();
+            self.unminimize_window(&window, true);
         }
     }
 }
@@ -782,9 +823,18 @@ impl XdgActivationHandler for State {
         token_data: XdgActivationTokenData,
         surface: WlSurface,
     ) {
+        // Agent apps never take the user's focus.
+        #[cfg(feature = "agent")]
+        if crate::agent::is_agent_surface(&surface) {
+            return;
+        }
+
         if token_data.timestamp.elapsed() < XDG_ACTIVATION_TOKEN_TIMEOUT {
             if let Some((mapped, _)) = self.niri.layout.find_window_and_output_mut(&surface) {
                 let window = mapped.window.clone();
+                // Upstream's on-xdg-activate rule, with the fork's activation path: a
+                // minimized window is restored first (without activating, the activation below
+                // has its own semantics), and activation goes through the grid-aware helper.
                 match mapped.rules().on_xdg_activate {
                     Some(niri_config::OnXdgActivate::Ignore) => {}
                     Some(niri_config::OnXdgActivate::SetUrgent) => {
@@ -792,6 +842,9 @@ impl XdgActivationHandler for State {
                         self.niri.queue_redraw_all();
                     }
                     Some(niri_config::OnXdgActivate::Focus) => {
+                        if self.niri.layout.is_window_minimized(&window) {
+                            self.niri.layout.unminimize_window(&window, false);
+                        }
                         self.niri.layout.activate_window_from_activation(&window);
                         self.niri.layer_shell_on_demand_focus = None;
                         self.niri.queue_redraw_all();
@@ -801,6 +854,9 @@ impl XdgActivationHandler for State {
                             mapped.set_urgent(true);
                             self.niri.queue_redraw_all();
                         } else {
+                            if self.niri.layout.is_window_minimized(&window) {
+                                self.niri.layout.unminimize_window(&window, false);
+                            }
                             self.niri.layout.activate_window_from_activation(&window);
                             self.niri.layer_shell_on_demand_focus = None;
                             self.niri.queue_redraw_all();

@@ -68,6 +68,9 @@ input {
     // Focus windows and outputs automatically when moving the mouse into them.
     // Setting max-scroll-amount="0%" makes it work only on windows already fully on screen.
     // focus-follows-mouse max-scroll-amount="0%"
+
+    // Uncomment this to keep the mouse on the monitor of a focused fullscreen window.
+    // confine-mouse-to-fullscreen
 }
 
 // Gesture configuration.
@@ -364,16 +367,39 @@ grid-overview {
     // separately with: padding { left 80; right 80; top 80; bottom 80; }
     padding 80
 
-    // Minimum scale for grid cells.
+    // The grid shows every window at one scale, so their sizes compare like on the
+    // workspace. This is the smallest scale it goes down to; with more windows than fit
+    // at it, they overlap instead.
     min-scale 0.08
 
-    // Scale the focused column relative to its cell. Ranges from 1 to 2.
-    focused-column-scale 1.04
+    // The focus ring marks the focused cell and keeps its on-screen width in the grid.
+    // Make it twice as thick as the normal focus ring there, so it stands out on small cells.
+    focus-ring-width 8
+
+    // How the focus ring moves between cells: "grow" (the default), "slide" or "none".
+    // focus-ring-transition "slide"
+
+    // Uncomment to move the focus to the cell under the pointer as the mouse moves.
+    // focus-follows-mouse min-distance=8
 
     // When true (the default), tapping the Mod key alone (press and release without
     // pressing any other key) toggles the grid overview, even without an explicit binding.
     // Set to false to disable this built-in behavior.
     // default-mod-action false
+
+    // Frame drawn around the cells of minimized windows, so you can tell them apart from
+    // the normal ones. Same knobs as the recent-windows highlight.
+    // Uncomment "off" to remove it.
+    minimized-highlight {
+        // off
+        color "#999999b3"
+        urgent-color "#ff9999"
+        padding 6
+        // The frame's corners follow the window's rounded corners; set a radius to override.
+        // corner-radius 0
+        // How dark minimized windows are drawn, from 0 (not at all) to 1 (black).
+        dim 0.4
+    }
 }
 
 // Fullscreen magnifier settings.
@@ -385,10 +411,32 @@ magnifier {
     zoom-factor 2
 
     // Whether the magnified view follows the cursor.
-    track-cursor true
+    // When false, the view stays where it was turned on. Move it with the binds below,
+    // or drag with the middle mouse button.
+    track-cursor false
 
     // Whether the cursor itself is scaled along with the magnified content.
     scale-cursor true
+
+    // How far one move-magnifier step moves the view, as a fraction of the visible area.
+    move-step 0.05
+
+    // Binds that only work while the magnifier is on. They take precedence over
+    // the regular binds, so here the focus keys move the magnified view instead.
+    // Only move-magnifier-* and toggle-magnifier are allowed here.
+    binds {
+        Mod+Left  { move-magnifier-left; }
+        Mod+Down  { move-magnifier-down; }
+        Mod+Up    { move-magnifier-up; }
+        Mod+Right { move-magnifier-right; }
+        Mod+H     { move-magnifier-left; }
+        Mod+J     { move-magnifier-down; }
+        Mod+K     { move-magnifier-up; }
+        Mod+L     { move-magnifier-right; }
+
+        // Applications don't get Escape while the magnifier is on.
+        Escape { toggle-magnifier; }
+    }
 }
 
 // Animation settings.
@@ -498,12 +546,7 @@ binds {
     // Open/close the Overview: a zoomed-out view of workspaces and windows.
     // You can also move the mouse into the top-left hot corner,
     // or do a four-finger swipe up on a touchpad.
-    //
-    // This is a release bind.
-    // Press and release Mod by itself to trigger it.
-    Mod {
-        release { toggle-overview; }
-    }
+    Mod+O repeat=false { toggle-overview; }
 
     // You can also bind both press and release actions like so.
     // If the press action fires, the release action
@@ -514,6 +557,15 @@ binds {
     //     release { spawn "notify-send" "Disable push-to-talk!"; }
     // }
 
+    // Tap Mod (press and release without pressing any other key in between)
+    // to toggle the grid overview: a view of all windows on the current workspaces.
+    //
+    // This is a release bind.
+    // Press and release Mod by itself to trigger it.
+    Mod {
+        release { toggle-grid-overview; }
+    }
+
     // Toggle the fullscreen magnifier on or off.
     Mod+Shift+Z repeat=false { toggle-magnifier; }
 
@@ -523,6 +575,7 @@ binds {
 
     Mod+Q repeat=false { close-window; }
     Alt+F4 repeat=false { close-window; }
+    Mod+N repeat=false { minimize-window; }
 
     Mod+Left  { focus-column-left; }
     Mod+Down  { focus-window-down; }

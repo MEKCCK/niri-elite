@@ -43,6 +43,7 @@ use niri_config::{
 };
 use niri_ipc::{ColumnDisplay, PositionChange, SizeChange, WindowLayout};
 use scrolling::{Column, ColumnWidth};
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
@@ -120,6 +121,7 @@ niri_render_elements! {
         Wayland = WaylandSurfaceRenderElement<R>,
         SolidColor = SolidColorRenderElement,
         BackgroundEffect = BackgroundEffectElement,
+        AgentCursor = MemoryRenderBufferRenderElement<R>,
     }
 }
 
@@ -251,6 +253,17 @@ pub trait LayoutElement {
 
     fn is_urgent(&self) -> bool;
 
+    fn is_minimized(&self) -> bool;
+    fn set_minimized(&mut self, minimized: bool);
+
+    /// Sets the xdg-toplevel suspended state hint on the window.
+    ///
+    /// Minimized windows are suspended so that clients stop rendering; the hint is lifted while
+    /// the grid overview shows their live preview.
+    fn set_suspended(&mut self, suspended: bool) {
+        let _ = suspended;
+    }
+
     fn configure_intent(&self) -> ConfigureIntent;
     fn send_pending_configure(&mut self);
 
@@ -374,8 +387,13 @@ pub struct Layout<W: LayoutElement> {
     /// This is a boolean flag that controls things like where input goes to. The actual animation
     /// is controlled by overview_progress.
     overview_open: bool,
+    /// Counts the times the grid overview was opened, so that input state tied to one grid
+    /// session can tell a new one apart.
+    grid_overview_open_count: u64,
     /// The overview zoom progress.
     overview_progress: Option<OverviewProgress>,
+    /// Ongoing touchpad gesture opening or closing the grid overview.
+    grid_gesture: Option<OverviewGesture>,
     /// Configurable properties of the layout.
     options: Rc<Options>,
 }
@@ -444,6 +462,11 @@ struct InteractiveMoveData<W: LayoutElement> {
     pub(self) width: ColumnWidth,
     /// Whether the window column was full-width.
     pub(self) is_full_width: bool,
+    /// Whether the window column was maximized.
+    ///
+    /// A fullscreen window can be maximized underneath, and only its column knows that, so it
+    /// has to be carried over to the column the window is dropped into.
+    pub(self) is_maximized: bool,
     /// Whether the window targets the floating layout.
     pub(self) is_floating: bool,
     /// Pointer location within the visual window geometry as ratio from geometry size.
@@ -716,6 +739,14 @@ impl OverviewProgress {
     fn is_animation(&self) -> bool {
         matches!(self, OverviewProgress::Animation(_))
     }
+
+    /// Whether it's on its way somewhere, by an animation or by a gesture.
+    fn is_moving(&self) -> bool {
+        matches!(
+            self,
+            OverviewProgress::Animation(_) | OverviewProgress::Gesture(_)
+        )
+    }
 }
 
 impl RenderLayer {
@@ -743,7 +774,9 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
+            grid_overview_open_count: 0,
             overview_progress: None,
+            grid_gesture: None,
             options: Rc::new(options),
         }
     }
@@ -768,7 +801,9 @@ impl<W: LayoutElement> Layout<W> {
             clock,
             update_render_elements_time: Duration::ZERO,
             overview_open: false,
+            grid_overview_open_count: 0,
             overview_progress: None,
+            grid_gesture: None,
             options: opts,
         }
     }
@@ -860,6 +895,12 @@ impl<W: LayoutElement> Layout<W> {
                 );
                 monitor.overview_open = self.overview_open;
                 monitor.set_overview_progress(self.overview_progress.as_ref());
+                // With grid-all-monitors, a monitor connected while the grid is open joins it.
+                if self.options.grid_overview.grid_all_monitors
+                    && monitors.iter().any(|mon| mon.is_grid_overview_open())
+                {
+                    monitor.set_grid_overview_open(true);
+                }
                 monitors.push(monitor);
 
                 MonitorSet::Normal {
@@ -975,7 +1016,7 @@ impl<W: LayoutElement> Layout<W> {
             panic!()
         };
 
-        monitors[monitor_idx].add_column(workspace_idx, column, activate, None);
+        monitors[monitor_idx].add_column(workspace_idx, column, activate, None, false);
 
         if activate {
             *active_monitor_idx = monitor_idx;
@@ -1224,17 +1265,16 @@ impl<W: LayoutElement> Layout<W> {
                                 ws.grid_window_close_preserves_move_animations(window);
                             let window_visual_snapshots =
                                 ws.grid_window_visual_snapshots_for_closing_window(window);
-                            if ws.is_grid_overview_open()
-                                && ws.grid_focused_window_id().as_ref() == Some(window)
-                            {
-                                ws.activate_window_from_grid(window);
-                            }
+                            let grid_focus_successor = ws.prepare_grid_focus_for_removal(window);
 
                             let removed = ws.remove_tile(window, transaction);
                             ws.on_window_closed_in_grid(
                                 window_visual_snapshots,
                                 !preserve_move_animations,
                             );
+                            if let Some(id) = grid_focus_successor {
+                                ws.set_grid_focus_for_window(&id);
+                            }
 
                             // Clean up empty workspaces that are not active and not last.
                             if !ws.has_windows_or_name()
@@ -1272,17 +1312,16 @@ impl<W: LayoutElement> Layout<W> {
                             ws.grid_window_close_preserves_move_animations(window);
                         let window_visual_snapshots =
                             ws.grid_window_visual_snapshots_for_closing_window(window);
-                        if ws.is_grid_overview_open()
-                            && ws.grid_focused_window_id().as_ref() == Some(window)
-                        {
-                            ws.activate_window_from_grid(window);
-                        }
+                        let grid_focus_successor = ws.prepare_grid_focus_for_removal(window);
 
                         let removed = ws.remove_tile(window, transaction);
                         ws.on_window_closed_in_grid(
                             window_visual_snapshots,
                             !preserve_move_animations,
                         );
+                        if let Some(id) = grid_focus_successor {
+                            ws.set_grid_focus_for_window(&id);
+                        }
 
                         // Clean up empty workspaces.
                         if !ws.has_windows_or_name() {
@@ -1645,6 +1684,12 @@ impl<W: LayoutElement> Layout<W> {
                 if ws.activate_window(window) {
                     *active_monitor_idx = monitor_idx;
 
+                    // Keep the grid focus on the active window, otherwise the grid keeps
+                    // highlighting, and Return confirms, some other window.
+                    if ws.is_grid_overview_open() {
+                        ws.set_grid_focus_for_window(window);
+                    }
+
                     // If currently in the middle of a vertical swipe between the target workspace
                     // and some other, don't switch the workspace.
                     match &mon.workspace_switch {
@@ -1921,7 +1966,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_left(&mut self) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_left();
                 }
@@ -1941,7 +1986,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_right(&mut self) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_right();
                 }
@@ -1961,7 +2006,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_column_to_first(&mut self) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_column_to_first();
                 }
@@ -1981,7 +2026,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_column_to_last(&mut self) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_column_to_last();
                 }
@@ -2000,12 +2045,14 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_left_or_to_output(&mut self, output: &Output) -> bool {
-        if let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_overview_action()
-        {
+        if let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_move_action() {
             let moved_within = self
                 .active_workspace_mut()
                 .is_some_and(|workspace| workspace.move_left());
-            if !moved_within {
+            // A minimized cell is only reordered within its workspace: moving it to another output
+            // would act on the active column, which belongs to a different window.
+            let to_output = !moved_within && !self.is_window_minimized(&focus_id);
+            if to_output {
                 self.move_column_to_output_unchecked(output, None, true);
             }
             self.refresh_grid_workspace_after_action(
@@ -2014,7 +2061,7 @@ impl<W: LayoutElement> Layout<W> {
                 true,
                 window_visual_snapshots,
             );
-            return !moved_within;
+            return to_output;
         }
         if self.grid_move_guard() {
             return false;
@@ -2030,12 +2077,14 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_right_or_to_output(&mut self, output: &Output) -> bool {
-        if let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_overview_action()
-        {
+        if let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_move_action() {
             let moved_within = self
                 .active_workspace_mut()
                 .is_some_and(|workspace| workspace.move_right());
-            if !moved_within {
+            // A minimized cell is only reordered within its workspace: moving it to another output
+            // would act on the active column, which belongs to a different window.
+            let to_output = !moved_within && !self.is_window_minimized(&focus_id);
+            if to_output {
                 self.move_column_to_output_unchecked(output, None, true);
             }
             self.refresh_grid_workspace_after_action(
@@ -2044,7 +2093,7 @@ impl<W: LayoutElement> Layout<W> {
                 true,
                 window_visual_snapshots,
             );
-            return !moved_within;
+            return to_output;
         }
         if self.grid_move_guard() {
             return false;
@@ -2061,7 +2110,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_column_to_index(&mut self, index: usize) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_column_to_index(index);
                 }
@@ -2081,7 +2130,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_down(&mut self) {
         if self
-            .run_active_grid_overview_action_preserving_move_animations(|this| {
+            .run_active_grid_move_action_preserving_move_animations(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_down();
                 }
@@ -2101,7 +2150,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn move_up(&mut self) {
         if self
-            .run_active_grid_overview_action_preserving_move_animations(|this| {
+            .run_active_grid_move_action_preserving_move_animations(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.move_up();
                 }
@@ -2140,6 +2189,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn consume_or_expel_window_left(&mut self, window: Option<&W::Id>) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if window.is_none()
             && self
                 .run_active_grid_overview_action(|this| {
@@ -2177,6 +2232,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn consume_or_expel_window_right(&mut self, window: Option<&W::Id>) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if window.is_none()
             && self
                 .run_active_grid_overview_action(|this| {
@@ -2221,6 +2282,11 @@ impl<W: LayoutElement> Layout<W> {
             workspace.grid_navigate(GridDirection::Left);
             return;
         }
+        if workspace.is_grid_overview_animation() {
+            workspace.focus_left();
+            workspace.sync_grid_focus_to_active_window();
+            return;
+        }
         workspace.focus_left();
     }
 
@@ -2232,6 +2298,11 @@ impl<W: LayoutElement> Layout<W> {
             workspace.grid_navigate(GridDirection::Right);
             return;
         }
+        if workspace.is_grid_overview_animation() {
+            workspace.focus_right();
+            workspace.sync_grid_focus_to_active_window();
+            return;
+        }
         workspace.focus_right();
     }
 
@@ -2239,6 +2310,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_column(0);
+            return;
+        }
         workspace.focus_column_first();
     }
 
@@ -2246,6 +2321,11 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            let count = workspace.scrolling().columns().count();
+            workspace.grid_focus_column(count.saturating_sub(1));
+            return;
+        }
         workspace.focus_column_last();
     }
 
@@ -2253,6 +2333,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_navigate(GridDirection::Right) {
+                workspace.grid_focus_edge_cell(false);
+            }
+            return;
+        }
         workspace.focus_column_right_or_first();
     }
 
@@ -2260,6 +2346,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_navigate(GridDirection::Left) {
+                workspace.grid_focus_edge_cell(true);
+            }
+            return;
+        }
         workspace.focus_column_left_or_last();
     }
 
@@ -2267,14 +2359,31 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            let count = workspace.scrolling().columns().count();
+            workspace.grid_focus_column(index.saturating_sub(1).min(count.saturating_sub(1)));
+            return;
+        }
         workspace.focus_column(index);
     }
 
     pub fn focus_window_up_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
             if workspace.is_grid_overview_open() {
-                workspace.grid_navigate(GridDirection::Up);
-                return false;
+                if workspace.grid_navigate(GridDirection::Up) {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
+            }
+            if workspace.is_grid_overview_animation() {
+                let moved = workspace.focus_up();
+                workspace.sync_grid_focus_to_active_window();
+                if moved {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
             }
             if workspace.focus_up() {
                 return false;
@@ -2288,8 +2397,20 @@ impl<W: LayoutElement> Layout<W> {
     pub fn focus_window_down_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
             if workspace.is_grid_overview_open() {
-                workspace.grid_navigate(GridDirection::Down);
-                return false;
+                if workspace.grid_navigate(GridDirection::Down) {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
+            }
+            if workspace.is_grid_overview_animation() {
+                let moved = workspace.focus_down();
+                workspace.sync_grid_focus_to_active_window();
+                if moved {
+                    return false;
+                }
+                self.focus_output(output);
+                return true;
             }
             if workspace.focus_down() {
                 return false;
@@ -2302,7 +2423,12 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn focus_column_left_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_left() {
+            let moved = if workspace.is_grid_overview_open() {
+                workspace.grid_navigate(GridDirection::Left)
+            } else {
+                workspace.focus_left()
+            };
+            if moved {
                 return false;
             }
         }
@@ -2313,7 +2439,12 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn focus_column_right_or_output(&mut self, output: &Output) -> bool {
         if let Some(workspace) = self.active_workspace_mut() {
-            if workspace.focus_right() {
+            let moved = if workspace.is_grid_overview_open() {
+                workspace.grid_navigate(GridDirection::Right)
+            } else {
+                workspace.focus_right()
+            };
+            if moved {
                 return false;
             }
         }
@@ -2326,6 +2457,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|_, _| usize::from(index).saturating_sub(1));
+            return;
+        }
         workspace.focus_window_in_column(index);
     }
 
@@ -2335,6 +2470,11 @@ impl<W: LayoutElement> Layout<W> {
         };
         if workspace.is_grid_overview_open() {
             workspace.grid_navigate(GridDirection::Down);
+            return;
+        }
+        if workspace.is_grid_overview_animation() {
+            workspace.focus_down();
+            workspace.sync_grid_focus_to_active_window();
             return;
         }
         workspace.focus_down();
@@ -2348,6 +2488,11 @@ impl<W: LayoutElement> Layout<W> {
             workspace.grid_navigate(GridDirection::Up);
             return;
         }
+        if workspace.is_grid_overview_animation() {
+            workspace.focus_up();
+            workspace.sync_grid_focus_to_active_window();
+            return;
+        }
         workspace.focus_up();
     }
 
@@ -2355,6 +2500,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|count, cur| (cur + 1).min(count - 1)) {
+                workspace.grid_navigate(GridDirection::Left);
+            }
+            return;
+        }
         workspace.focus_down_or_left();
     }
 
@@ -2362,6 +2513,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|count, cur| (cur + 1).min(count - 1)) {
+                workspace.grid_navigate(GridDirection::Right);
+            }
+            return;
+        }
         workspace.focus_down_or_right();
     }
 
@@ -2369,6 +2526,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|_, cur| cur.saturating_sub(1)) {
+                workspace.grid_navigate(GridDirection::Left);
+            }
+            return;
+        }
         workspace.focus_up_or_left();
     }
 
@@ -2376,6 +2539,12 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            if !workspace.grid_focus_tile_in_column(|_, cur| cur.saturating_sub(1)) {
+                workspace.grid_navigate(GridDirection::Right);
+            }
+            return;
+        }
         workspace.focus_up_or_right();
     }
 
@@ -2397,6 +2566,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|_, _| 0);
+            return;
+        }
         workspace.focus_window_top();
     }
 
@@ -2404,6 +2577,10 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace.grid_focus_tile_in_column(|count, _| count - 1);
+            return;
+        }
         workspace.focus_window_bottom();
     }
 
@@ -2411,6 +2588,11 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace
+                .grid_focus_tile_in_column(|count, cur| if cur + 1 < count { cur + 1 } else { 0 });
+            return;
+        }
         workspace.focus_window_down_or_top();
     }
 
@@ -2418,23 +2600,27 @@ impl<W: LayoutElement> Layout<W> {
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
+        if workspace.is_grid_overview_open() {
+            workspace
+                .grid_focus_tile_in_column(|count, cur| if cur > 0 { cur - 1 } else { count - 1 });
+            return;
+        }
         workspace.focus_window_up_or_bottom();
     }
 
     pub fn move_to_workspace_up(&mut self, focus: bool) {
-        if self
-            .run_active_grid_overview_action(|this| {
-                if let Some(monitor) = this.active_monitor() {
-                    let activate = if focus {
-                        ActivateWindow::Smart
-                    } else {
-                        ActivateWindow::No
-                    };
-                    monitor.move_to_workspace_up(activate);
-                }
-            })
-            .is_some()
-        {
+        let activate = if focus {
+            ActivateWindow::Smart
+        } else {
+            ActivateWindow::No
+        };
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| mon.active_workspace_idx.saturating_sub(1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_to_workspace_up(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2452,19 +2638,18 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_to_workspace_down(&mut self, focus: bool) {
-        if self
-            .run_active_grid_overview_action(|this| {
-                if let Some(monitor) = this.active_monitor() {
-                    let activate = if focus {
-                        ActivateWindow::Smart
-                    } else {
-                        ActivateWindow::No
-                    };
-                    monitor.move_to_workspace_down(activate);
-                }
-            })
-            .is_some()
-        {
+        let activate = if focus {
+            ActivateWindow::Smart
+        } else {
+            ActivateWindow::No
+        };
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| (mon.active_workspace_idx + 1).min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_to_workspace_down(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2488,17 +2673,19 @@ impl<W: LayoutElement> Layout<W> {
         activate: ActivateWindow,
     ) {
         if window.is_none()
-            && self
-                .run_active_grid_overview_action(|this| {
-                    if let Some(monitor) = this.active_monitor() {
-                        monitor.move_to_workspace(None, idx, activate);
-                    }
-                })
-                .is_some()
+            && self.run_active_grid_overview_action_if_moved(
+                |mon| idx.min(mon.workspaces.len() - 1),
+                |this| {
+                    this.active_monitor()
+                        .is_some_and(|monitor| monitor.move_to_workspace(None, idx, activate))
+                },
+            )
         {
             return;
         }
-        if self.grid_move_guard() {
+        // A window named explicitly (by id) is moved even with the grid open; only moves of the
+        // grid focus go through the grid action above.
+        if window.is_none() && self.grid_move_guard() {
             return;
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
@@ -2506,6 +2693,7 @@ impl<W: LayoutElement> Layout<W> {
                 return;
             }
         }
+        let source_grid = window.and_then(|window| self.grid_snapshot_for_window(window));
 
         let monitor = if let Some(window) = window {
             match &mut self.monitor_set {
@@ -2524,17 +2712,38 @@ impl<W: LayoutElement> Layout<W> {
             monitor
         };
         monitor.move_to_workspace(window, idx, activate);
+
+        if let Some((ws_id, focus, snapshots)) = source_grid {
+            self.refresh_grid_workspace_after_action(ws_id, focus, true, snapshots);
+        }
+    }
+
+    /// For a window about to leave a workspace with an open grid, that workspace and what to
+    /// refresh its grid with afterwards: the grid focus to keep (unless it's the window) and the
+    /// visuals to animate from.
+    fn grid_snapshot_for_window(
+        &self,
+        window: &W::Id,
+    ) -> Option<(WorkspaceId, Option<W::Id>, Vec<GridWindowVisual<W>>)> {
+        let ws = self
+            .workspaces()
+            .map(|(_, _, ws)| ws)
+            .find(|ws| ws.has_window(window))?;
+        if !ws.is_grid_overview_open() {
+            return None;
+        }
+        let focus = ws.grid_focused_window_id().filter(|focus| focus != window);
+        Some((ws.id(), focus, ws.grid_window_visual_snapshots()))
     }
 
     pub fn move_column_to_workspace_up(&mut self, activate: bool) {
-        if self
-            .run_active_grid_overview_action(|this| {
-                if let Some(monitor) = this.active_monitor() {
-                    monitor.move_column_to_workspace_up(activate);
-                }
-            })
-            .is_some()
-        {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| mon.active_workspace_idx.saturating_sub(1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace_up(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2547,14 +2756,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_workspace_down(&mut self, activate: bool) {
-        if self
-            .run_active_grid_overview_action(|this| {
-                if let Some(monitor) = this.active_monitor() {
-                    monitor.move_column_to_workspace_down(activate);
-                }
-            })
-            .is_some()
-        {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| (mon.active_workspace_idx + 1).min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace_down(activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2567,14 +2775,13 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn move_column_to_workspace(&mut self, idx: usize, activate: bool) {
-        if self
-            .run_active_grid_overview_action(|this| {
-                if let Some(monitor) = this.active_monitor() {
-                    monitor.move_column_to_workspace(idx, activate);
-                }
-            })
-            .is_some()
-        {
+        if self.run_active_grid_overview_action_if_moved(
+            |mon| idx.min(mon.workspaces.len() - 1),
+            |this| {
+                this.active_monitor()
+                    .is_some_and(|monitor| monitor.move_column_to_workspace(idx, activate))
+            },
+        ) {
             return;
         }
         if self.grid_move_guard() {
@@ -2673,7 +2880,7 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn swap_window_in_direction(&mut self, direction: ScrollDirection) {
         if self
-            .run_active_grid_overview_action(|this| {
+            .run_active_grid_move_action(|this| {
                 if let Some(workspace) = this.active_workspace_mut() {
                     workspace.swap_window_in_direction(direction);
                 }
@@ -2735,6 +2942,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn center_window(&mut self, id: Option<&W::Id>) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = id {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if id.is_none() || id == Some(move_.tile.window().id()) {
                 return;
@@ -2770,9 +2983,20 @@ impl<W: LayoutElement> Layout<W> {
             }
 
             if let Some(id) = self.grid_focused_window_id() {
-                return self
+                // While a cell is being dragged, the grid focus is the dragged window, which is
+                // held by the interactive move rather than by any workspace.
+                if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+                    if move_.tile.window().id() == &id {
+                        return Some(move_.tile.window());
+                    }
+                }
+
+                if let Some(win) = self
                     .workspaces()
-                    .find_map(|(_, _, ws)| ws.windows().find(|w| *w.id() == id));
+                    .find_map(|(_, _, ws)| ws.windows().find(|w| *w.id() == id))
+                {
+                    return Some(win);
+                }
             }
         }
         self.focus_with_output().map(|(win, _out)| win)
@@ -2895,7 +3119,13 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 InteractiveMoveState::Moving(move_) => {
                     assert_eq!(self.clock, move_.tile.clock);
-                    assert!(move_.tile.window().pending_sizing_mode().is_normal());
+                    if move_.is_floating {
+                        assert!(
+                            move_.tile.window().pending_sizing_mode().is_normal(),
+                            "interactively moved floating tile cannot be fullscreen or maximized"
+                        );
+                        assert!(!move_.is_maximized);
+                    }
 
                     move_.tile.verify_invariants();
 
@@ -2951,6 +3181,16 @@ impl<W: LayoutElement> Layout<W> {
         let mut seen_workspace_id = HashSet::new();
         let mut seen_workspace_name = Vec::<String>::new();
 
+        if let MonitorSet::Normal { monitors, .. } = &self.monitor_set {
+            if self.grid_all_monitors() {
+                let open = monitors[0].is_grid_overview_open();
+                assert!(
+                    monitors.iter().all(|mon| mon.is_grid_overview_open() == open),
+                    "with grid-all-monitors, the grid overview must be open on all monitors or none"
+                );
+            }
+        }
+
         let (monitors, &primary_idx, &active_monitor_idx) = match &self.monitor_set {
             MonitorSet::Normal {
                 monitors,
@@ -2962,6 +3202,11 @@ impl<W: LayoutElement> Layout<W> {
                     assert!(
                         workspace.has_windows_or_name(),
                         "with no outputs there cannot be empty unnamed workspaces"
+                    );
+
+                    assert!(
+                        !workspace.is_grid_overview_open(),
+                        "with no outputs there cannot be an open grid overview"
                     );
 
                     assert_eq!(self.clock, workspace.clock);
@@ -3335,11 +3580,6 @@ impl<W: LayoutElement> Layout<W> {
         let Some(InteractiveMoveState::Moving(move_)) = self.interactive_move.take() else {
             unreachable!()
         };
-        warn!(
-            is_floating = move_.is_floating,
-            pointer = ?move_.pointer_pos_within_output,
-            "Layout::update_insert_hint moving"
-        );
         if output.is_some_and(|out| &move_.output != out) {
             self.interactive_move = Some(InteractiveMoveState::Moving(move_));
             return;
@@ -3361,10 +3601,8 @@ impl<W: LayoutElement> Layout<W> {
                     } else if let Some((position, area)) =
                         ws.grid_insert_position_and_hint_area(pos_within_workspace)
                     {
-                        warn!(?position, ?area, "Layout::update_insert_hint grid hint");
                         (position, Some(area))
                     } else if ws.is_grid_overview_open() {
-                        warn!("Layout::update_insert_hint no grid hint while grid open");
                         self.interactive_move = Some(InteractiveMoveState::Moving(move_));
                         return;
                     } else {
@@ -3475,8 +3713,15 @@ impl<W: LayoutElement> Layout<W> {
 
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
+                // Turning grid-all-monitors on while the grid is open on some monitor opens it on
+                // the others too.
+                let all_monitors = options.grid_overview.grid_all_monitors;
+                let any_open = monitors.iter().any(|mon| mon.is_grid_overview_open());
                 for mon in monitors {
                     mon.update_config(options.clone());
+                    if all_monitors && any_open && !mon.is_grid_overview_open() {
+                        mon.set_grid_overview_open(true);
+                    }
                 }
             }
             MonitorSet::NoOutputs { workspaces } => {
@@ -3490,6 +3735,11 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_width(&mut self, forwards: bool) {
+        // In the grid overview, these act on the grid focus, which is the grabbed window while it
+        // is being moved; it isn't in any workspace then.
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -3497,6 +3747,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_window_width(&mut self, window: Option<&W::Id>, forwards: bool) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3520,6 +3776,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_window_height(&mut self, window: Option<&W::Id>, forwards: bool) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3543,6 +3805,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_full_width(&mut self) {
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
@@ -3550,13 +3815,26 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_column_width(&mut self, change: SizeChange) {
+        if self.is_grid_overview_open() && self.interactive_move_is_moving() {
+            return;
+        }
         let Some(workspace) = self.active_workspace_mut() else {
             return;
         };
         workspace.set_column_width(change);
     }
 
+    fn interactive_move_is_moving(&self) -> bool {
+        matches!(self.interactive_move, Some(InteractiveMoveState::Moving(_)))
+    }
+
     pub fn set_window_width(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3580,6 +3858,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_window_height(&mut self, window: Option<&W::Id>, change: SizeChange) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3603,6 +3887,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn reset_window_height(&mut self, window: Option<&W::Id>) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 return;
@@ -3633,34 +3923,26 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn toggle_window_floating(&mut self, window: Option<&W::Id>) {
-        warn!(
-            is_grid_open = self.grid_move_guard(),
-            has_interactive_move = self.interactive_move.is_some(),
-            "Layout::toggle_window_floating enter"
-        );
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if self.grid_move_guard() {
             let moving_target = self.interactive_move.as_ref().is_some_and(|move_| {
                 move_.moving().is_some_and(|move_| {
                     window.is_none() || window == Some(move_.tile.window().id())
                 })
             });
-            warn!(moving_target, "Layout::toggle_window_floating grid guard");
             if !moving_target {
+                self.run_grid_window_action(window, |ws, window| ws.toggle_window_floating(window));
                 return;
             }
         }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
-                warn!(
-                    before_is_floating = move_.is_floating,
-                    "Layout::toggle_window_floating moving target"
-                );
                 move_.is_floating = !move_.is_floating;
-                warn!(
-                    after_is_floating = move_.is_floating,
-                    "Layout::toggle_window_floating toggled moving target"
-                );
-
                 // When going to floating, restore the floating window size.
                 if move_.is_floating {
                     let floating_size = move_.tile.floating_window_size;
@@ -3720,6 +4002,12 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_window_floating(&mut self, window: Option<&W::Id>, floating: bool) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = window {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if window.is_none() || window == Some(move_.tile.window().id()) {
                 if move_.is_floating != floating {
@@ -3727,6 +4015,12 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 return;
             }
+        }
+        if self.grid_move_guard() {
+            self.run_grid_window_action(window, |ws, window| {
+                ws.set_window_floating(window, floating)
+            });
+            return;
         }
 
         let workspace = if let Some(window) = window {
@@ -3773,6 +4067,12 @@ impl<W: LayoutElement> Layout<W> {
         y: PositionChange,
         animate: bool,
     ) {
+        // Layout operations are no-ops for minimized windows.
+        if let Some(id) = id {
+            if self.is_window_minimized(id) {
+                return;
+            }
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &mut self.interactive_move {
             if id.is_none() || id == Some(move_.tile.window().id()) {
                 return;
@@ -3829,7 +4129,11 @@ impl<W: LayoutElement> Layout<W> {
             }
         }
 
+        let source_grid = window.and_then(|window| self.grid_snapshot_for_window(window));
         self.move_to_output_unchecked(window, output, target_ws_idx, activate);
+        if let Some((ws_id, focus, snapshots)) = source_grid {
+            self.refresh_grid_workspace_after_action(ws_id, focus, true, snapshots);
+        }
     }
 
     fn move_to_output_unchecked(
@@ -3923,6 +4227,11 @@ impl<W: LayoutElement> Layout<W> {
                 removed.is_floating,
                 None,
             );
+            // Give the window a cell in the target grid right away, rather than on its next
+            // commit, and move the grid focus to it when it became active.
+            if let Some(ws) = mon.workspaces.iter_mut().find(|ws| ws.id() == ws_id) {
+                ws.on_window_added_in_grid(&window);
+            }
             if activate.map_smart(|| false) {
                 *active_monitor_idx = new_idx;
             }
@@ -4067,6 +4376,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_fullscreen(&mut self, id: &W::Id, is_fullscreen: bool) {
+        if self.is_window_minimized(id) {
+            return;
+        }
         // Check if this is a request to unset the windowed fullscreen state.
         if !is_fullscreen {
             let mut handled = false;
@@ -4089,13 +4401,18 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.set_fullscreen(id, is_fullscreen);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
     }
 
     pub fn toggle_fullscreen(&mut self, id: &W::Id) {
+        if self.is_window_minimized(id) {
+            return;
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == id {
                 return;
@@ -4104,13 +4421,18 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.toggle_fullscreen(id);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
     }
 
     pub fn toggle_windowed_fullscreen(&mut self, id: &W::Id) {
+        if self.is_window_minimized(id) {
+            return;
+        }
         let (_, window) = self.windows().find(|(_, win)| win.id() == id).unwrap();
         if window.pending_sizing_mode().is_fullscreen() {
             // Remove the real fullscreen.
@@ -4131,6 +4453,9 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn set_maximized(&mut self, id: &W::Id, maximize: bool) {
+        if self.is_window_minimized(id) {
+            return;
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == id {
                 return;
@@ -4139,13 +4464,115 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.set_maximized(id, maximize);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
     }
 
+    pub fn is_window_minimized(&self, id: &W::Id) -> bool {
+        self.windows()
+            .any(|(_, win)| win.id() == id && win.is_minimized())
+    }
+
+    /// Whether this window is minimized and currently invisible (its workspace's grid overview is
+    /// closed, so not even a thumbnail of it is on screen).
+    pub fn is_window_minimized_hidden(&self, id: &W::Id) -> bool {
+        self.workspaces()
+            .any(|(_, _, ws)| !ws.is_grid_overview_open() && ws.has_minimized_window(id))
+    }
+
+    /// Marks a hidden minimized window as suspended, on client commit.
+    ///
+    /// Suspension is deferred to commit time so that the configure from a minimize (e.g. the
+    /// default-size resize when expelling out of a multi-window column) gets acked and
+    /// committed before the client stops rendering.
+    pub fn suspend_minimized_hidden(&mut self, id: &W::Id) {
+        for ws in self.workspaces_mut() {
+            ws.suspend_minimized_hidden(id);
+        }
+    }
+
+    /// Whether the grid overview is open on the monitor of this output.
+    ///
+    /// While it is open, minimized windows on the output show live previews.
+    pub fn is_grid_overview_open_on(&self, output: &Output) -> bool {
+        if let MonitorSet::Normal { monitors, .. } = &self.monitor_set {
+            return monitors
+                .iter()
+                .any(|mon| mon.output == *output && mon.is_grid_overview_open());
+        }
+        false
+    }
+
+    pub fn set_window_minimized(&mut self, id: &W::Id, minimize: bool) {
+        // Can't minimize a window that is being interactively moved (including a move that
+        // hasn't crossed the drag threshold yet).
+        match &self.interactive_move {
+            Some(InteractiveMoveState::Moving(move_)) if move_.tile.window().id() == id => {
+                return;
+            }
+            Some(InteractiveMoveState::Starting { window_id, .. }) if window_id == id => {
+                return;
+            }
+            _ => {}
+        }
+
+        for ws in self.workspaces_mut() {
+            if ws.has_window(id) {
+                ws.set_window_minimized(id, minimize);
+                return;
+            }
+        }
+    }
+
+    pub fn toggle_window_minimized(&mut self, id: &W::Id) {
+        if self.is_window_minimized(id) {
+            self.unminimize_window(id, true);
+        } else {
+            self.set_window_minimized(id, true);
+        }
+    }
+
+    /// Restores a minimized window, optionally focusing it (switching the active monitor and
+    /// workspace if necessary).
+    pub fn unminimize_window(&mut self, id: &W::Id, activate: bool) {
+        if activate {
+            // Activation restores minimized windows on its way.
+            self.activate_window(id);
+        } else {
+            self.set_window_minimized(id, false);
+        }
+    }
+
+    /// Id of the most recently minimized window across all workspaces.
+    pub fn last_minimized_window(&self) -> Option<W::Id> {
+        let mut best: Option<(W::Id, u64)> = None;
+        for (_, _, ws) in self.workspaces() {
+            for tile in ws.tiles() {
+                if let Some(at) = tile.minimized_at {
+                    if best.as_ref().is_none_or(|(_, best_at)| at > *best_at) {
+                        best = Some((tile.window().id().clone(), at));
+                    }
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+    }
+
+    /// Restores the most recently minimized window.
+    pub fn unminimize_last_window(&mut self) {
+        if let Some(id) = self.last_minimized_window() {
+            self.unminimize_window(&id, true);
+        }
+    }
+
     pub fn toggle_maximized(&mut self, id: &W::Id) {
+        if self.is_window_minimized(id) {
+            return;
+        }
         if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
             if move_.tile.window().id() == id {
                 return;
@@ -4154,7 +4581,9 @@ impl<W: LayoutElement> Layout<W> {
 
         for ws in self.workspaces_mut() {
             if ws.has_window(id) {
+                let snapshots = ws.grid_window_visual_snapshots();
                 ws.toggle_maximized(id);
+                ws.refresh_grid_overview_layout(snapshots);
                 return;
             }
         }
@@ -4363,12 +4792,125 @@ impl<W: LayoutElement> Layout<W> {
         true
     }
 
+    /// Starts a touchpad gesture that opens the grid overview, or closes it if it's open, with
+    /// the fingers.
+    pub fn grid_gesture_begin(&mut self) {
+        let opening = !self.grid_overview_open_in_scope();
+        if opening {
+            self.set_grid_overview_open_in_scope(true);
+        } else {
+            self.close_grid_overview();
+        }
+
+        // Opening or closing started an animation from where the grid was; the gesture takes
+        // over from there.
+        let start = self
+            .grid_overviews_in_scope()
+            .find_map(|go| go.progress.as_ref().map(|p| p.value()))
+            .unwrap_or(if opening { 0. } else { 1. });
+        for go in self.grid_overviews_in_scope() {
+            go.set_gesture_progress(start);
+        }
+        self.grid_gesture = Some(OverviewGesture {
+            tracker: SwipeTracker::new(),
+            start,
+            value: start,
+        });
+    }
+
+    pub fn grid_gesture_update(&mut self, delta_y: f64, timestamp: Duration) -> Option<bool> {
+        let gesture = self.grid_gesture.as_mut()?;
+        gesture.tracker.push(delta_y, timestamp);
+
+        // Unlike the overview, the grid doesn't stretch past open or closed: the windows stop
+        // where they belong.
+        let pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let new_value = (gesture.start + pos).clamp(0., 1.);
+        if gesture.value == new_value {
+            return Some(false);
+        }
+        gesture.value = new_value;
+
+        for go in self.grid_overviews_in_scope() {
+            go.set_gesture_progress(new_value);
+        }
+        Some(true)
+    }
+
+    pub fn grid_gesture_end(&mut self) -> bool {
+        let Some(mut gesture) = self.grid_gesture.take() else {
+            return false;
+        };
+
+        // Take into account any idle time between the last event and now.
+        gesture.tracker.push(0., self.clock.now_unadjusted());
+
+        let mut velocity = gesture.tracker.velocity() / OVERVIEW_GESTURE_MOVEMENT;
+        let current_pos = gesture.tracker.pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let pos = gesture.tracker.projected_end_pos() / OVERVIEW_GESTURE_MOVEMENT;
+        let open = (gesture.start + pos).clamp(0., 1.).round() == 1.;
+        // Pushing on past the end doesn't carry speed into the animation.
+        if !(0. ..=1.).contains(&(gesture.start + current_pos)) {
+            velocity = 0.;
+        }
+
+        let mut from = gesture.value;
+        if open != self.grid_overview_open_in_scope() {
+            // Ending the other way than the gesture started goes the usual way of opening or
+            // closing: closing confirms the focused cell, and opening again starts from where
+            // the windows are now.
+            if open {
+                self.set_grid_overview_open_in_scope(true);
+                from = 0.;
+            } else {
+                self.close_grid_overview();
+            }
+        }
+        let to = if open { 1. } else { 0. };
+        for go in self.grid_overviews_in_scope() {
+            go.end_gesture(from, to, velocity);
+        }
+
+        true
+    }
+
+    /// The grids of the workspaces that the grid overview opens and closes on.
+    fn grid_overviews_in_scope(
+        &mut self,
+    ) -> impl Iterator<Item = &mut grid_overview::GridOverview<W>> + '_ {
+        let all_monitors = self.grid_all_monitors();
+        let monitors: &mut [Monitor<W>] = match &mut self.monitor_set {
+            MonitorSet::Normal {
+                monitors,
+                active_monitor_idx,
+                ..
+            } => {
+                if all_monitors {
+                    &mut monitors[..]
+                } else {
+                    let idx = *active_monitor_idx;
+                    &mut monitors[idx..=idx]
+                }
+            }
+            MonitorSet::NoOutputs { .. } => &mut [],
+        };
+        monitors
+            .iter_mut()
+            .flat_map(|mon| mon.workspaces.iter_mut())
+            .filter_map(|ws| ws.grid_overview_mut())
+    }
+
     pub fn interactive_move_begin(
         &mut self,
         window_id: W::Id,
         output: &Output,
         start_pos_within_output: Point<f64, Logical>,
     ) -> bool {
+        // Grabbing a minimized window (possible in the grid overview) restores and activates
+        // it first.
+        if self.is_window_minimized(&window_id) {
+            self.set_window_minimized(&window_id, false);
+        }
         if self.interactive_move.is_some() {
             return false;
         }
@@ -4545,9 +5087,9 @@ impl<W: LayoutElement> Layout<W> {
                 // in the middle of interactive_move_update() and the confusion that causes.
                 self.interactive_move = None;
 
-                // While the grab is ongoing, the grid focus follows the grabbed window itself:
-                // no grid cell shows the focus boost. Otherwise the focus would jump to some
-                // other cell on grab and back on drop, triggering spurious boost animations.
+                // While the grab is ongoing, the grid focus follows the grabbed window itself.
+                // Otherwise the focus ring would jump to some other cell on grab and back on
+                // drop.
                 if self.is_grid_overview_open() {
                     let grabbed = window_id.clone();
                     for ws in self.workspaces_mut() {
@@ -4555,14 +5097,15 @@ impl<W: LayoutElement> Layout<W> {
                     }
                 }
 
-                // Unset fullscreen before removing the tile. This will restore its size properly,
-                // and move it to floating if needed, so we don't have to deal with that here.
-                let ws = self
-                    .workspaces_mut()
-                    .find(|ws| ws.has_window(&window_id))
-                    .unwrap();
-                ws.set_fullscreen(window, false);
-                ws.set_maximized(window, false);
+                // Fullscreen and maximized windows keep their state: grabbing a window shouldn't
+                // resize it. The pending sizing mode travels with the window, so dropping it into
+                // a new column makes that column fullscreen or maximized again.
+                let is_maximized = self
+                    .workspaces()
+                    .find_map(|(_, _, ws)| {
+                        ws.scrolling().columns().find(|col| col.contains(window))
+                    })
+                    .is_some_and(|col| col.is_pending_maximized());
 
                 let RemovedTile {
                     mut tile,
@@ -4588,8 +5131,7 @@ impl<W: LayoutElement> Layout<W> {
                 tile.update_config(view_size, scale, Rc::new(options));
 
                 if is_floating {
-                    // Unlock the view in case we locked it moving a fullscreen window that is
-                    // going to unfullscreen to floating.
+                    // Floating moves don't scroll the view; make sure it's unlocked.
                     for ws in self.workspaces_mut() {
                         ws.dnd_scroll_gesture_end();
                     }
@@ -4609,6 +5151,7 @@ impl<W: LayoutElement> Layout<W> {
                     pointer_pos_within_output,
                     width,
                     is_full_width,
+                    is_maximized,
                     is_floating,
                     pointer_ratio_within_window,
                     visual_scale,
@@ -4824,6 +5367,8 @@ impl<W: LayoutElement> Layout<W> {
 
                 let win_id = move_.tile.window().id().clone();
                 let tile_render_loc = move_.tile_render_location(zoom);
+                let restore_to_floating = move_.tile.restore_to_floating;
+                let visual_scale = move_.visual_scale;
 
                 let ws_idx = match insert_ws {
                     InsertWorkspace::Existing(ws_id) => mon.idx_of_ws(ws_id).unwrap(),
@@ -4876,7 +5421,17 @@ impl<W: LayoutElement> Layout<W> {
                         match insert_ws {
                             InsertWorkspace::Existing(_) => {
                                 if let Some(offset) = offset {
-                                    let pos = (tile_render_loc - offset).downscale(zoom);
+                                    let mut pos = (tile_render_loc - offset).downscale(zoom);
+                                    // The grid shows a floating window around where its middle
+                                    // is, at a smaller scale: put the middle where it was let go.
+                                    if mon.workspaces[ws_idx].is_grid_overview_open() {
+                                        let size = tile.tile_size();
+                                        let shown = size.upscale(visual_scale);
+                                        pos += Point::from((
+                                            (shown.w - size.w) / 2.,
+                                            (shown.h - size.h) / 2.,
+                                        ));
+                                    }
                                     let pos =
                                         mon.workspaces[ws_idx].floating_logical_to_size_frac(pos);
                                     tile.floating_pos = Some(pos);
@@ -4917,6 +5472,19 @@ impl<W: LayoutElement> Layout<W> {
                 }
 
                 if let Some(ws) = mon.workspaces.iter_mut().find(|ws| ws.has_window(&win_id)) {
+                    // A fullscreen window that was also maximized should unfullscreen back into
+                    // maximized. Its own state only says fullscreen, so restore the column's.
+                    if move_.is_maximized && matches!(position, InsertPosition::NewColumn(_)) {
+                        ws.set_maximized(&win_id, true);
+                    }
+
+                    // The grid moves the window on from where it was let go of, rather than showing
+                    // it in its spot right away.
+                    if let Some(offset) = offset {
+                        let pos = (tile_render_loc - offset).downscale(zoom);
+                        ws.start_grid_cell_at(&win_id, pos, visual_scale);
+                    }
+
                     if preserve_grid_move_animations {
                         ws.on_window_added_in_grid_preserving_move_animations(&win_id);
                     } else {
@@ -4939,6 +5507,12 @@ impl<W: LayoutElement> Layout<W> {
                 let (new_tile_render_loc, new_scale) =
                     grid_target.unwrap_or_else(|| (ws_geo.loc + tile_offset.upscale(zoom), 1.));
 
+                // Adding the tile as a new column reset this. A window that was floating before
+                // it got maximized should still unmaximize back into floating after the drop.
+                if matches!(position, InsertPosition::NewColumn(_)) {
+                    tile.restore_to_floating = restore_to_floating;
+                }
+
                 tile.animate_move_from(
                     (tile_render_loc - new_tile_render_loc).downscale(new_scale * zoom),
                 );
@@ -4959,6 +5533,9 @@ impl<W: LayoutElement> Layout<W> {
                 }
                 let ws = &mut workspaces[0];
 
+                let win_id = move_.tile.window().id().clone();
+                let restore_to_floating = move_.tile.restore_to_floating;
+
                 // No point in trying to use the pointer position without outputs.
                 ws.add_tile(
                     move_.tile,
@@ -4969,6 +5546,18 @@ impl<W: LayoutElement> Layout<W> {
                     move_.is_floating,
                     None,
                 );
+
+                if !move_.is_floating {
+                    if move_.is_maximized {
+                        ws.set_maximized(&win_id, true);
+                    }
+
+                    let tile = ws
+                        .tiles_mut()
+                        .find(|tile| *tile.window().id() == win_id)
+                        .unwrap();
+                    tile.restore_to_floating = restore_to_floating;
+                }
             }
         }
     }
@@ -5018,6 +5607,10 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn interactive_resize_begin(&mut self, window: W::Id, edges: ResizeEdge) -> bool {
+        // Minimized windows have no on-screen presence to interact with.
+        if self.is_window_minimized(&window) {
+            return false;
+        }
         match &mut self.monitor_set {
             MonitorSet::Normal { monitors, .. } => {
                 for mon in monitors {
@@ -5626,6 +6219,15 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn window_is_in_open_grid_overview(&self, id: &W::Id) -> bool {
+        // A window dragged over the grid is out of the layout for the time being, but it is still
+        // a grid window rather than one sitting on top of the grid (like an ignore-grid-overview
+        // one), e.g. the wheel over it should keep switching workspaces.
+        if let Some(InteractiveMoveState::Moving(move_)) = &self.interactive_move {
+            if move_.tile.window().id() == id {
+                return self.is_grid_overview_open_on(&move_.output);
+            }
+        }
+
         self.workspaces()
             .any(|(_, _, ws)| ws.window_is_in_grid_overview(id))
     }
@@ -5673,7 +6275,43 @@ impl<W: LayoutElement> Layout<W> {
             changed = mon.is_grid_overview_open() != open;
             mon.set_grid_overview_open(open);
         }
+        if open && changed {
+            self.grid_overview_open_count += 1;
+        }
         changed
+    }
+
+    /// The number of times the grid overview was opened.
+    pub fn grid_overview_open_count(&self) -> u64 {
+        self.grid_overview_open_count
+    }
+
+    /// Moves the grid focus to the cell of this window, like keyboard navigation does.
+    ///
+    /// The window can be in the grid of any monitor; that monitor becomes the active one, since
+    /// closing the grid confirms the focused cell of the active monitor.
+    pub fn focus_grid_cell_for_window(&mut self, id: &W::Id) -> bool {
+        let MonitorSet::Normal {
+            monitors,
+            active_monitor_idx,
+            ..
+        } = &mut self.monitor_set
+        else {
+            return false;
+        };
+
+        for (idx, mon) in monitors.iter_mut().enumerate() {
+            let ws = mon.active_workspace();
+            if !ws.is_grid_overview_open() {
+                continue;
+            }
+            if ws.set_grid_focus_for_window(id) {
+                *active_monitor_idx = idx;
+                return true;
+            }
+        }
+
+        false
     }
 
     fn close_grid_overview_for_monitor(&mut self, monitor_idx: usize) {
@@ -5746,6 +6384,8 @@ impl<W: LayoutElement> Layout<W> {
     }
 
     pub fn confirm_grid_selection_for_window(&mut self, id: &W::Id) -> bool {
+        let overview_open = self.overview_open;
+        let overview_anim = self.options.animations.overview_open_close.0;
         let target_monitor_idx = {
             let MonitorSet::Normal {
                 monitors,
@@ -5777,7 +6417,15 @@ impl<W: LayoutElement> Layout<W> {
 
                 ws.set_grid_focus_for_window(id);
 
-                mon.active_workspace_idx = ws_idx;
+                // Go through the regular workspace switch, so that the previous workspace is
+                // remembered and an emptied workspace gets cleaned up afterwards.
+                if ws_idx != mon.active_workspace_idx {
+                    if overview_open {
+                        mon.activate_workspace_with_anim_config(ws_idx, Some(overview_anim));
+                    } else {
+                        mon.activate_workspace(ws_idx);
+                    }
+                }
                 *active_monitor_idx = mon_idx;
                 target = Some(mon_idx);
                 break;
@@ -5815,14 +6463,35 @@ impl<W: LayoutElement> Layout<W> {
     fn active_grid_overview_action(
         &mut self,
     ) -> Option<(WorkspaceId, W::Id, Vec<GridWindowVisual<W>>)> {
+        self.active_grid_action_target(false)
+    }
+
+    /// Like [`Self::active_grid_overview_action`], but for moves of the focused cell.
+    ///
+    /// A minimized cell can never become the strip's active column, so it must not be restored and
+    /// activated here: the workspace's move methods reorder its placeholder column in place, which
+    /// keeps it minimized.
+    fn active_grid_move_action(
+        &mut self,
+    ) -> Option<(WorkspaceId, W::Id, Vec<GridWindowVisual<W>>)> {
+        self.active_grid_action_target(true)
+    }
+
+    fn active_grid_action_target(
+        &mut self,
+        allow_minimized: bool,
+    ) -> Option<(WorkspaceId, W::Id, Vec<GridWindowVisual<W>>)> {
         let ws = self.active_workspace_mut()?;
-        if !ws.is_grid_overview_open() {
+        // A window outside the grid that has the focus (an ignore-grid-overview window the user
+        // clicked) takes actions as if the grid weren't open, rather than the grid's focused cell.
+        if !ws.is_grid_overview_open() || ws.active_ignored_floating_window_in_grid().is_some() {
             return None;
         }
 
         let window_visual_snapshots = ws.grid_window_visual_snapshots();
         let id = ws.grid_focused_window_id()?;
-        if !ws.activate_window_from_grid(&id) {
+        let keep_minimized = allow_minimized && ws.has_minimized_window(&id);
+        if !keep_minimized && !ws.activate_window_from_grid(&id) {
             return None;
         }
         Some((ws.id(), id, window_visual_snapshots))
@@ -5850,22 +6519,66 @@ impl<W: LayoutElement> Layout<W> {
         &mut self,
         action: impl FnOnce(&mut Self) -> R,
     ) -> Option<R> {
-        self.run_active_grid_overview_action_inner(action, true)
+        self.run_active_grid_overview_action_inner(action, true, false)
     }
 
-    fn run_active_grid_overview_action_preserving_move_animations<R>(
+    /// Like [`Self::run_active_grid_overview_action`], but for moves: a minimized focused cell is
+    /// reordered as-is instead of being restored first.
+    fn run_active_grid_move_action<R>(&mut self, action: impl FnOnce(&mut Self) -> R) -> Option<R> {
+        self.run_active_grid_overview_action_inner(action, true, true)
+    }
+
+    /// [`Self::run_active_grid_move_action`] that keeps in-flight move animations, for moves
+    /// within a column.
+    fn run_active_grid_move_action_preserving_move_animations<R>(
         &mut self,
         action: impl FnOnce(&mut Self) -> R,
     ) -> Option<R> {
-        self.run_active_grid_overview_action_inner(action, false)
+        self.run_active_grid_overview_action_inner(action, false, true)
+    }
+
+    /// Like [`Self::run_active_grid_overview_action`], but skips the grid refresh when the
+    /// action was a no-op (e.g. pressing move-to-workspace at the edge of the workspace list).
+    /// Refreshing a no-op move would otherwise restart the rearrange animation and make the
+    /// moved window/column jump.
+    fn run_active_grid_overview_action_if_moved(
+        &mut self,
+        target_workspace_idx: impl FnOnce(&Monitor<W>) -> usize,
+        action: impl FnOnce(&mut Self) -> bool,
+    ) -> bool {
+        // Moving to the workspace the window is already on does nothing. Check that before
+        // active_grid_overview_action(), which restores a minimized focused cell.
+        let Some(mon) = self.active_monitor_ref() else {
+            return false;
+        };
+        if target_workspace_idx(mon) == mon.active_workspace_idx {
+            return false;
+        }
+
+        let Some((ws_id, focus_id, window_visual_snapshots)) = self.active_grid_overview_action()
+        else {
+            return false;
+        };
+        let moved = action(self);
+        if moved {
+            self.refresh_grid_workspace_after_action(
+                ws_id,
+                Some(focus_id),
+                true,
+                window_visual_snapshots,
+            );
+        }
+        moved
     }
 
     fn run_active_grid_overview_action_inner<R>(
         &mut self,
         action: impl FnOnce(&mut Self) -> R,
         stop_move_animations: bool,
+        allow_minimized: bool,
     ) -> Option<R> {
-        let (ws_id, focus_id, window_visual_snapshots) = self.active_grid_overview_action()?;
+        let (ws_id, focus_id, window_visual_snapshots) =
+            self.active_grid_action_target(allow_minimized)?;
         let rv = action(self);
         self.refresh_grid_workspace_after_action(
             ws_id,
@@ -5876,8 +6589,36 @@ impl<W: LayoutElement> Layout<W> {
         Some(rv)
     }
 
+    /// Runs `action` on `window`'s workspace while the grid shows, then refreshes the grid. Without
+    /// a window, it acts on the window in the grid's focused cell, like the move binds.
+    fn run_grid_window_action(
+        &mut self,
+        window: Option<&W::Id>,
+        action: impl FnOnce(&mut Workspace<W>, Option<&W::Id>),
+    ) {
+        let Some(id) = window else {
+            self.run_active_grid_move_action(|this| {
+                if let Some(ws) = this.active_workspace_mut() {
+                    action(ws, None);
+                }
+            });
+            return;
+        };
+        let Some(ws) = self.workspaces_mut().find(|ws| ws.has_window(id)) else {
+            return;
+        };
+        let window_visual_snapshots = ws.grid_window_visual_snapshots();
+        action(ws, Some(id));
+        ws.refresh_grid_overview_after_action(Some(id), true, window_visual_snapshots);
+    }
+
     fn grid_move_guard(&self) -> bool {
+        // Actions on a window outside the grid that has the focus go through as if the grid
+        // weren't open.
         self.is_grid_overview_open()
+            && self
+                .active_workspace()
+                .is_none_or(|ws| ws.active_ignored_floating_window_in_grid().is_none())
     }
 }
 

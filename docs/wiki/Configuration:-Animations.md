@@ -72,6 +72,11 @@ animations {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
     }
 
+    focus-ring {
+        duration-ms 300
+        curve "ease-out-cubic"
+    }
+
     recent-windows-close {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.001
     }
@@ -474,10 +479,32 @@ animations {
 
 The toggle zoom animation of the [screen magnifier](./Configuration:-Miscellaneous.md#magnifier).
 
+<sup>Since: next release</sup> Also used when the [`move-magnifier-*`](./Configuration:-Key-Bindings.md#move-magnifier-left-move-magnifier-right-move-magnifier-up-move-magnifier-down) actions move the magnified view.
+
 ```kdl
 animations {
     magnifier {
         spring damping-ratio=1.0 stiffness=800 epsilon=0.0001
+    }
+}
+```
+
+#### `focus-ring`
+
+<sup>Since: 26.04 (fork)</sup>
+
+The focus ring moving to another window.
+The ring of the newly focused window grows out from its edge, while the ring of the window that lost focus shrinks back and fades out.
+In the [Grid Overview](./Grid-Overview.md), it also times the sliding ring of [`focus-ring-transition "slide"`](./Configuration:-Miscellaneous.md#focus-ring-transition).
+
+Turning it off makes the ring jump from one window to the other.
+A spring works too: it lets the ring grow a little past its width and settle back.
+
+```kdl
+animations {
+    focus-ring {
+        duration-ms 300
+        curve "ease-out-cubic"
     }
 }
 ```

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use niri_ipc::PickedColor;
 use zbus::zvariant::OwnedValue;

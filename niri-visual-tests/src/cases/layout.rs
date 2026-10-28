@@ -162,6 +162,23 @@ impl Layout {
         rv
     }
 
+    pub fn grid_move_to_workspace(args: Args) -> Self {
+        let mut rv = Self::new(args);
+
+        rv.add_window(TestWindow::freeform(0), Some(PresetSize::Proportion(0.3)));
+        rv.add_window(TestWindow::freeform(1), Some(PresetSize::Proportion(0.3)));
+        rv.add_window(TestWindow::freeform(2), Some(PresetSize::Proportion(0.3)));
+        rv.layout.activate_window(&2);
+
+        rv.layout.toggle_grid_overview();
+
+        rv.add_step(1000, |l| {
+            l.layout.move_to_workspace(None, 1, ActivateWindow::Yes);
+        });
+
+        rv
+    }
+
     fn add_window(&mut self, mut window: TestWindow, width: Option<PresetSize>) {
         let ws = self.layout.active_workspace().unwrap();
         let min_size = window.min_size();

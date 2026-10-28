@@ -277,6 +277,15 @@ pub enum Action {
     ToggleWindowedFullscreen,
     #[knuffel(skip)]
     ToggleWindowedFullscreenById(u64),
+    MinimizeWindow,
+    #[knuffel(skip)]
+    MinimizeWindowById(u64),
+    UnminimizeWindow,
+    #[knuffel(skip)]
+    UnminimizeWindowById(u64),
+    ToggleWindowMinimized,
+    #[knuffel(skip)]
+    ToggleWindowMinimizedById(u64),
     #[knuffel(skip)]
     FocusWindow(u64),
     FocusWindowInColumn(#[knuffel(argument)] u8),
@@ -488,6 +497,10 @@ pub enum Action {
     CloseGridOverview,
     ToggleMagnifier,
     AdjustMagnifierZoom(#[knuffel(argument)] f64),
+    MoveMagnifierLeft,
+    MoveMagnifierRight,
+    MoveMagnifierUp,
+    MoveMagnifierDown,
     OpenOverview,
     CloseOverview,
     #[knuffel(skip)]
@@ -575,6 +588,14 @@ impl From<niri_ipc::Action> for Action {
             }
             niri_ipc::Action::ToggleWindowedFullscreen { id: Some(id) } => {
                 Self::ToggleWindowedFullscreenById(id)
+            }
+            niri_ipc::Action::MinimizeWindow { id: None } => Self::MinimizeWindow,
+            niri_ipc::Action::MinimizeWindow { id: Some(id) } => Self::MinimizeWindowById(id),
+            niri_ipc::Action::UnminimizeWindow { id: None } => Self::UnminimizeWindow,
+            niri_ipc::Action::UnminimizeWindow { id: Some(id) } => Self::UnminimizeWindowById(id),
+            niri_ipc::Action::ToggleWindowMinimized { id: None } => Self::ToggleWindowMinimized,
+            niri_ipc::Action::ToggleWindowMinimized { id: Some(id) } => {
+                Self::ToggleWindowMinimizedById(id)
             }
             niri_ipc::Action::FocusWindow { id } => Self::FocusWindow(id),
             niri_ipc::Action::FocusWindowInColumn { index } => Self::FocusWindowInColumn(index),
@@ -838,6 +859,10 @@ impl From<niri_ipc::Action> for Action {
             niri_ipc::Action::CloseGridOverview {} => Self::CloseGridOverview,
             niri_ipc::Action::ToggleMagnifier {} => Self::ToggleMagnifier,
             niri_ipc::Action::AdjustMagnifierZoom { delta } => Self::AdjustMagnifierZoom(delta),
+            niri_ipc::Action::MoveMagnifierLeft {} => Self::MoveMagnifierLeft,
+            niri_ipc::Action::MoveMagnifierRight {} => Self::MoveMagnifierRight,
+            niri_ipc::Action::MoveMagnifierUp {} => Self::MoveMagnifierUp,
+            niri_ipc::Action::MoveMagnifierDown {} => Self::MoveMagnifierDown,
             niri_ipc::Action::OpenOverview {} => Self::OpenOverview,
             niri_ipc::Action::CloseOverview {} => Self::CloseOverview,
             niri_ipc::Action::ToggleWindowUrgent { id } => Self::ToggleWindowUrgent(id),
