@@ -1003,6 +1003,8 @@ impl State {
     }
 
     pub fn do_action(&mut self, action: Action, allow_when_locked: bool) {
+        let action = translate_direction_for_axis(action, self.niri.layout.active_main_axis());
+
         if self.niri.is_locked() && !(allow_when_locked || allowed_when_locked(&action)) {
             return;
         }
@@ -7319,5 +7321,74 @@ mod tests {
             &close_bind(BoundAction::Release(Action::CloseWindow)),
             false
         ));
+    }
+}
+
+/// Translate directional actions for a vertical main axis.
+///
+/// The scrolling layout is transposed, so the actions that used to move along the main axis now
+/// move up and down on screen, and the cross-axis ones move left and right. Swapping the two
+/// families keeps a physical direction meaning the same thing on screen as it did with a
+/// horizontal main axis, which is what fingers on arrow keys and H/J/K/L expect.
+fn translate_direction_for_axis(action: Action, main_axis: niri_config::MainAxis) -> Action {
+    if main_axis != niri_config::MainAxis::Vertical {
+        return action;
+    }
+
+    match action {
+        Action::FocusColumnLeft => Action::FocusWindowUp,
+        Action::FocusWindowUp => Action::FocusColumnLeft,
+        Action::FocusColumnRight => Action::FocusWindowDown,
+        Action::FocusWindowDown => Action::FocusColumnRight,
+        Action::MoveColumnLeft => Action::MoveWindowUp,
+        Action::MoveWindowUp => Action::MoveColumnLeft,
+        Action::MoveColumnRight => Action::MoveWindowDown,
+        Action::MoveWindowDown => Action::MoveColumnRight,
+        action => action,
+    }
+}
+
+#[cfg(test)]
+mod axis_direction_tests {
+    use super::translate_direction_for_axis;
+    use niri_config::{Action, MainAxis};
+
+    #[test]
+    fn horizontal_main_axis_leaves_directions_alone() {
+        for action in [
+            Action::FocusColumnLeft,
+            Action::FocusColumnRight,
+            Action::FocusWindowUp,
+            Action::FocusWindowDown,
+            Action::MoveColumnLeft,
+            Action::MoveColumnRight,
+            Action::MoveWindowUp,
+            Action::MoveWindowDown,
+        ] {
+            assert_eq!(
+                translate_direction_for_axis(action.clone(), MainAxis::Horizontal),
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn vertical_main_axis_swaps_main_and_cross_families() {
+        let pairs = [
+            (Action::FocusColumnLeft, Action::FocusWindowUp),
+            (Action::FocusColumnRight, Action::FocusWindowDown),
+            (Action::MoveColumnLeft, Action::MoveWindowUp),
+            (Action::MoveColumnRight, Action::MoveWindowDown),
+        ];
+        for (main, cross) in pairs {
+            assert_eq!(
+                translate_direction_for_axis(main.clone(), MainAxis::Vertical),
+                cross
+            );
+            assert_eq!(
+                translate_direction_for_axis(cross, MainAxis::Vertical),
+                main
+            );
+        }
     }
 }
