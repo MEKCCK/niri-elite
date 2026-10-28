@@ -1,148 +1,192 @@
-<h1 align="center"><img alt="niri" src="https://github.com/user-attachments/assets/07d05cd0-d5dc-4a28-9a35-51bae8f119a0"></h1>
-<p align="center">A scrollable-tiling Wayland compositor.</p>
+<h1 align="center">niri-elite</h1>
+<p align="center">A scrollable-tiling Wayland compositor — a feature-packed fork of <a href="https://github.com/niri-wm/niri">niri</a>.</p>
 <p align="center">
-    <a href="https://matrix.to/#/#niri:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/matrix-%23niri-blue?logo=matrix"></a>
-    <a href="https://github.com/niri-wm/niri/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/niri-wm/niri"></a>
-    <a href="https://github.com/niri-wm/niri/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/niri-wm/niri?logo=github"></a>
+    <a href="https://github.com/MEKCCK/niri-elite/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/MEKCCK/niri-elite"></a>
+    <a href="https://github.com/niri-wm/niri"><img alt="Upstream" src="https://img.shields.io/badge/upstream-niri--wm%2Fniri-blue"></a>
+    <a href="https://github.com/SHORiN-KiWATA/niri"><img alt="Upstream" src="https://img.shields.io/badge/upstream-SHORiN--KiWATA%2Fniri-blue"></a>
+    <a href="https://github.com/zaroutt/Niri-glass"><img alt="Glass" src="https://img.shields.io/badge/glass-zaroutt%2FNiri--glass-purple"></a>
 </p>
 
 <p align="center">
-    <a href="https://niri-wm.github.io/niri/Getting-Started.html">Getting Started</a> | <a href="https://niri-wm.github.io/niri/Configuration%3A-Introduction.html">Configuration</a> | <a href="https://github.com/niri-wm/niri/discussions/325">Setup&nbsp;Showcase</a>
+    <a href="https://niri-wm.github.io/niri/Getting-Started.html">Getting Started (upstream)</a> |
+    <a href="https://niri-wm.github.io/niri/Configuration%3A-Introduction.html">Configuration (upstream)</a> |
+    <a href="docs/wiki/Grid-Overview.md">Grid Overview</a> |
+    <a href="docs/wiki/Screencasting.md">Screencasting</a>
 </p>
 
-<img width="1280" height="720" alt="niri with a few windows open" src="https://github.com/user-attachments/assets/dea5909e-1859-4aaa-9d88-d37f9663e00b" />
+## What this is
 
-## About
+`niri-elite` is my personal build of niri. It is not a rewrite, and it is not
+"niri with a different philosophy" — it is mainline niri, kept up to date, plus
+the features I actually use. Everything in mainline niri works here. The extra
+features come from three sources:
 
-**niri-elite** is a fork of [niri](https://github.com/niri-wm/niri) that tracks upstream closely while adding extra features. Everything in mainline niri works here; on top of that, this branch adds:
+| Upstream | What is taken from it |
+|---|---|
+| [`niri-wm/niri`](https://github.com/niri-wm/niri) | The compositor itself. Merged regularly; all upstream behavior and fixes are kept. |
+| [`SHORiN-KiWATA/niri`](https://github.com/SHORiN-KiWATA/niri) | Grid overview, fullscreen magnifier, window minimization, the agent seat, and most of the grid/input polish built on top of them. |
+| [`zaroutt/Niri-glass`](https://github.com/zaroutt/Niri-glass) | The liquid-glass background effect. That repository shares no git history with this one, so its code is ported by hand. |
 
-| Feature | Description | Toggle / Config |
-|---|---|---|
-| **Grid overview** | An overview of all windows on the workspace in a grid, with keyboard navigation, tabs/columns/floating items, and per-monitor support. | `Mod+G` (`toggle-grid-overview`) — see [`grid-overview`](docs/wiki/Grid-Overview.md) |
-| **Fullscreen magnifier** | Magnify any part of the screen, zoom with the scroll wheel. | `Mod+Shift+Z` (`toggle-magnifier`) |
-| **Shake-to-enlarge** | Shake a window to enlarge it. | [`shake-to-enlarge`](resources/default-config.kdl) |
-| **KDE blur protocol** | Implements the KDE blur protocol (`kde-blur`) for background blur on supported surfaces. | Automatic |
-| **SVG cursor support** | Render SVG cursor themes (e.g. Bibata) natively. | Automatic |
-| **Built-in xdg-desktop-portal backend** | ScreenCast/Screenshot portal interfaces are served by niri itself (`org.freedesktop.impl.portal.desktop.niri`) — no `xdg-desktop-portal-gnome` needed. | Automatic; ships `niri.portal` + `niri-portals.conf` |
-| **Native screen cast picker** | A built-in picker UI for choosing what to screen-cast, with persisted permission tokens and configurable colors. | See [Screencasting](docs/wiki/Screencasting.md) |
-| **SHM fallback for screencasts** | PipeWire screencasts fall back to SHM (memfd) when GPU is unavailable — works in VMs. | Automatic |
-| **Software EGL renderer** | Software rendering support for VMs and GPUs without hardware acceleration. | Automatic |
-| **Screenshot to file** | Save screenshots directly to a path via IPC, with async reply. | `niri msg action screenshot` |
-| **Multi-GPU fixes** | Improved handling of multi-GPU setups (primary render node selection, display-only devices). | Automatic |
+Mainline niri deliberately stays conservative on several of these (no grid
+overview, no built-in portal backend, no minimization), so they are maintained
+here instead. Merging upstream is a regular chore — see
+[Syncing upstreams](#syncing-upstreams).
 
-Mainline niri keeps a conservative stance on some of these (e.g. no grid overview, no built-in portal backend), so they are maintained here instead. Upstream changes are merged in regularly.
+## What it adds over mainline niri
 
-## Features
+### Windows and layout
 
-- Built from the ground up for scrollable tiling
-- [Dynamic workspaces](https://niri-wm.github.io/niri/Workspaces.html) like in GNOME
-- An [Overview](https://github.com/user-attachments/assets/379a5d1f-acdb-4c11-b36c-e85fd91f0995) that zooms out workspaces and windows
-- Built-in screenshot UI
-- Monitor and window screencasting through a built-in xdg-desktop-portal backend with a native picker
-    - You can [block out](https://niri-wm.github.io/niri/Configuration%3A-Window-Rules.html#block-out-from) sensitive windows from screencasts
-    - [Dynamic cast target](https://niri-wm.github.io/niri/Screencasting.html#dynamic-screencast-target) that can change what it shows on the go
-- [Touchpad](https://github.com/niri-wm/niri/assets/1794388/946a910e-9bec-4cd1-a923-4a9421707515) and [mouse](https://github.com/niri-wm/niri/assets/1794388/8464e65d-4bf2-44fa-8c8e-5883355bd000) gestures
-- Group windows into [tabs](https://niri-wm.github.io/niri/Tabs.html)
-- Configurable layout: gaps, borders, struts, window sizes
-- [Gradient borders](https://niri-wm.github.io/niri/Configuration%3A-Layout.html#gradients) with Oklab and Oklch support
-- [Background blur](https://niri-wm.github.io/niri/Window-Effects.html) for windows and layer-shell surfaces
-- [Animations](https://github.com/niri-wm/niri/assets/1794388/ce178da2-af9e-4c51-876f-8709c241d95e) with support for [custom shaders](https://github.com/niri-wm/niri/assets/1794388/27a238d6-0a22-4692-b794-30dc7a626fad)
-- Live-reloading config
-- Works with [screen readers](https://niri-wm.github.io/niri/Accessibility.html)
+| Feature | Notes |
+|---|---|
+| **Grid overview** | Every window of the workspace laid out in a grid, with <kbd>H</kbd>/<kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> and the regular focus actions moving between cells, tabbed columns as separate cells, per-monitor support and configurable gap/padding/scale. `Mod+G`, or a bare `Mod` tap. See [`Grid-Overview`](docs/wiki/Grid-Overview.md). |
+| **Window minimization** | A real minimized state: `minimize-window`, `unminimize-window`, `toggle-window-minimized` (and the `-by-id` variants), the `open-minimized` window rule, a placeholder cell in the grid and fade animations. |
+| **Hot-corner actions** | Any corner can run `overview` or `grid-overview`, globally or per output: `gestures { hot-corners { bottom-left { grid-overview; } } }`. |
+| **Grid-aware focus and moves** | Focus and move actions act on the focused cell while the grid is open, and workspace moves animate through the grid. |
 
-## Video Demo
+### Input and binds
 
-https://github.com/niri-wm/niri/assets/1794388/bce834b0-f205-434e-a027-b373495f9729
+| Feature | Notes |
+|---|---|
+| **Press and release actions** | `key { press { ...; } release { ...; } }`, with the guarantee that a press action which ran also runs its release. |
+| **Bare modifier triggers** | Bind `Mod`, `Super+Shift`, `Alt_L` and friends directly as bind triggers. |
+| **Raw and ASCII keysym fallbacks** | Binds keep working on non-ASCII layouts: the raw keysym of the current layout and the keysym of an ASCII layout are both tried. |
+| **`default-mod-action`** | Tapping the mod key alone toggles the grid overview, unless a bind on the mod key exists. Disable with `grid-overview { default-mod-action false; }`. |
+| **Magnifier movement and binds** | `move-magnifier-left/right/up/down`, `magnifier.move-step`, and a `magnifier { binds { ... } }` section whose binds only take over while the magnifier is on. |
+| **`confine-mouse-to-fullscreen`** | Keep the pointer inside a fullscreen window. |
 
-Also check out these videos that showcase a lot of the niri functionality:
+### Rendering and effects
 
-- [Niri Is My New Favorite Wayland Compositor](https://www.youtube.com/watch?v=DeYx2exm04M) by Brodie Robertson
-- [How Is niri This Good? Live Demo + Config](https://www.youtube.com/watch?v=7XmD5UyyhZQ) by Nick Janetakis
+| Feature | Notes |
+|---|---|
+| **Liquid glass** | Frosted, refractive background effect with lens distortion, glow edges, fringing, dilution, adaptive dim/boost and edge thickness controls — `background-effect { liquid-glass { ... } }`. |
+| **KDE blur protocol** | Implements `org_kde_kwin_blur` for background blur on supporting surfaces. |
+| **SVG cursors** | SVG cursor themes (Bibata and friends) rendered natively. |
+| **Shake-to-enlarge cursor** | Shake the mouse to enlarge the cursor — zoom factor, threshold, hold duration and optional gradual growth via `cursor { shake-to-enlarge { ... } }`. |
+| **Software EGL, multi-GPU** | Software rendering for VMs, better primary render-node selection and display-only GPU handling. |
 
-## Status
+### Screencasting and screenshots
 
-Niri is stable for day-to-day use and does most things expected of a Wayland compositor.
-Many people are daily-driving niri, and are happy to help in our [Matrix channel].
+| Feature | Notes |
+|---|---|
+| **Built-in xdg-desktop-portal backend** | ScreenCast and Screenshot are served by niri itself (`org.freedesktop.impl.portal.desktop.niri`); `xdg-desktop-portal-gnome` is not needed. Ships `niri.portal` and `niri-portals.conf`. |
+| **Native screen cast picker** | Built-in picker for choosing outputs or windows to cast, with persisted permission tokens and configurable colors. |
+| **SHM fallback** | PipeWire screencasts fall back to shared memory when dmabuf is unavailable, so casting works in VMs and without a usable GPU device. |
+| **Screenshot to a path** | `niri msg action screenshot --path ...` writes the PNG and replies with the path over IPC. |
+| **Pick-color UI** | Freeze the screen, show a magnifier, pick a pixel color. |
 
-Give it a try!
-Follow the instructions on the [Getting Started](https://niri-wm.github.io/niri/Getting-Started.html) page.
-Grab a desktop shell like [DankMaterialShell] or [Noctalia] (or build a more traditional setup): niri by itself is not a complete desktop environment.
-Also check out [awesome-niri], a list of niri-related links and projects.
+### Automation
 
-Here are some points you may have questions about:
+| Feature | Notes |
+|---|---|
+| **Agent seat** (cargo feature `agent`, on by default) | A second input seat for automation over IPC, so scripts can send keys and clicks without stealing the user's seat. Configure with `agent { off; hide-seat-from "app-id"; }`. |
 
-- **Multi-monitor**: yes, a core part of the design from the very start. Mixed DPI works.
-- **Fractional scaling**: yes, plus all niri UI stays pixel-perfect.
-- **NVIDIA**: seems to work fine.
-- **Floating windows**: yes, starting from niri 25.01.
-- **Input devices**: niri supports tablets, touchpads, and touchscreens.
-You can map the tablet to a specific monitor, or use [OpenTabletDriver].
-We have touchpad gestures, but no touchscreen gestures yet.
-- **Wlr protocols**: yes, we have most of the important ones like layer-shell, gamma-control, screencopy.
-You can check on [wayland.app](https://wayland.app) at the bottom of each protocol's page.
-- **Performance**: while I run niri on beefy machines, I try to stay conscious of performance.
-I've seen someone use it fine on an Eee PC 900 from 2008, of all things.
-- **Xwayland**: [integrated](https://niri-wm.github.io/niri/Xwayland.html#using-xwayland-satellite) via xwayland-satellite starting from niri 25.08.
+## Keys you get out of the box
 
-## Media
+The bundled [default config](resources/default-config.kdl) binds, among others:
 
-[niri: Making a Wayland compositor in Rust](https://youtu.be/Kmz8ODolnDg?list=PLRdS-n5seLRqrmWDQY4KDqtRMfIwU0U3T) · *December 2024*
+```kdl
+Mod+O                  { toggle-overview; }
+Mod                    { release { toggle-grid-overview; } }   // tap Mod for the grid
+Mod+Shift+Z            { toggle-magnifier; }
+Mod+N                  { minimize-window; }
+Mod+Alt+WheelScrollUp   { adjust-magnifier-zoom 0.2; }
+Mod+Alt+WheelScrollDown { adjust-magnifier-zoom -0.2; }
+```
 
-My talk from the 2024 Moscow RustCon about niri, and how I do randomized property testing and profiling, and measure input latency.
-The talk is in Russian, but I prepared full English subtitles that you can find in YouTube's subtitle language selector.
+Delete the bare `Mod` bind if you would rather let the built-in
+`default-mod-action` handle the tap.
 
-[An interview with Ivan, the developer behind Niri](https://www.trommelspeicher.de/podcast/special_the_developer_behind_niri) · *June 2025*
+## Building
 
-An interview by a German tech podcast Das Triumvirat (in English).
-We talk about niri development and history, and my experience building and maintaining niri.
+Niri needs a Rust toolchain (1.87 or newer), the usual Wayland/DRM/pango
+dependencies, and — for screencasting — the `libpipewire` headers plus
+`libclang` for bindgen.
 
-[A tour of the niri scrolling-tiling Wayland compositor](https://lwn.net/Articles/1025866/) · *July 2025*
+On Arch Linux the system libraries are usually already installed; the build
+tools you may be missing are `rust` (or rustup) and `clang`:
 
-An LWN article with a nice overview and introduction to niri.
+```sh
+sudo pacman -S --needed rust clang
+```
 
-[How to test a Wayland compositor?](https://youtu.be/w44fYK5z418?list=PLK4NE4dSsLlw) · *October 2026*
+bindgen does not always search `/usr/lib` for libclang, so point it there:
 
-My talk about some testing techniques used in niri: property-based tests, snapshot tests, client-server tests.
-The first half overlaps with my RustCon talk, the second half is new.
-The talk is in Russian, but I prepared full English subtitles that you can find in YouTube's subtitle language selector.
+```sh
+LIBCLANG_PATH=/usr/lib cargo build --release
+```
 
-## Contributing
+Install:
 
-If you'd like to help with niri, there are plenty of both coding- and non-coding-related ways to do so.
-See [CONTRIBUTING.md](https://github.com/niri-wm/niri/blob/main/CONTRIBUTING.md) for an overview.
+```sh
+sudo install -Dm755 target/release/niri /usr/local/bin/niri
+```
 
-## Inspiration
+`niri-session` resolves `niri` through `PATH`, so a binary in `/usr/local/bin`
+wins over a distribution package in `/usr/bin` and survives package upgrades.
+If you would rather replace the packaged binary (keeping a backup):
 
-Niri is heavily inspired by [PaperWM] which implements scrollable tiling on top of GNOME Shell.
+```sh
+sudo cp -a /usr/bin/niri /usr/bin/niri.bak
+sudo install -Dm755 target/release/niri /usr/bin/niri
+```
 
-One of the reasons that prompted me to try writing my own compositor is being able to properly separate the monitors.
-Being a GNOME Shell extension, PaperWM has to work against Shell's global window coordinate space to prevent windows from overflowing.
+The version string carries the `-elite` suffix (`niri 26.04-elite (...)`), so a
+running fork build can never be mistaken for mainline niri.
 
-## Tile Scrollably Elsewhere
+## Syncing upstreams
 
-Here are some other projects which implement a similar workflow:
+```sh
+git remote add upstream https://github.com/niri-wm/niri.git
+git remote add shorin   https://github.com/SHORiN-KiWATA/niri.git
+git fetch upstream main
+git fetch shorin main
+git merge upstream/main     # mainline first: it is the base for everything else
+git merge shorin/main
+```
 
-- [PaperWM]: scrollable tiling on top of GNOME Shell.
-- [karousel]: scrollable tiling on top of KDE.
-- [scroll](https://github.com/dawsers/scroll) and [papersway]: scrollable tiling on top of sway/i3.
-- Hyprland has a built-in [scrolling layout](https://wiki.hypr.land/Configuring/Layouts/Scrolling-Layout/).
-- [Paneru] and [PaperWM.spoon]: scrollable tiling on top of macOS.
+`zaroutt/Niri-glass` shares no history with this repository and cannot be
+merged: port `src/render_helpers/liquid_glass.rs`,
+`src/render_helpers/shaders/clipped_surface.frag` and the `lg_*` uniforms in
+`src/render_helpers/shaders/mod.rs` by hand when it changes.
 
-## Contact
+What to expect while merging:
 
-Our main communication channel is a Matrix chat, feel free to join and ask a question: https://matrix.to/#/#niri:matrix.org
+- **binds and input** are the most volatile area. Upstream keeps reworking key
+  handling while SHORiN's input layer lags behind it: take upstream's structure
+  and re-express SHORiN's additions on top of it.
+- **grid overview** comes from SHORiN — prefer their implementation over local
+  patches.
+- **screencasting and the portal backend** are fork-only; neither upstream has
+  them, so those files resolve to this fork's side.
+- **the default config** is a common conflict source: both upstreams edit it, and
+  a duplicated bind makes `can_create_default_config` fail.
+  `cargo test -p niri-config` catches that.
 
-We also have a community Discord server: https://discord.gg/vT8Sfjy7sx
+After every merge:
 
-[PaperWM]: https://github.com/paperwm/PaperWM
-[waybar]: https://github.com/Alexays/Waybar
-[fuzzel]: https://codeberg.org/dnkl/fuzzel
-[awesome-niri]: https://github.com/niri-wm/awesome-niri
-[karousel]: https://github.com/peterfajdiga/karousel
-[papersway]: https://spwhitton.name/tech/code/papersway/
-[Paneru]: https://github.com/karinushka/paneru
-[PaperWM.spoon]: https://github.com/mogenson/PaperWM.spoon
-[Matrix channel]: https://matrix.to/#/#niri:matrix.org
-[OpenTabletDriver]: https://opentabletdriver.net/
-[DankMaterialShell]: https://danklinux.com/
-[Noctalia]: https://noctalia.dev/
+```sh
+LIBCLANG_PATH=/usr/lib cargo test --workspace
+```
+
+## Configuration and docs
+
+Configuration lives in `~/.config/niri/config.kdl`, with the usual `include`
+support. Documentation is under [`docs/wiki`](docs/wiki): the upstream pages
+plus fork-specific ones such as [`Grid-Overview`](docs/wiki/Grid-Overview.md) and
+[`Screencasting`](docs/wiki/Screencasting.md). Upstream documentation applies
+unless a fork page says otherwise.
+
+## Credits
+
+- [niri](https://github.com/niri-wm/niri) by Ivan Molodetskikh and contributors —
+  the compositor, and the vast majority of this code.
+- [SHORiN-KiWATA/niri](https://github.com/SHORiN-KiWATA/niri) — grid overview,
+  magnifier, minimization, agent seat.
+- [zaroutt/Niri-glass](https://github.com/zaroutt/Niri-glass) — the liquid-glass
+  effect and its shaders.
+- [PaperWM](https://github.com/paperwm/PaperWM) — the scrollable-tiling idea niri
+  itself was inspired by.
+
+## License
+
+GPL-3.0-or-later, same as niri. See [LICENSE](LICENSE).
