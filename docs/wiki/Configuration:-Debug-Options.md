@@ -35,6 +35,7 @@ debug {
     skip-cursor-only-updates-during-vrr
     deactivate-unfocused-windows
     disable-10bit-output
+    force-tearing
 }
 
 binds {
@@ -340,6 +341,16 @@ It will cause niri to drop the Activated state for all unfocused windows.
 ```kdl
 debug {
     deactivate-unfocused-windows
+}
+```
+
+### `force-tearing`
+
+Enables screen tearing unconditionally, overriding any [`allow-tearing`](./Configuration:-Window-Rules.md#allow-tearing) window rules.
+
+```kdl
+debug {
+    force-tearing
 }
 ```
 

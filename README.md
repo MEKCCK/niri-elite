@@ -4,6 +4,7 @@
     <a href="https://github.com/MEKCCK/niri-elite/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/MEKCCK/niri-elite"></a>
     <a href="https://github.com/niri-wm/niri"><img alt="Upstream" src="https://img.shields.io/badge/upstream-niri--wm%2Fniri-blue"></a>
     <a href="https://github.com/SHORiN-KiWATA/niri"><img alt="Upstream" src="https://img.shields.io/badge/upstream-SHORiN--KiWATA%2Fniri-blue"></a>
+    <a href="https://github.com/urayde/niri"><img alt="Upstream" src="https://img.shields.io/badge/upstream-urayde%2Fniri-blue"></a>
     <a href="https://github.com/zaroutt/Niri-glass"><img alt="Glass" src="https://img.shields.io/badge/glass-zaroutt%2FNiri--glass-purple"></a>
 </p>
 
@@ -16,15 +17,25 @@
 
 ## What this is
 
-`niri-elite` is my personal build of niri. It is not a rewrite, and it is not
-"niri with a different philosophy" — it is mainline niri, kept up to date, plus
-the features I actually use. Everything in mainline niri works here. The extra
-features come from three sources:
+`niri-elite` is my personal build of niri — an experimental playground rather
+than a project with a roadmap. It tracks mainline niri closely, and on top of
+that it collects whatever I find worth living with: features from other people's
+forks, work that has not landed upstream (yet, or ever), and a few things I
+ported by hand from projects that share no git history with this one. Upstream
+behavior is always the default; anything added here is a layer you can ignore,
+disable or delete.
+
+None of this is upstream policy, and nothing here is a promise that mainline
+niri will ever want it. It is a working daily driver first and a showcase
+second.
+
+The extra code comes from these sources:
 
 | Upstream | What is taken from it |
 |---|---|
 | [`niri-wm/niri`](https://github.com/niri-wm/niri) | The compositor itself. Merged regularly; all upstream behavior and fixes are kept. |
 | [`SHORiN-KiWATA/niri`](https://github.com/SHORiN-KiWATA/niri) | Grid overview, fullscreen magnifier, window minimization, the agent seat, and most of the grid/input polish built on top of them. |
+| [`urayde/niri`](https://github.com/urayde/niri) | Protocol work that is not upstream: tearing control, `linux-drm-syncobj-v1`, `wp-fifo-v1`, pointer warp, and the DRM async-flip support they need. |
 | [`zaroutt/Niri-glass`](https://github.com/zaroutt/Niri-glass) | The liquid-glass background effect. That repository shares no git history with this one, so its code is ported by hand. |
 
 Mainline niri deliberately stays conservative on several of these (no grid
@@ -63,6 +74,22 @@ here instead. Merging upstream is a regular chore — see
 | **SVG cursors** | SVG cursor themes (Bibata and friends) rendered natively. |
 | **Shake-to-enlarge cursor** | Shake the mouse to enlarge the cursor — zoom factor, threshold, hold duration and optional gradual growth via `cursor { shake-to-enlarge { ... } }`. |
 | **Software EGL, multi-GPU** | Software rendering for VMs, better primary render-node selection and display-only GPU handling. |
+
+### Protocols and presentation
+
+| Feature | Notes |
+|---|---|
+| **Tearing control** | Implements `wp-tearing-control-v1`, so games and video players can ask for immediate presentation. Tearing only happens where a window rule allows it: `window-rule { match app-id="..."; allow-tearing true; }`. `debug { force-tearing; }` tears regardless of the rule. |
+| **Explicit sync** | Implements `linux-drm-syncobj-v1`, so clients can attach DRM syncobj timelines to their buffers instead of relying on implicit fences. |
+| **`wp-fifo-v1`** | FIFO-style buffer release, so a client that falls behind is throttled instead of queueing frames. |
+| **Pointer warp** | Implements `wp_pointer_warp_v1`, letting pointer-lock clients warp the cursor without hiding and re-showing it. |
+| **Async page flips** | DRM async flips in the TTY backend, including per-plane async format probing and a fallback to a blocking commit when the driver cannot do it. |
+
+These come from [`urayde/niri`](https://github.com/urayde/niri) and need smithay
+work that is not upstream, so this build uses
+[`MEKCCK/smithay`](https://github.com/MEKCCK/smithay) — urayde's async flip and
+tearing branches with the per-client seat filter that the agent seat needs
+folded in.
 
 ### Screencasting and screenshots
 
@@ -159,11 +186,22 @@ git add PKGBUILD .SRCINFO && git commit -m "upgpkg: update to $(grep ^pkgver= PK
 ```sh
 git remote add upstream https://github.com/niri-wm/niri.git
 git remote add shorin   https://github.com/SHORiN-KiWATA/niri.git
+git remote add urayde   https://github.com/urayde/niri.git
 git fetch upstream main
 git fetch shorin main
+git fetch urayde main
 git merge upstream/main     # mainline first: it is the base for everything else
-git merge shorin/main
+git merge shorin/main       # grid overview, magnifier, agent seat, portal
+git merge urayde/main       # tearing, drm-syncobj, fifo, pointer warp
 ```
+
+`urayde/niri`'s protocol work normally needs its smithay fork as well. This
+build instead pins [`MEKCCK/smithay`](https://github.com/MEKCCK/smithay), which
+is urayde's `6df9a643` (async flips plus the Wayland side of tearing control)
+with SHORiN's single `seat: allow filtering which clients see a seat global`
+commit on top. When either side moves, rebase that fork and bump `rev` in
+`Cargo.toml` — it is two lines in `[workspace.dependencies]`, and the
+`[[patch]]` section that used to redirect SHORiN's fork is gone.
 
 `zaroutt/Niri-glass` shares no history with this repository and cannot be
 merged: port `src/render_helpers/liquid_glass.rs`,
