@@ -14,6 +14,7 @@ use smithay::wayland::compositor::{
     SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::drm_syncobj::DrmSyncobjCachedState;
 use smithay::wayland::shell::xdg::ToplevelCachedState;
 use smithay::wayland::shm::{ShmHandler, ShmState};
 
@@ -284,6 +285,9 @@ impl CompositorHandler for State {
                     let toplevel = unmapped.window.toplevel().expect("no x11 support").clone();
                     self.queue_initial_configure(toplevel);
                 }
+
+                // Clear fifo barriers on unmapped surfaces to ensure forward progress
+                self.niri.signal_fifo_unmapped();
                 return;
             }
 
@@ -591,7 +595,14 @@ impl State {
         }
 
         let hook = add_pre_commit_hook::<Self, _>(surface, move |state, _dh, surface| {
+            let mut acquire_point = None;
             let maybe_dmabuf = with_states(surface, |surface_data| {
+                acquire_point = surface_data
+                    .cached_state
+                    .get::<DrmSyncobjCachedState>()
+                    .pending()
+                    .acquire_point
+                    .clone();
                 surface_data
                     .cached_state
                     .get::<SurfaceAttributes>()
@@ -604,6 +615,29 @@ impl State {
                     })
             });
             if let Some(dmabuf) = maybe_dmabuf {
+                if let Some(acquire_point) = acquire_point {
+                    if let Ok((blocker, source)) = acquire_point.generate_blocker() {
+                        if let Some(client) = surface.client() {
+                            let res =
+                                state
+                                    .niri
+                                    .event_loop
+                                    .insert_source(source, move |_, _, state| {
+                                        let display_handle = state.niri.display_handle.clone();
+                                        state
+                                            .client_compositor_state(&client)
+                                            .blocker_cleared(state, &display_handle);
+                                        Ok(())
+                                    });
+                            if res.is_ok() {
+                                add_blocker(surface, blocker);
+                                trace!("added syncobj blocker");
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
                     if let Some(client) = surface.client() {
                         let res =

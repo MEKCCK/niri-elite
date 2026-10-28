@@ -27,14 +27,14 @@ tracy-client = { version = "0.18.5", default-features = false }
 
 [workspace.dependencies.smithay]
 # version = "0.4.1"
-git = "https://github.com/Smithay/smithay.git"
-rev = "8a270232f1bfc416c781273c98a3f52a812a0bba"
+git = "https://github.com/MEKCCK/smithay.git"
+rev = "32e62b9da85cd4353e6ee952c5efd0c44a27bebf"
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
 # version = "0.1.0"
-git = "https://github.com/Smithay/smithay.git"
-rev = "8a270232f1bfc416c781273c98a3f52a812a0bba"
+git = "https://github.com/MEKCCK/smithay.git"
+rev = "32e62b9da85cd4353e6ee952c5efd0c44a27bebf"
 # path = "../smithay/smithay-drm-extras"
 
 [package]
@@ -197,6 +197,3 @@ assets = [
 
 # Fork-only: Smithay with SeatState::new_wl_seat_with_filter() for the agent seat. When upstream
 # bumps the Smithay rev above, rebase the seat-global-filter commit onto it and update this rev.
-[patch."https://github.com/Smithay/smithay.git"]
-smithay = { git = "https://github.com/SHORiN-KiWATA/smithay.git", rev = "7e4a1baccd6f9f752a19a4aea194d5f6403bb588" }
-smithay-drm-extras = { git = "https://github.com/SHORiN-KiWATA/smithay.git", rev = "7e4a1baccd6f9f752a19a4aea194d5f6403bb588" }
