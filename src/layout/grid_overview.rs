@@ -7,7 +7,6 @@ use niri_config::{CornerRadius, GridFocusRingTransition};
 use rows::{Rows, MAX_FLOATING_ROWS};
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use super::axis::AxisMap;
 use super::focus_ring::{FocusRing, FocusRingRenderElement};
 use super::tab_indicator::{TabIndicator, TabIndicatorRenderElement, TabInfo};
 use super::{Animation, Clock, LayoutElement, Options, OverviewGesture, OverviewProgress};
@@ -349,13 +348,7 @@ impl<W: LayoutElement> GridOverview<W> {
             } else {
                 resumed.as_ref()
             };
-            GridLayout::compute_with_axis(
-                items,
-                area,
-                &self.options.grid_overview,
-                prev,
-                AxisMap::new(self.options.layout.main_axis),
-            )
+            GridLayout::compute(items, area, &self.options.grid_overview, prev)
         };
         self.layout_inputs = Some(inputs);
         let new_ids: Vec<_> = new_layout
@@ -1447,30 +1440,6 @@ pub struct GridLayout<W: LayoutElement> {
     float_rows: Vec<(W::Id, usize)>,
 }
 
-impl<W: LayoutElement> GridLayout<W> {
-    /// The same layout, expressed in transposed coordinates (main and cross axis swapped).
-    fn transposed(&self, axis: AxisMap) -> Self {
-        let mut layout = self.clone();
-        layout.entries = layout
-            .entries
-            .into_iter()
-            .map(|(item, info)| {
-                (
-                    item,
-                    GridEntryInfo {
-                        target_pos: axis.point_in(info.target_pos),
-                        target_size: axis.size_in(info.target_size),
-                        ..info
-                    },
-                )
-            })
-            .collect();
-        layout.lines.clear();
-        layout.arrangement = None;
-        layout
-    }
-}
-
 impl<W: LayoutElement> Clone for GridLayout<W> {
     fn clone(&self) -> Self {
         Self {
@@ -1543,74 +1512,6 @@ impl<W: LayoutElement> GridLayout<W> {
     /// beside a short row, stays there. With `prev`, the layout shown before, the new one keeps
     /// its wrap width and scale unless another one is clearly better.
     pub fn compute(
-        items: &[(GridItem<W>, GridSource)],
-        area: Rectangle<f64, Logical>,
-        config: &niri_config::GridOverview,
-        prev: Option<&GridLayout<W>>,
-    ) -> Self {
-        Self::compute_with_axis(
-            items,
-            area,
-            config,
-            prev,
-            AxisMap::new(niri_config::MainAxis::Horizontal),
-        )
-    }
-
-    /// Lay the grid out for a given main axis.
-    ///
-    /// With a vertical main axis everything is mirrored: the grid is computed in scrolling space
-    /// (X = main), so rows wrap by what is physically the height, and the result is transposed
-    /// back. With a horizontal axis this is exactly [`Self::compute`].
-    pub fn compute_with_axis(
-        items: &[(GridItem<W>, GridSource)],
-        area: Rectangle<f64, Logical>,
-        config: &niri_config::GridOverview,
-        prev: Option<&GridLayout<W>>,
-        axis: AxisMap,
-    ) -> Self {
-        if !axis.is_vertical() {
-            return Self::compute_inner(items, area, config, prev);
-        }
-
-        let items: Vec<_> = items
-            .iter()
-            .map(|(item, source)| {
-                (
-                    item.clone(),
-                    GridSource {
-                        size: axis.size_in(source.size),
-                        pos: source.pos.map(|pos| axis.point_in(pos)),
-                    },
-                )
-            })
-            .collect();
-        let area = axis.rect_in(area);
-        let prev = prev.map(|prev| prev.transposed(axis));
-
-        let mut layout = Self::compute_inner(&items, area, config, prev.as_ref());
-        layout.entries = layout
-            .entries
-            .into_iter()
-            .map(|(item, info)| {
-                (
-                    item,
-                    GridEntryInfo {
-                        target_pos: axis.point_out(info.target_pos),
-                        target_size: axis.size_out(info.target_size),
-                        ..info
-                    },
-                )
-            })
-            .collect();
-        // The floating lines and the arrangement describe the transposed computation; drop them
-        // so a later computation starts from the entries alone.
-        layout.lines.clear();
-        layout.arrangement = None;
-        layout
-    }
-
-    fn compute_inner(
         items: &[(GridItem<W>, GridSource)],
         area: Rectangle<f64, Logical>,
         config: &niri_config::GridOverview,

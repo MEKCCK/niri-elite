@@ -7,7 +7,6 @@ Here are the contents of this section at a glance:
 ```kdl
 layout {
     gaps 16
-    main-axis "horizontal"
     center-focused-column "never"
     always-center-single-column
     empty-workspace-above-first
@@ -101,25 +100,6 @@ layout {
 ```
 
 <sup>Since: 25.11</sup> You can override these settings for specific [outputs](./Configuration:-Outputs.md#layout-config-overrides) and [named workspaces](./Configuration:-Named-Workspaces.md#layout-config-overrides).
-
-### `main-axis`
-
-<sup>Since: next release</sup>
-
-Which way columns are laid out and scrolled. Defaults to `"horizontal"`.
-
-With `"vertical"`, columns stack top to bottom and the workspace scrolls vertically, which suits
-portrait monitors: each column fills the workspace height, and the windows inside a column sit
-side by side. Workspaces are then arranged horizontally, so moving between them goes left and
-right, and the pointer's vertical wheel scrolls the layout while the horizontal wheel switches
-workspaces.
-
-```kdl
-layout {
-    // horizontal (default) or vertical
-    main-axis "vertical"
-}
-```
 
 ### `gaps`
 

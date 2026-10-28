@@ -10,7 +10,6 @@ use smithay::backend::renderer::element::utils::{
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
-use super::axis::AxisMap;
 use super::grid_overview::GridDirection;
 use super::insert_hint_element::{InsertHintElement, InsertHintRenderElement};
 use super::scrolling::{Column, ColumnWidth};
@@ -967,11 +966,8 @@ impl<W: LayoutElement> Monitor<W> {
         // source workspace itself was removed, don't bother animating this since the removal is
         // instant anyway.
         if let Some(source_workspace_idx) = self.idx_of_ws(source_id) {
-            let axis = self.workspaces[new_idx].axis();
-            old_render_pos += axis.cross_vec(
-                self.workspace_cross_with_gap(1.)
-                    * (source_workspace_idx as f64 - new_idx as f64),
-            );
+            old_render_pos.y +=
+                self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
         }
 
         if let Some(start_scale) = grid_start {
@@ -1078,10 +1074,9 @@ impl<W: LayoutElement> Monitor<W> {
         };
 
         // Animate vertical movement between workspaces.
-        let axis = self.workspaces[new_idx].axis();
         let gap_offset =
-            self.workspace_cross_with_gap(1.) * (source_workspace_idx as f64 - new_idx as f64);
-        old_render_pos += axis.cross_vec(gap_offset);
+            self.workspace_size_with_gap(1.).h * (source_workspace_idx as f64 - new_idx as f64);
+        old_render_pos.y += gap_offset;
 
         // If the view is following the column, match the animation.
         let config = if activate {
@@ -1531,20 +1526,6 @@ impl<W: LayoutElement> Monitor<W> {
             .find_map(|ws| ws.window_visual_rectangle(id))
     }
 
-    /// Axis map of the workspace being shown: workspaces stack along its cross axis, so a
-    /// vertical main axis puts them side by side instead of above one another.
-    fn axis(&self) -> AxisMap {
-        self.workspaces
-            .get(self.active_workspace_idx)
-            .map(|ws| ws.axis())
-            .unwrap_or_else(|| AxisMap::new(self.options.layout.main_axis))
-    }
-
-    /// Cross-axis span of one workspace plus the gap after it, in physical coordinates.
-    fn workspace_cross_with_gap(&self, zoom: f64) -> f64 {
-        self.axis().size_cross(self.workspace_size_with_gap(zoom))
-    }
-
     fn workspace_size(&self, zoom: f64) -> Size<f64, Logical> {
         let ws_size = self.view_size.upscale(zoom);
         let scale = self.scale.fractional_scale();
@@ -1553,19 +1534,13 @@ impl<W: LayoutElement> Monitor<W> {
 
     fn workspace_gap(&self, zoom: f64) -> f64 {
         let scale = self.scale.fractional_scale();
-        let gap = self.axis().size_cross(self.view_size) * 0.1 * zoom;
+        let gap = self.view_size.h * 0.1 * zoom;
         round_logical_in_physical_max1(scale, gap)
     }
 
     fn workspace_size_with_gap(&self, zoom: f64) -> Size<f64, Logical> {
         let gap = self.workspace_gap(zoom);
-        let mut size = self.workspace_size(zoom);
-        if self.axis().is_vertical() {
-            size.w += gap;
-        } else {
-            size.h += gap;
-        }
-        size
+        self.workspace_size(zoom) + Size::from((0., gap))
     }
 
     pub fn overview_zoom(&self) -> f64 {
@@ -1698,10 +1673,10 @@ impl<W: LayoutElement> Monitor<W> {
                 // - first_y = -switch_anim.value() * from_height + to * (from_height - current_height)
                 let from = progress_anim.from();
                 let from_zoom = compute_overview_zoom(&self.options, Some(from));
-                let from_ws_height_with_gap = self.workspace_cross_with_gap(from_zoom);
+                let from_ws_height_with_gap = self.workspace_size_with_gap(from_zoom).h;
 
                 let zoom = self.overview_zoom();
-                let ws_height_with_gap = self.workspace_cross_with_gap(zoom);
+                let ws_height_with_gap = self.workspace_size_with_gap(zoom).h;
 
                 let first_ws_y = -switch_anim.value() * from_ws_height_with_gap
                     + switch_anim.to() * (from_ws_height_with_gap - ws_height_with_gap);
@@ -1723,21 +1698,20 @@ impl<W: LayoutElement> Monitor<W> {
 
         let ws_size = self.workspace_size(zoom);
         let gap = self.workspace_gap(zoom);
-        let axis = self.axis();
-        let ws_cross_with_gap = axis.size_cross(ws_size) + gap;
+        let ws_height_with_gap = ws_size.h + gap;
 
         let static_offset = (self.view_size.to_point() - ws_size.to_point()).downscale(2.);
         let static_offset = static_offset
             .to_physical_precise_round(scale)
             .to_logical(scale);
 
-        let first_ws_cross = -self.workspace_render_idx() * ws_cross_with_gap;
-        let first_ws_cross = round_logical_in_physical(scale, first_ws_cross);
+        let first_ws_y = -self.workspace_render_idx() * ws_height_with_gap;
+        let first_ws_y = round_logical_in_physical(scale, first_ws_y);
 
         // Return position for one-past-last workspace too.
         (0..=self.workspaces.len()).map(move |idx| {
-            let cross = first_ws_cross + idx as f64 * ws_cross_with_gap;
-            let loc = axis.cross_vec(cross) + static_offset;
+            let y = first_ws_y + idx as f64 * ws_height_with_gap;
+            let loc = Point::from((0., y)) + static_offset;
 
             // Even though all components that go into loc are rounded to physical pixels, the
             // floating point addition may lose precision. This can result for example in the
@@ -2327,7 +2301,7 @@ impl<W: LayoutElement> Monitor<W> {
         let total_height = if gesture.is_touchpad {
             WORKSPACE_GESTURE_MOVEMENT
         } else {
-            self.workspace_cross_with_gap(1.)
+            self.workspace_size_with_gap(1.).h
         };
 
         let Some(WorkspaceSwitch::Gesture(gesture)) = &mut self.workspace_switch else {
@@ -2461,7 +2435,7 @@ impl<W: LayoutElement> Monitor<W> {
         } else if gesture.is_touchpad {
             WORKSPACE_GESTURE_MOVEMENT
         } else {
-            self.workspace_cross_with_gap(1.)
+            self.workspace_size_with_gap(1.).h
         };
 
         let Some(WorkspaceSwitch::Gesture(gesture)) = &mut self.workspace_switch else {

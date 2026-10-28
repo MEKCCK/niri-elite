@@ -77,7 +77,6 @@ use crate::utils::{
 };
 use crate::window::ResolvedWindowRules;
 
-pub mod axis;
 pub mod closing_window;
 pub mod floating;
 pub mod focus_ring;
@@ -6213,13 +6212,6 @@ impl<W: LayoutElement> Layout<W> {
 
     pub fn is_overview_open(&self) -> bool {
         self.overview_open
-    }
-
-    /// Main axis of the active workspace's scrolling layout.
-    pub fn active_main_axis(&self) -> niri_config::MainAxis {
-        self.active_workspace()
-            .map(|ws| ws.axis().main_axis())
-            .unwrap_or(self.options.layout.main_axis)
     }
 
     pub fn is_grid_overview_open(&self) -> bool {
