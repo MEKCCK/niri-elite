@@ -1032,8 +1032,6 @@ async fn monitor_disappeared_clients(
 
 #[cfg(test)]
 mod tests {
-    use zbus::zvariant::Type as _;
-
     use super::*;
 
     fn output(name: &str, make: &str, model: &str, serial: Option<&str>) -> niri_ipc::Output {

@@ -11,7 +11,7 @@ These provide a cross-desktop API for apps to use for various things like file p
 Portals **require** [running niri as a session](./Getting-Started.md), which means through the `niri-session` script or from a display manager. You will want the following portals installed:
 
 * `xdg-desktop-portal-gtk`: implements most of the basic functionality, this is the "default fallback portal".
-* `gnome-keyring`: implements the Secret portal, required for certain apps to work.
+* `oo7-portal` or `gnome-keyring`: implements the Secret portal, required for certain apps to work.
 
 ScreenCast and Screenshot are provided by niri's built-in portal backend, so no separate screencasting portal package is needed.
 

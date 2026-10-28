@@ -6,7 +6,6 @@ use std::sync::{Arc, Mutex, Weak};
 use anyhow::Context as _;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use zbus::fdo::RequestNameFlags;
 use zbus::message::Header;
 use zbus::names::{OwnedUniqueName, UniqueName};
 use zbus::object_server::{InterfaceRef, SignalEmitter};
@@ -16,7 +15,7 @@ use zbus::{fdo, interface, ObjectServer};
 use super::niri_portal_screen_cast::{
     ConsumeTokenError, PickSourcesRequest, PickerRequestId, PortalScreenCast, SelectionTokens,
 };
-use super::Start;
+use super::{request_name, Start};
 use crate::backend::IpcOutputMap;
 use crate::utils::{CastSessionId, CastStreamId};
 
@@ -394,19 +393,15 @@ impl ScreenCast {
 }
 
 impl Start for ScreenCast {
-    fn start(self) -> anyhow::Result<zbus::blocking::Connection> {
+    fn start(self, monitor: bool) -> anyhow::Result<zbus::blocking::Connection> {
         let portal = self.portal.clone();
         let sessions = self.sessions.clone();
         let conn = zbus::blocking::Connection::session()?;
-        let flags = RequestNameFlags::AllowReplacement
-            | RequestNameFlags::ReplaceExisting
-            | RequestNameFlags::DoNotQueue;
-
         conn.object_server()
             .at("/org/gnome/Mutter/ScreenCast", self)?;
         conn.object_server()
             .at("/org/niri/Portal/ScreenCast", portal.clone())?;
-        conn.request_name_with_flags("org.gnome.Mutter.ScreenCast", flags)?;
+        request_name(&conn, "org.gnome.Mutter.ScreenCast", monitor)?;
 
         let async_conn = conn.inner().clone();
         let future = async move {

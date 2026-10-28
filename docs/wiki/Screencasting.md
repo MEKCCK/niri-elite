@@ -10,7 +10,7 @@ The niri package installs `niri.portal` and `niri-portals.conf`, which point the
 
 Persisted screen cast permissions work through the portal `restore_token` mechanism: the first request from an app shows the picker, and later requests with a valid token restore monitor selections without prompting.
 
-Alternatively, you can use tools that rely on the `wlr-screencopy` protocol, which niri also supports.
+Alternatively, you can use tools that rely on the `ext-image-copy-capture` protocol, or the older `wlr-screencopy`, both of which niri also supports.
 
 There are several features in niri designed for screencasting.
 Let's take a look!

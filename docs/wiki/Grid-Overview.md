@@ -5,6 +5,8 @@ It shows every window as a tile in a grid, letting you quickly navigate between 
 
 Open it with the `toggle-grid-overview` bind, or by tapping the `Mod` key (pressing and releasing it without pressing any other key in between). The `Mod` key tap behavior is built in and works even without an explicit binding, controlled by the `default-mod-action` setting (enabled by default).
 
+Note that the bundled default config binds bare `Mod` to `toggle-overview`, and an explicit bind takes precedence over the built-in tap. To use tap-to-grid with the default config, remove that bind (or change its action to `toggle-grid-overview`).
+
 While in the grid overview, all keyboard shortcuts keep working.
 Use the arrow keys to navigate between windows.
 If a column contains multiple windows, use Up/Down to switch between them within the same cell.
