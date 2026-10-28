@@ -11463,3 +11463,42 @@ fn vertical_main_axis_stacks_workspaces_along_the_cross_axis() {
         "with a vertical main axis, workspaces must sit side by side, got dx={dx} dy={dy}"
     );
 }
+
+#[test]
+fn vertical_grid_is_the_transpose_of_the_horizontal_grid() {
+    use super::axis::AxisMap;
+    use super::grid_overview::GridLayout;
+
+    let config = niri_config::GridOverview::default();
+    let area = Rectangle::from_size(Size::from((1200., 1200.)));
+    let tiled = [(0, (600., 600.)), (1, (600., 600.)), (2, (600., 600.))];
+    let items = grid_layout_items(&tiled, &[]);
+
+    let horizontal = GridLayout::compute(&items, area, &config, None);
+    let vertical = GridLayout::compute_with_axis(
+        &items,
+        area,
+        &config,
+        None,
+        AxisMap::new(MainAxis::Vertical),
+    );
+    assert_eq!(horizontal.entries.len(), vertical.entries.len());
+
+    for ((h_item, h), (v_item, v)) in horizontal.entries.iter().zip(vertical.entries.iter()) {
+        assert_eq!(h_item.window_id(), v_item.window_id());
+        assert!(
+            (h.target_pos.x - v.target_pos.y).abs() < 0.5
+                && (h.target_pos.y - v.target_pos.x).abs() < 0.5,
+            "expected transposed positions, got {:?} and {:?}",
+            h.target_pos,
+            v.target_pos
+        );
+        assert!(
+            (h.target_size.w - v.target_size.h).abs() < 0.5
+                && (h.target_size.h - v.target_size.w).abs() < 0.5,
+            "expected transposed sizes, got {:?} and {:?}",
+            h.target_size,
+            v.target_size
+        );
+    }
+}
