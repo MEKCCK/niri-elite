@@ -1478,6 +1478,17 @@ pub struct Window {
     /// Whether this window belongs to an app launched for the agent seat.
     #[serde(default)]
     pub is_agent: bool,
+    /// Content type the window declared with `wp_content_type_v1`, if any.
+    ///
+    /// Only Wayland clients can declare it; XWayland windows always report `None`.
+    #[serde(default)]
+    pub content_type: Option<ContentType>,
+    /// Whether this window's rules and declarations allow tearing on its output.
+    ///
+    /// This ignores whether the window is actually visible on an output, which the compositor also
+    /// requires before it presents a torn frame.
+    #[serde(default)]
+    pub tearing_allowed: bool,
     /// Position- and size-related properties of the window.
     pub layout: WindowLayout,
     /// Timestamp when the window was most recently focused.
@@ -1491,6 +1502,19 @@ pub struct Window {
 }
 
 /// A moment in time.
+/// Content type a window declared with `wp_content_type_v1`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum ContentType {
+    /// The client says it shows game content.
+    Game,
+    /// The client says it shows video content.
+    Video,
+    /// The client says it shows photo content.
+    Photo,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 pub struct Timestamp {

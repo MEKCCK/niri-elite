@@ -575,10 +575,13 @@ async fn handle_event_stream_client(client: EventStreamClient) -> anyhow::Result
 }
 
 fn make_ipc_window(
+    niri: &crate::niri::Niri,
     mapped: &Mapped,
     workspace_id: Option<WorkspaceId>,
     layout: WindowLayout,
 ) -> niri_ipc::Window {
+    let (content_type, tearing_allowed) = niri.window_tearing_info(mapped);
+
     with_toplevel_role(mapped.toplevel(), |role| niri_ipc::Window {
         id: mapped.id().get(),
         title: role.title.clone(),
@@ -590,6 +593,8 @@ fn make_ipc_window(
         is_urgent: mapped.is_urgent(),
         is_minimized: mapped.is_minimized(),
         is_agent: WindowRef::Mapped(mapped).is_agent(),
+        content_type,
+        tearing_allowed,
         layout,
         focus_timestamp: mapped.get_focus_timestamp().map(Timestamp::from),
     })
@@ -788,7 +793,7 @@ impl State {
             }
 
             let Some(ipc_win) = state.windows.get(&id) else {
-                let mut window = make_ipc_window(mapped, ws_id, window_layout);
+                let mut window = make_ipc_window(&self.niri, mapped, ws_id, window_layout);
                 window.is_focused = is_focused;
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;
@@ -803,7 +808,7 @@ impl State {
             });
 
             if changed {
-                let mut window = make_ipc_window(mapped, ws_id, window_layout);
+                let mut window = make_ipc_window(&self.niri, mapped, ws_id, window_layout);
                 window.is_focused = is_focused;
                 events.push(Event::WindowOpenedOrChanged { window });
                 return;

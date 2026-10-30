@@ -52,6 +52,24 @@ You can get raw events from `niri msg --json event-stream`, or by connecting to 
 
 You can find the full list of events along with documentation [here](https://niri-wm.github.io/niri/niri_ipc/enum.Event.html).
 
+### Tearing and content type
+
+<sup>Since: fork-only</sup>
+
+`Window` objects carry two extra fields that describe screen tearing:
+
+- `content_type` — what the client declared with `wp_content_type_v1`: `"game"`, `"video"` or
+  `"photo"`. It is `null` when the client has not declared anything, which includes every XWayland
+  window: X11 clients cannot use Wayland protocols, so they can never declare a content type.
+- `tearing_allowed` — whether this window's rules and declarations allow tearing. It does not
+  account for whether the window is currently the tearing candidate on its output (exactly one
+  window has to be visible and directly scannable for a torn frame to actually be presented).
+
+```sh
+$ niri msg --json windows | jq '.[] | {app_id, content_type, tearing_allowed}'
+{"app_id":"mpv","content_type":"video","tearing_allowed":true}
+```
+
 ### Programmatic Access
 
 `niri msg --json` is a thin wrapper over writing and reading to a socket.

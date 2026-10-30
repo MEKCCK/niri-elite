@@ -6922,8 +6922,61 @@ impl Niri {
                 hint,
                 content_type,
             );
+
+            if tracing::enabled!(tracing::Level::TRACE) {
+                use crate::utils::with_toplevel_role;
+                let app_id = with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
+                tracing::trace!(
+                    window = mapped.id().get(),
+                    ?app_id,
+                    visible,
+                    rule = ?rules.allow_tearing,
+                    content_types = ?rules.allow_tearing_content_type,
+                    ?content_type,
+                    client_hint = hint,
+                    allowed,
+                    "tearing decision"
+                );
+            }
+
             allowed && visible
         })
+    }
+
+    /// Content type a window declared, and whether its rules allow tearing.
+    ///
+    /// The result ignores whether the window is currently visible on the output, which is the extra
+    /// condition [`Self::output_allows_tearing`] applies.
+    pub fn window_tearing_info(&self, mapped: &Mapped) -> (Option<niri_ipc::ContentType>, bool) {
+        let mut hint = false;
+        let mut content_type = ContentType::None;
+
+        mapped.window.with_surfaces(|_surface, states| {
+            let mut state = states
+                .cached_state
+                .get::<TearingControlSurfaceCachedState>();
+            hint |= *state.current().presentation_hint() == PresentationHint::Async;
+            drop(state);
+
+            let declared = *states
+                .cached_state
+                .get::<ContentTypeSurfaceCachedState>()
+                .current()
+                .content_type();
+            if content_type == ContentType::None {
+                content_type = declared;
+            }
+        });
+
+        let rules = mapped.rules();
+        let allowed = tearing_allowed(
+            rules.allow_tearing,
+            rules.allow_tearing_content_type.as_deref(),
+            hint,
+            content_type,
+        );
+
+        (ipc_content_type(content_type), allowed)
     }
 
     pub fn update_primary_scanout_output(
@@ -9845,6 +9898,18 @@ fn tearing_allowed(
 
     // Otherwise keep the stock behavior: only what the client asked for.
     client_hint
+}
+
+/// Map a declared content type to what the IPC protocol reports, where `None` means "not declared".
+fn ipc_content_type(content_type: ContentType) -> Option<niri_ipc::ContentType> {
+    match content_type {
+        ContentType::None => None,
+        ContentType::Game => Some(niri_ipc::ContentType::Game),
+        ContentType::Video => Some(niri_ipc::ContentType::Video),
+        ContentType::Photo => Some(niri_ipc::ContentType::Photo),
+        // The protocol enum is non-exhaustive; unknown types are reported as not declared.
+        _ => None,
+    }
 }
 
 /// Whether a rule entry accepts the given declared content type.

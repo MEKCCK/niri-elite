@@ -706,6 +706,12 @@ window-rule {
 }
 ```
 
+> [!NOTE]
+> XWayland windows can never match a content type: X11 clients cannot use Wayland protocols, so
+> `allow-tearing-content-type` does nothing for Wine/Proton games and old X11 programs. Give those
+> an explicit rule instead, for example `match app-id=r#"^steam_app_"#` for games started by Steam,
+> `match app-id="^gamescope$"` for gamescope, or a title match for launchers that set no app id.
+
 #### `variable-refresh-rate`
 
 <sup>Since: 0.1.9</sup>
