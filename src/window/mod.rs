@@ -117,8 +117,8 @@ pub struct ResolvedWindowRules {
     /// Whether to block out this window from certain render targets.
     pub block_out_from: Option<BlockOutFrom>,
 
-    /// Whether to enable screen tearing on this window's primary output.
-    pub allow_tearing: Option<bool>,
+    /// When this window may tear on its primary output.
+    pub allow_tearing: Option<niri_config::AllowTearing>,
 
     /// Whether to enable VRR on this window's primary output if it is on-demand.
     pub variable_refresh_rate: Option<VrrRule>,

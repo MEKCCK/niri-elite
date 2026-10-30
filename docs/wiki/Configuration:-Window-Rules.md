@@ -672,7 +672,16 @@ window-rule {
 
 #### `allow-tearing`
 
-Allow screen tearing on an output where this window is visible.
+When this window may tear on an output where it is visible. It takes three values:
+
+- `false` — never tear this window, even when the client asks for it.
+- `true` — allow tearing whenever the window is visible, regardless of what the client asks for.
+- `"content-type"` — allow tearing only while the window declares itself as game or video content
+  through `wp_content_type_v1`. This trusts players and games that label their content without
+  having to name each of them.
+
+When the property is absent, tearing is enabled only if the client asks for it with
+`wp_tearing_control`.
 
 ```kdl
 // Allow tearing only when osu! has keyboard focus.
@@ -680,6 +689,14 @@ window-rule {
     match app-id="^osu!$" is-focused=true
 
     allow-tearing true
+}
+```
+
+```kdl
+// Any window that declares itself as game or video content may tear, e.g. fullscreen players and
+// games that use wp_content_type_v1.
+window-rule {
+    allow-tearing "content-type"
 }
 ```
 

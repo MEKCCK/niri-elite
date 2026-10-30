@@ -119,6 +119,8 @@ use smithay::wayland::shm::ShmState;
 use smithay::wayland::single_pixel_buffer::SinglePixelBufferState;
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::tablet_manager::TabletManagerState;
+use smithay::reexports::wayland_protocols::wp::content_type::v1::server::wp_content_type_v1::Type as ContentType;
+use smithay::wayland::content_type::{ContentTypeState, ContentTypeSurfaceCachedState};
 use smithay::wayland::tearing_control::{TearingControlState, TearingControlSurfaceCachedState};
 use smithay::wayland::text_input::TextInputManagerState;
 use smithay::wayland::viewporter::ViewporterState;
@@ -384,6 +386,7 @@ pub struct Niri {
     pub agent: Option<crate::agent::AgentState>,
     pub presentation_state: PresentationState,
     pub tearing_control_state: TearingControlState,
+    pub content_type_state: ContentTypeState,
     pub security_context_state: SecurityContextState,
     pub gamma_control_manager_state: GammaControlManagerState,
     pub activation_state: XdgActivationState,
@@ -3386,6 +3389,7 @@ impl Niri {
         let presentation_state =
             PresentationState::new::<State>(&display_handle, Monotonic::ID as u32);
         let tearing_control_state = TearingControlState::new::<State>(&display_handle);
+        let content_type_state = ContentTypeState::new::<State>(&display_handle);
         let security_context_state =
             SecurityContextState::new::<State, _>(&display_handle, client_is_unrestricted);
 
@@ -3686,6 +3690,7 @@ impl Niri {
             bind_repeat_timer: Option::default(),
             presentation_state,
             tearing_control_state,
+            content_type_state,
             security_context_state,
             gamma_control_manager_state,
             activation_state,
@@ -6883,6 +6888,7 @@ impl Niri {
         self.layout.windows_for_output(output).any(|mapped| {
             let mut visible = false;
             let mut hint = false;
+            let mut media_content = false;
 
             mapped.window.with_surfaces(|surface, states| {
                 if surface_primary_scanout_output(surface, states).as_ref() != Some(output) {
@@ -6890,17 +6896,22 @@ impl Niri {
                 }
 
                 visible = true;
+
                 let mut state = states
                     .cached_state
                     .get::<TearingControlSurfaceCachedState>();
                 hint |= *state.current().presentation_hint() == PresentationHint::Async;
+                drop(state);
+
+                let mut content_type = states.cached_state.get::<ContentTypeSurfaceCachedState>();
+                media_content |= matches!(
+                    content_type.current().content_type(),
+                    ContentType::Game | ContentType::Video
+                );
             });
 
-            match mapped.rules().allow_tearing {
-                Some(true) => visible,
-                Some(false) => false,
-                None => hint,
-            }
+            let rule = mapped.rules().allow_tearing;
+            tearing_allowed(rule, hint, media_content) && visible
         })
     }
 
@@ -9793,5 +9804,45 @@ mod magnifier_tests {
             let visible = f64::from(size) / zoom;
             assert!((moved - visible * step).abs() < 1e-9, "zoom {zoom}");
         }
+    }
+}
+
+/// Decide whether tearing may be enabled for a window.
+///
+/// `client_hint` is the window's `wp_tearing_control` async request, and `media_content` is whether
+/// it declared itself as game or video content with `wp_content_type_v1`.
+fn tearing_allowed(
+    rule: Option<niri_config::AllowTearing>,
+    client_hint: bool,
+    media_content: bool,
+) -> bool {
+    match rule {
+        Some(niri_config::AllowTearing::Always) => true,
+        Some(niri_config::AllowTearing::Never) => false,
+        Some(niri_config::AllowTearing::ContentType) => media_content,
+        // No rule: keep the stock behavior and follow only what the client asked for. Content type
+        // is a hint, not permission, so it needs an explicit `allow-tearing \"content-type\"` rule.
+        None => client_hint,
+    }
+}
+
+#[cfg(test)]
+mod tearing_tests {
+    use super::tearing_allowed;
+    use niri_config::AllowTearing;
+
+    #[test]
+    fn tearing_follows_the_rule() {
+        // Rules win over what the client asks for.
+        assert!(tearing_allowed(Some(AllowTearing::Always), false, false));
+        assert!(!tearing_allowed(Some(AllowTearing::Never), true, true));
+        assert!(tearing_allowed(Some(AllowTearing::ContentType), true, false) == false);
+        assert!(tearing_allowed(Some(AllowTearing::ContentType), false, true));
+    }
+
+    #[test]
+    fn without_a_rule_only_the_client_hint_counts() {
+        assert!(!tearing_allowed(None, false, true));
+        assert!(tearing_allowed(None, true, false));
     }
 }

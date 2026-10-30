@@ -79,7 +79,8 @@ here instead. Building, packaging and the upstream-sync workflow live in
 
 | Feature | Notes |
 |---|---|
-| **Tearing control** | Implements `wp-tearing-control-v1`, so games and video players can ask for immediate presentation. Tearing only happens where a window rule allows it: `window-rule { match app-id="..."; allow-tearing true; }`. `debug { force-tearing; }` tears regardless of the rule. |
+| **Tearing control** | Implements `wp-tearing-control-v1`, so games and video players can ask for immediate presentation. Tearing only happens where a window rule allows it: `allow-tearing true`, `false`, or `"content-type"` to trust windows that declare game or video content. `debug { force-tearing; }` tears regardless of the rule. |
+| **Content type** | Implements `wp_content_type_v1`, so players and games can tell the compositor whether they show game, video or photo content. `allow-tearing "content-type"` uses it to allow tearing only for that kind of window. |
 | **Explicit sync** | Implements `linux-drm-syncobj-v1`, so clients can attach DRM syncobj timelines to their buffers instead of relying on implicit fences. |
 | **`wp-fifo-v1`** | FIFO-style buffer release, so a client that falls behind is throttled instead of queueing frames. |
 | **Pointer warp** | Implements `wp_pointer_warp_v1`, letting pointer-lock clients warp the cursor without hiding and re-showing it. |

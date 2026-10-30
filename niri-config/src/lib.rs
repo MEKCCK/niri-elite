@@ -62,7 +62,8 @@ pub use crate::screen_cast_picker::ScreenCastPicker;
 pub use crate::utils::FloatOrInt;
 use crate::utils::{expand_home_path, Flag, MergeWith as _};
 pub use crate::window_rule::{
-    FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules, WindowRule,
+    AllowTearing, FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules,
+    WindowRule,
 };
 pub use crate::workspace::{Workspace, WorkspaceLayoutPart};
 
