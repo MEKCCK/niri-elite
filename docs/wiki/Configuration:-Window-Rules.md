@@ -687,8 +687,9 @@ window-rule {
 #### `allow-tearing-content-type`
 
 List the content types that may tear, so that windows declaring themselves with
-`wp_content_type_v1` do not need to be named one by one. Takes any of `"game"`, `"video"` and
-`"photo"`.
+`wp_content_type_v1` do not need to be named one by one. Accepts exactly the protocol's three content
+types: `"photo"`, `"video"` and `"game"`. The protocol's `none` is not a content type — it means the
+client declared nothing — so it cannot be listed and never matches.
 
 This is independent of `allow-tearing`: you can keep an explicit rule for one application and let
 a content-type rule cover everything else at the same time. Precedence is:

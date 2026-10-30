@@ -6926,13 +6926,22 @@ impl Niri {
             if tracing::enabled!(tracing::Level::TRACE) {
                 use crate::utils::with_toplevel_role;
                 let app_id = with_toplevel_role(mapped.toplevel(), |role| role.app_id.clone());
+                // `none` is the protocol's "nothing declared" default, not a content category, so
+                // spell it out in the log instead of printing a bare `None`.
+                let declared = match content_type {
+                    ContentType::None => "none (client declared no content type)",
+                    ContentType::Game => "game",
+                    ContentType::Video => "video",
+                    ContentType::Photo => "photo",
+                    _ => "unknown",
+                };
                 tracing::trace!(
                     window = mapped.id().get(),
                     ?app_id,
                     visible,
                     rule = ?rules.allow_tearing,
                     content_types = ?rules.allow_tearing_content_type,
-                    ?content_type,
+                    declared_content_type = declared,
                     client_hint = hint,
                     allowed,
                     "tearing decision"

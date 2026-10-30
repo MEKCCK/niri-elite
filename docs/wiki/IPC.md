@@ -58,9 +58,10 @@ You can find the full list of events along with documentation [here](https://nir
 
 `Window` objects carry two extra fields that describe screen tearing:
 
-- `content_type` — what the client declared with `wp_content_type_v1`: `"game"`, `"video"` or
-  `"photo"`. It is `null` when the client has not declared anything, which includes every XWayland
-  window: X11 clients cannot use Wayland protocols, so they can never declare a content type.
+- `content_type` — what the client declared with `wp_content_type_v1`, one of `"photo"`, `"video"`
+  or `"game"`. The protocol also has a `none` value, which is just its "nothing declared" default and
+  not a content category; it is reported as `null` here, together with clients that never bound the
+  protocol at all (every XWayland window, since X11 clients cannot use Wayland protocols).
 - `tearing_allowed` — whether this window's rules and declarations allow tearing. It does not
   account for whether the window is currently the tearing candidate on its output (exactly one
   window has to be visible and directly scannable for a torn frame to actually be presented).
