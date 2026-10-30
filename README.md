@@ -89,8 +89,23 @@ here instead. Building, packaging and the upstream-sync workflow live in
 These come from [`urayde/niri`](https://github.com/urayde/niri) and need smithay
 work that is not upstream, so this build uses
 [`MEKCCK/smithay`](https://github.com/MEKCCK/smithay) — urayde's async flip and
-tearing branches with the per-client seat filter that the agent seat needs
-folded in.
+tearing branches, the per-client seat filter the agent seat needs, and the
+colour management foundations (protocol, connector colour state, GLES colour
+transforms) from [`dividebysandwich/niri`](https://github.com/dividebysandwich/niri)
+and the `losnoco` colour management branch, all folded in.
+
+### HDR and colour management
+
+| Feature | Notes |
+|---|---|
+| **`wp_color_management_v1`** | Clients can describe their content (parametric image descriptions: PQ/BT.2020, sRGB, gamma 2.2, extended-linear/scRGB, custom primaries) and get surface feedback telling them the output can take HDR. mpv `--vo=gpu-next`, gamescope and HDR-aware games pick this up. |
+| **HDR output signalling** | Per-output opt-in with `output "DP-1" { hdr { ... } }`: the connector gets `Colorspace=BT2020_RGB`, an `HDR_OUTPUT_METADATA` infoframe built from the content description or the sink's EDID, and a 10-bit scanout buffer. `mode "auto"` only engages while a fullscreen HDR surface is shown, `mode "on"` keeps the output in HDR. |
+| **SDR into HDR blending** | SDR windows are composited into the HDR blend space at `reference-luminance` (BT.2408's 203 cd/m² by default) instead of being passed through, so mixed SDR/HDR desktops do not wash out. |
+| **10-bit scanout probing** | Each 10-bit format is probed with a throwaway frame before it is offered, because some drivers can scan out 2101010 but cannot render into it — the failure otherwise shows up per-frame after the compositor is up. |
+| **HDR-safe captures** | Screenshots, screencopy and PipeWire casts convert HDR content down to SDR, so captures of an HDR desktop are not blown out. |
+
+These need connector colour state and the colour management protocol in smithay,
+which is why the fork below carries them.
 
 ### Screencasting and screenshots
 
@@ -141,6 +156,8 @@ page says otherwise.
 - [urayde/niri](https://github.com/urayde/niri) — tearing control, explicit sync,
   `wp-fifo-v1`, pointer warp and the async-flip support behind them, plus the
   smithay fork they build on.
+- [dividebysandwich/niri](https://github.com/dividebysandwich/niri) — the HDR and colour
+  management implementation this fork ports (with the `losnoco` smithay colour branch)
 - [zaroutt/Niri-glass](https://github.com/zaroutt/Niri-glass) — the liquid-glass
   effect and its shaders.
 - [PaperWM](https://github.com/paperwm/PaperWM) — the scrollable-tiling idea niri

@@ -97,12 +97,20 @@ LIBCLANG_PATH=/usr/lib cargo test --workspace
 
 ## Smithay
 
-`urayde/niri`'s protocol work needs DRM async flips from a smithay fork, while
-the agent seat needs SHORiN's per-client seat filter, which only exists in
-SHORiN's fork. Instead of stacking `[patch]` redirects, this build pins
-[`MEKCCK/smithay`](https://github.com/MEKCCK/smithay): urayde's `6df9a643` with
-SHORiN's single `seat: allow filtering which clients see a seat global` commit
-on top.
+Three things in this fork need smithay work that is not upstream: `urayde/niri`'s
+DRM async flips, the agent seat's per-client seat filter (SHORiN's fork only), and
+HDR, which needs connector colour state and the colour management protocol.
+Instead of stacking `[patch]` redirects, this build pins
+[`MEKCCK/smithay`](https://github.com/MEKCCK/smithay), branch
+`elite-color-management`: urayde's async flip and tearing commits plus SHORiN's
+`seat: allow filtering which clients see a seat global`, with
+`dividebysandwich`'s `drm: support connector color state in atomic commits` and
+the `losnoco` colour management module (the version with custom primaries,
+extended target volume and Windows scRGB/BT.2100) cherry-picked on top.
+
+When any of these move upstream, drop the corresponding commits, rebase what is
+left and bump the two `rev` lines in `Cargo.toml`
+(`[workspace.dependencies.smithay]` and `smithay-drm-extras`).
 
 When either side moves, rebase that fork and bump the two `rev` lines in
 `Cargo.toml` (`[workspace.dependencies.smithay]` and `smithay-drm-extras`).
