@@ -27,7 +27,6 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
-use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{
     select_dmabuf_feedback, CropRenderElement, Relocate, RelocateRenderElement,
     RescaleRenderElement,
@@ -171,7 +170,7 @@ use crate::niri_render_elements;
 use crate::protocols::ext_workspace::{self, ExtWorkspaceManagerState};
 use crate::protocols::foreign_toplevel::{self, ForeignToplevelManagerState};
 use smithay::wayland::color::management::{
-    get_surface_description, ColorManagementState, ColorManagementSurfaceCachedState, Feature,
+    ColorManagementState, ColorManagementSurfaceCachedState, Feature,
     ImageDescription, Primaries as CmPrimaries, RenderIntent as CmRenderIntent,
     TransferFunction as CmTransferFunction,
 };

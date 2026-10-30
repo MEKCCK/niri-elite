@@ -38,7 +38,7 @@ use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::{
-    Bind, DebugFlags, ImportDma, ImportEgl, PresentationMode, RendererSuper,
+    DebugFlags, ImportDma, ImportEgl, PresentationMode, RendererSuper,
 };
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
@@ -91,8 +91,6 @@ use crate::utils::{get_monotonic_time, is_laptop_panel, logical_output, PanelOri
 const SUPPORTED_COLOR_FORMATS_10BIT: [Fourcc; 3] =
     [Fourcc::Abgr2101010, Fourcc::Argb8888, Fourcc::Abgr8888];
 
-// Smithay should fall back to Xrgb/Xbgr automatically if needed.
-const SUPPORTED_COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Abgr8888];
 
 /// Scanout formats offered on SDR outputs: 8-bit only, matching upstream niri. Requesting a 10-bit
 /// framebuffer is not free — some drivers (notably nvidia) hang the initial modeset when asked to
@@ -104,19 +102,8 @@ const SDR_COLOR_FORMATS: [Fourcc; 4] = [
     Fourcc::Abgr8888,
 ];
 
-/// Scanout formats offered on HDR outputs: 10-bit preferred (needed so the PQ signal isn't crushed),
-/// falling back to 8-bit if the GPU won't scan out 10-bit at the chosen mode.
-const HDR_COLOR_FORMATS: [Fourcc; 8] = [
-    Fourcc::Xrgb2101010,
-    Fourcc::Xbgr2101010,
-    Fourcc::Argb2101010,
-    Fourcc::Abgr2101010,
-    Fourcc::Xrgb8888,
-    Fourcc::Xbgr8888,
-    Fourcc::Argb8888,
-    Fourcc::Abgr8888,
-];
-
+/// 10-bit scanout formats offered on HDR outputs, probed one by one: some drivers can render into
+/// AR30/AB30 but not XR30/XB30, so a boolean "10-bit works" check would pick a broken format.
 const HDR_TEN_BIT_COLOR_FORMATS: [Fourcc; 4] = [
     Fourcc::Xrgb2101010,
     Fourcc::Xbgr2101010,
@@ -800,6 +787,7 @@ impl Tty {
                     // Apply pending gamma changes and restore our existing gamma.
                     let device = self.devices.get_mut(&node).unwrap();
                     for (crtc, surface) in device.surfaces.iter_mut() {
+                        let _ = crtc;
                         // The connector color state (max bpc, HDR signalling) re-asserts itself
                         // via the compositor's pending state on the next commit; give a rejected
                         // state another chance after resume.
