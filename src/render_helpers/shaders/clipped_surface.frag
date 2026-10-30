@@ -473,6 +473,8 @@ vec4 glass_effect(vec2 uv_tex, vec2 windowUV, vec4 baseColor, vec2 blurSize, vec
     return vec4(rgb, s.color.a);
 }
 
+vec4 niri_blend(vec4 color);
+
 void main() {
     vec3 coords_geo = input_to_geo * vec3(v_coords, 1.0);
 
@@ -531,5 +533,5 @@ void main() {
         color = vec4(0.0, 0.2, 0.0, 0.2) + color * 0.8;
 #endif
 
-    gl_FragColor = color;
+    gl_FragColor = niri_blend(color);
 }

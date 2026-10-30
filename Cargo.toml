@@ -28,13 +28,13 @@ tracy-client = { version = "0.18.5", default-features = false }
 [workspace.dependencies.smithay]
 # version = "0.4.1"
 git = "https://github.com/MEKCCK/smithay.git"
-rev = "32e62b9da85cd4353e6ee952c5efd0c44a27bebf"
+rev = "66b06706369ac97bbac2ef7711f7e85dd0d5a4fb"
 default-features = false
 
 [workspace.dependencies.smithay-drm-extras]
 # version = "0.1.0"
 git = "https://github.com/MEKCCK/smithay.git"
-rev = "32e62b9da85cd4353e6ee952c5efd0c44a27bebf"
+rev = "66b06706369ac97bbac2ef7711f7e85dd0d5a4fb"
 # path = "../smithay/smithay-drm-extras"
 
 [package]
@@ -75,7 +75,7 @@ glam = "0.33"
 input = { version = "0.10.0", features = ["libinput_1_21"] }
 keyframe = { version = "1.1.1", default-features = false }
 libc = "0.2.189"
-libdisplay-info = "0.3.0"
+libdisplay-info = { version = "0.3.0", features = ["v0_2"] }
 log = { version = "0.4", features = ["max_level_trace", "release_max_level_debug"] }
 niri-config = { version = "26.4.0-elite", path = "niri-config" }
 niri-ipc = { version = "26.4.0-elite", path = "niri-ipc", features = ["clap"] }

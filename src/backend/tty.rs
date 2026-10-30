@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::iter::zip;
 use std::num::NonZeroU64;
+use std::ops::RangeInclusive;
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::Path;
 use std::rc::Rc;
@@ -14,7 +15,7 @@ use anyhow::{anyhow, bail, ensure, Context};
 use bytemuck::{bytes_of_mut, cast_slice_mut};
 use drm_ffi::drm_mode_modeinfo;
 use libc::dev_t;
-use niri_config::output::{MaxBpc, Modeline};
+use niri_config::output::{HdrMode, Modeline};
 use niri_config::{Config, OutputName};
 use niri_ipc::{HSyncPolarity, VSyncPolarity};
 use smithay::backend::allocator::dmabuf::Dmabuf;
@@ -26,11 +27,13 @@ use smithay::backend::drm::compositor::{
 };
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
 use smithay::backend::drm::{
-    DrmDevice, DrmDeviceFd, DrmEvent, DrmEventMetadata, DrmEventTime, DrmNode, NodeType, VrrSupport,
+    Colorspace, ConnectorColorState, CtaCoordinate, DrmDevice, DrmDeviceFd, DrmEvent,
+    DrmEventMetadata, DrmEventTime, DrmNode, Eotf, HdrOutputMetadata, NodeType, VrrSupport,
 };
 use smithay::backend::egl::context::ContextPriority;
 use smithay::backend::egl::{EGLDevice, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
+use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::multigpu::gbm::GbmGlesBackend;
 use smithay::backend::renderer::multigpu::{GpuManager, MultiFrame, MultiRenderer};
@@ -68,9 +71,16 @@ use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
 use wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
 use wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
 
-use super::{IpcOutputMap, RenderResult};
+use super::{IpcOutputMap, OutputHdrCaps, RenderResult};
 use crate::backend::OutputId;
 use crate::frame_clock::FrameClock;
+use smithay::wayland::color::management::{
+    Chromaticities, ImageDescription, Primaries as CmPrimaries,
+    PrimariesOption as CmPrimariesOption, TransferFunction as CmTransferFunction,
+};
+
+use crate::render_helpers::blend::{self, set_frame_blend, DEFAULT_REFERENCE_LUMINANCE};
+
 use crate::niri::{Niri, RedrawState, State};
 use crate::render_helpers::debug::draw_damage;
 use crate::render_helpers::renderer::AsGlesRenderer;
@@ -82,8 +92,25 @@ use crate::utils::{get_monotonic_time, is_laptop_panel, logical_output, PanelOri
 const SUPPORTED_COLOR_FORMATS_10BIT: [Fourcc; 3] =
     [Fourcc::Abgr2101010, Fourcc::Argb8888, Fourcc::Abgr8888];
 
-// Smithay should fall back to Xrgb/Xbgr automatically if needed.
-const SUPPORTED_COLOR_FORMATS: [Fourcc; 2] = [Fourcc::Argb8888, Fourcc::Abgr8888];
+
+/// Scanout formats offered on SDR outputs: 8-bit only, matching upstream niri. Requesting a 10-bit
+/// framebuffer is not free — some drivers (notably nvidia) hang the initial modeset when asked to
+/// scan out a 2101010 buffer — so outputs that did not opt into HDR stay 8-bit as before.
+const SDR_COLOR_FORMATS: [Fourcc; 4] = [
+    Fourcc::Xrgb8888,
+    Fourcc::Xbgr8888,
+    Fourcc::Argb8888,
+    Fourcc::Abgr8888,
+];
+
+/// 10-bit scanout formats offered on HDR outputs, probed one by one: some drivers can render into
+/// AR30/AB30 but not XR30/XB30, so a boolean "10-bit works" check would pick a broken format.
+const HDR_TEN_BIT_COLOR_FORMATS: [Fourcc; 4] = [
+    Fourcc::Xrgb2101010,
+    Fourcc::Xbgr2101010,
+    Fourcc::Argb2101010,
+    Fourcc::Abgr2101010,
+];
 
 pub struct Tty {
     config: Rc<RefCell<Config>>,
@@ -382,6 +409,21 @@ struct Surface {
     name: OutputName,
     compositor: GbmDrmCompositor,
     connector: connector::Handle,
+    /// Whether the driver and sink can do HDR on this connector: the connector exposes the
+    /// `Colorspace` (with BT2020_RGB) and `HDR_OUTPUT_METADATA` properties, and the sink's EDID
+    /// advertises the PQ EOTF.
+    hdr_supported: bool,
+    /// HDR capabilities parsed from the sink's EDID.
+    edid_hdr: EdidHdrInfo,
+    /// Valid range of the connector's `max bpc` property, if it has one.
+    max_bpc_range: Option<RangeInclusive<u32>>,
+    /// The last color state we tried to stage and the driver rejected. Tracked so a rejected
+    /// state isn't re-tested every frame (each test is an atomic TEST_ONLY commit).
+    failed_color_state: Option<ConnectorColorState>,
+    /// The blend space of the last rendered frame: `Some(reference luminance)` = HDR, `None`
+    /// = SDR. Blend changes alter shader output without damaging anything, so a change forces
+    /// a full redraw.
+    last_blend: Option<Option<f64>>,
     dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     gamma_props: Option<GammaProps>,
     /// Gamma change to apply upon session resume.
@@ -401,6 +443,38 @@ pub struct SurfaceDmabufFeedback {
     pub render: DmabufFeedback,
     pub scanout: DmabufFeedback,
     pub r#async: DmabufFeedback,
+}
+
+/// HDR capabilities of the connected sink, parsed from its EDID (CTA HDR static metadata and
+/// colorimetry blocks).
+#[derive(Debug, Clone, Copy, Default)]
+struct EdidHdrInfo {
+    /// The sink accepts the SMPTE ST 2084 (PQ) EOTF.
+    pq: bool,
+    /// The sink supports BT.2020 RGB signal colorimetry.
+    bt2020_rgb: bool,
+    /// Desired content max luminance in cd/m² (0 = not provided).
+    max_luminance: u16,
+    /// Desired content min luminance in 0.0001 cd/m² units (0 = not provided).
+    min_luminance: u16,
+    /// Desired content max frame-average luminance in cd/m² (0 = not provided).
+    max_frame_avg_luminance: u16,
+}
+
+impl EdidHdrInfo {
+    fn from_edid(info: &libdisplay_info::info::Info) -> Self {
+        let hdr = info.hdr_static_metadata();
+        let colorimetry = info.supported_signal_colorimetry();
+        let lum_u16 = |v: f32| v.clamp(0.0, u16::MAX as f32).round() as u16;
+        Self {
+            pq: hdr.pq,
+            bt2020_rgb: colorimetry.bt2020_rgb,
+            max_luminance: lum_u16(hdr.desired_content_max_luminance),
+            // EDID reports cd/m²; the infoframe field is in 0.0001 cd/m² units.
+            min_luminance: lum_u16(hdr.desired_content_min_luminance * 10000.),
+            max_frame_avg_luminance: lum_u16(hdr.desired_content_max_frame_avg_luminance),
+        }
+    }
 }
 
 struct GammaProps {
@@ -431,12 +505,9 @@ enum GammaMode {
     },
 }
 
-struct ConnectorProperties<'a> {
-    device: &'a DrmDevice,
-    connector: connector::Handle,
+/// Read-only snapshot of a connector's DRM properties.
+struct ConnectorProperties {
     properties: Vec<(property::Info, property::RawValue)>,
-    has_change: bool,
-    requests: AtomicModeReq,
 }
 
 impl Tty {
@@ -715,20 +786,12 @@ impl Tty {
 
                     // Apply pending gamma changes and restore our existing gamma.
                     let device = self.devices.get_mut(&node).unwrap();
-                    for surface in device.surfaces.values_mut() {
-                        if let Ok(mut props) =
-                            ConnectorProperties::try_new(&device.drm, surface.connector)
-                        {
-                            let max_bpc = self
-                                .config
-                                .borrow()
-                                .outputs
-                                .find(&surface.name)
-                                .and_then(|o| o.max_bpc);
-                            set_connector_properties(&mut props, max_bpc, true);
-                        } else {
-                            warn!("failed to get connector properties");
-                        }
+                    for (crtc, surface) in device.surfaces.iter_mut() {
+                        let _ = crtc;
+                        // The connector color state (max bpc, HDR signalling) re-asserts itself
+                        // via the compositor's pending state on the next commit; give a rejected
+                        // state another chance after resume.
+                        surface.failed_color_state = None;
 
                         if let Some(gamma_props) = &mut surface.gamma_props {
                             if let Some(ramp) = surface.pending_gamma_change.take() {
@@ -878,6 +941,7 @@ impl Tty {
             let gles_renderer = renderer.as_gles_renderer();
             resources::init(gles_renderer);
             shaders::init(gles_renderer);
+            blend::FrameBlendState::init(gles_renderer);
 
             let config = self.config.borrow();
             if let Some(src) = config.animations.window_resize.custom_shader.as_deref() {
@@ -1351,9 +1415,7 @@ impl Tty {
         debug!("picking mode: {mode:?}");
 
         let mut orientation = None;
-        if let Ok(mut props) = ConnectorProperties::try_new(&device.drm, connector.handle()) {
-            set_connector_properties(&mut props, config.max_bpc, true);
-
+        if let Ok(props) = ConnectorProperties::try_new(&device.drm, connector.handle()) {
             match props.get_panel_orientation() {
                 Ok(x) => orientation = Some(x),
                 Err(err) => {
@@ -1378,6 +1440,42 @@ impl Tty {
         let surface = device
             .drm
             .create_surface(crtc, mode, &[connector.handle()])?;
+
+        // Probe the connector's color/HDR capabilities: HDR signalling needs the Colorspace
+        // (with BT2020_RGB) and HDR_OUTPUT_METADATA properties from the driver, plus a sink
+        // that accepts the PQ EOTF per its EDID.
+        let max_bpc_range = surface
+            .max_bpc_range(connector.handle())
+            .map_err(|err| warn!("error querying max bpc range: {err:?}"))
+            .ok()
+            .flatten();
+        let supports_bt2020 = surface
+            .supported_colorspaces(connector.handle())
+            .map_err(|err| warn!("error querying supported colorspaces: {err:?}"))
+            .is_ok_and(|cs| cs.contains(&Colorspace::Bt2020Rgb));
+        let supports_hdr_metadata = surface
+            .hdr_metadata_supported(connector.handle())
+            .unwrap_or(false);
+        let edid_hdr = get_edid_info(&device.drm, connector.handle())
+            .map(|info| EdidHdrInfo::from_edid(&info))
+            .unwrap_or_default();
+        let hdr_supported = supports_bt2020 && supports_hdr_metadata && edid_hdr.pq;
+        debug!(
+            supports_bt2020,
+            supports_hdr_metadata,
+            edid_pq = edid_hdr.pq,
+            edid_bt2020_rgb = edid_hdr.bt2020_rgb,
+            ?max_bpc_range,
+            "connector color capabilities"
+        );
+        if config.hdr.is_some() && !hdr_supported {
+            warn!(
+                "output {connector_name}: hdr is enabled in the config, but the driver or \
+                 display does not support it (Colorspace BT2020_RGB: {supports_bt2020}, \
+                 HDR_OUTPUT_METADATA: {supports_hdr_metadata}, EDID PQ: {})",
+                edid_hdr.pq,
+            );
+        }
 
         // Try to enable VRR if requested.
         match surface.vrr_supported(connector.handle()) {
@@ -1430,6 +1528,12 @@ impl Tty {
             .user_data()
             .insert_if_missing(|| TtyOutputState { node, crtc });
         output.user_data().insert_if_missing(|| output_name.clone());
+        output.user_data().insert_if_missing(|| OutputHdrCaps {
+            supported: hdr_supported,
+            max_luminance: edid_hdr.max_luminance,
+            min_luminance: edid_hdr.min_luminance,
+            max_frame_avg_luminance: edid_hdr.max_frame_avg_luminance,
+        });
         if let Some(x) = orientation {
             output.user_data().insert_if_missing(|| PanelOrientation(x));
         }
@@ -1477,28 +1581,161 @@ impl Tty {
             })
             .collect::<FormatSet>();
 
-        let color_formats = if self.config.borrow().debug.disable_10bit_output {
-            &SUPPORTED_COLOR_FORMATS[..]
-        } else {
-            &SUPPORTED_COLOR_FORMATS_10BIT[..]
+        // Only offer 10-bit scanout formats on outputs that opted into HDR (and can do it).
+        // Requesting a 10-bit framebuffer unconditionally hangs the initial modeset on some
+        // drivers (notably nvidia), so SDR outputs stay 8-bit exactly as upstream.
+        //
+        // Diagnostic escape hatch: NIRI_HDR_FORCE_8BIT keeps an 8-bit framebuffer even on HDR
+        // outputs, while still emitting the HDR colorspace/metadata signalling. This isolates a
+        // driver that hangs on 10-bit scanout (set the var -> boots fine) from one that hangs on the
+        // HDR infoframe commit itself (still hangs). Remove once HDR on nvidia is understood.
+        let force_8bit = std::env::var_os("NIRI_HDR_FORCE_8BIT").is_some();
+        let mut using_10bit_formats = config.hdr.is_some() && hdr_supported && !force_8bit;
+        let mut hdr_color_formats = Vec::new();
+
+        if using_10bit_formats {
+            // Do a throwaway compositor + render_frame probe for each 10-bit format separately.
+            // Some drivers can render into AR30/AB30 but not XR30/XB30; treating 10-bit as a
+            // boolean capability would either pick a broken format or fall back too far to 8-bit.
+            for format in HDR_TEN_BIT_COLOR_FORMATS {
+                let surface = device
+                    .drm
+                    .create_surface(crtc, mode, &[connector.handle()])?;
+
+                let mut compositor: GbmDrmCompositor = match DrmCompositor::new(
+                    OutputModeSource::Auto(output.downgrade()),
+                    surface,
+                    None,
+                    device.allocator.clone(),
+                    GbmFramebufferExporter::new(device.gbm.clone(), device.render_node.into()),
+                    std::iter::once(format),
+                    render_formats.clone(),
+                    device.drm.cursor_size(),
+                    Some(device.gbm.clone()),
+                ) {
+                    Ok(compositor) => compositor,
+                    Err(err) => {
+                        warn!(
+                            connector = connector_name,
+                            ?format,
+                            "10-bit format is not usable for DRM compositor creation: {err:?}"
+                        );
+                        continue;
+                    }
+                };
+
+                let render_ok = match self.gpu_manager.renderer(
+                    &self.primary_render_node,
+                    &render_node,
+                    compositor.format(),
+                ) {
+                    Ok(mut renderer) => {
+                        let no_elements: [SolidColorRenderElement; 0] = [];
+                        match compositor.render_frame(
+                            &mut renderer,
+                            &no_elements,
+                            [0.; 4],
+                            FrameFlags::empty(),
+                            PresentationMode::VSync,
+                        ) {
+                            Ok(_) => true,
+                            Err(err) => {
+                                warn!(
+                                    connector = connector_name,
+                                    ?format,
+                                    "10-bit format is not renderable: {err:?}"
+                                );
+                                false
+                            }
+                        }
+                    }
+                    // Couldn't build a renderer to probe with; don't block startup — keep the
+                    // format and let the real render path try, as the previous probe did.
+                    Err(err) => {
+                        warn!(
+                            connector = connector_name,
+                            ?format,
+                            "could not probe 10-bit format renderability: {err:?}"
+                        );
+                        true
+                    }
+                };
+
+                compositor.reset_buffers();
+
+                if render_ok {
+                    debug!(
+                        connector = connector_name,
+                        ?format,
+                        "keeping renderable 10-bit format"
+                    );
+                    hdr_color_formats.push(format);
+                }
+            }
+
+            if hdr_color_formats.is_empty() {
+                warn!(
+                    connector = connector_name,
+                    "GPU can scan out but not render into any 10-bit format; using an 8-bit HDR framebuffer"
+                );
+                using_10bit_formats = false;
+            } else {
+                hdr_color_formats.extend(SDR_COLOR_FORMATS);
+            }
         }
-        .iter()
-        .copied();
+
+        let mut color_formats: &[Fourcc] = if using_10bit_formats {
+            &hdr_color_formats
+        } else {
+            &SUPPORTED_COLOR_FORMATS_10BIT
+        };
 
         // Create the compositor.
-        let res = DrmCompositor::new(
+        debug!(
+            ?color_formats,
+            force_8bit,
+            hdr = config.hdr.is_some(),
+            "creating DRM compositor"
+        );
+        let mut res = DrmCompositor::new(
             OutputModeSource::Auto(output.downgrade()),
             surface,
             None,
             device.allocator.clone(),
             GbmFramebufferExporter::new(device.gbm.clone(), device.render_node.into()),
-            color_formats.clone(),
+            color_formats.iter().copied(),
             // This is only used to pick a good internal format, so it can use the surface's render
             // formats, even though we only ever render on the primary GPU.
             render_formats.clone(),
             device.drm.cursor_size(),
             Some(device.gbm.clone()),
         );
+
+        // If 10-bit formats didn't work out, fall back to plain 8-bit before trying anything
+        // else. HDR signalling still works on an 8-bit framebuffer, just with banding.
+        if res.is_err() && using_10bit_formats {
+            let err = res.as_ref().err().unwrap();
+            warn!("error creating DRM compositor with 10-bit formats, retrying 8-bit: {err:?}");
+            color_formats = &SDR_COLOR_FORMATS;
+            using_10bit_formats = false;
+
+            // DrmCompositor::new() consumed the surface...
+            let surface = device
+                .drm
+                .create_surface(crtc, mode, &[connector.handle()])?;
+
+            res = DrmCompositor::new(
+                OutputModeSource::Auto(output.downgrade()),
+                surface,
+                None,
+                device.allocator.clone(),
+                GbmFramebufferExporter::new(device.gbm.clone(), device.render_node.into()),
+                color_formats.iter().copied(),
+                render_formats.clone(),
+                device.drm.cursor_size(),
+                Some(device.gbm.clone()),
+            );
+        }
 
         let mut compositor = match res {
             Ok(x) => x,
@@ -1522,7 +1759,7 @@ impl Tty {
                     None,
                     device.allocator.clone(),
                     GbmFramebufferExporter::new(device.gbm.clone(), device.render_node.into()),
-                    color_formats,
+                    color_formats.iter().copied(),
                     render_formats,
                     device.drm.cursor_size(),
                     Some(device.gbm.clone()),
@@ -1530,6 +1767,81 @@ impl Tty {
                 .context("error creating DRM compositor")?
             }
         };
+        debug!("DRM compositor created");
+
+        // Do one throwaway `render_frame` — the exact path that would fail — and, if it errors,
+        // recreate the compositor with 8-bit formats. HDR signalling still works on an 8-bit
+        // framebuffer, just with banding. Only runs for 10-bit HDR outputs, once per connector at setup.
+        if using_10bit_formats {
+            let trial_ok = match self.gpu_manager.renderer(
+                &self.primary_render_node,
+                &render_node,
+                compositor.format(),
+            ) {
+                Ok(mut renderer) => {
+                    let no_elements: [SolidColorRenderElement; 0] = [];
+                    match compositor.render_frame(
+                        &mut renderer,
+                        &no_elements,
+                        [0.; 4],
+                        FrameFlags::empty(),
+                        PresentationMode::VSync,
+                    ) {
+                        Ok(_) => true,
+                        Err(err) => {
+                            warn!(
+                                connector = connector_name,
+                                "GPU can scan out but not render into 10-bit ({err:?}); \
+                                 using an 8-bit HDR framebuffer"
+                            );
+                            false
+                        }
+                    }
+                }
+                // Couldn't build a renderer to probe with; don't block startup — let the real
+                // render path try, and its own error handling take over.
+                Err(err) => {
+                    warn!("could not probe 10-bit renderability: {err:?}");
+                    true
+                }
+            };
+            // Discard whatever the trial left in the swapchain so the first real frame is clean.
+            compositor.reset_buffers();
+
+            if !trial_ok {
+                color_formats = &SDR_COLOR_FORMATS;
+                // Drop the 10-bit compositor first so its surface releases the CRTC before we
+                // create a fresh 8-bit surface for it. (The trial only rendered; it never queued
+                // or committed, so the CRTC was not modeset.)
+                drop(compositor);
+                let surface = device
+                    .drm
+                    .create_surface(crtc, mode, &[connector.handle()])?;
+                compositor = DrmCompositor::new(
+                    OutputModeSource::Auto(output.downgrade()),
+                    surface,
+                    None,
+                    device.allocator.clone(),
+                    GbmFramebufferExporter::new(device.gbm.clone(), device.render_node.into()),
+                    color_formats.iter().copied(),
+                    render_formats.clone(),
+                    device.drm.cursor_size(),
+                    Some(device.gbm.clone()),
+                )
+                .context("error creating 8-bit DRM compositor after 10-bit render probe failed")?;
+            }
+        }
+
+        // Stage the initial connector color state (SDR, with the configured max bpc) so it
+        // rides the initial modeset as part of the same atomic commit.
+        let max_bpc = effective_max_bpc(&config, &max_bpc_range);
+        if let Err(err) = compositor.use_color_state(ConnectorColorState {
+            colorspace: Colorspace::Default,
+            hdr_metadata: None,
+            max_bpc,
+        }) {
+            warn!("error staging initial connector color state: {err:?}");
+        }
 
         if self.debug_tint {
             compositor.set_debug_flags(DebugFlags::TINT);
@@ -1579,6 +1891,11 @@ impl Tty {
         let surface = Surface {
             name: output_name,
             connector: connector.handle(),
+            hdr_supported,
+            edid_hdr,
+            max_bpc_range,
+            failed_color_state: None,
+            last_blend: None,
             compositor,
             dmabuf_feedback,
             gamma_props,
@@ -1945,6 +2262,96 @@ impl Tty {
             return rv;
         }
 
+        // Reconcile the output's blend space and HDR signalling with the config and content.
+        //
+        // With hdr mode="on", the connector stays in HDR (BT.2020 + PQ) and the desktop is
+        // composited into that blend space. In auto mode, HDR engages only while a fullscreen
+        // surface carries an HDR image description (passthrough), so the output is SDR
+        // otherwise.
+        //
+        // The connector state is only *staged* here; smithay applies it inside its own commit
+        // as a single atomic modeset together with mode, CRTC and plane state (committing
+        // connector color properties standalone hangs some drivers, notably nvidia).
+        let (blend_hdr, hdr_content, reference_luminance) = {
+            let config = self.config.borrow();
+            let output_config = config.outputs.find(&surface.name);
+            let hdr_config = output_config.and_then(|o| o.hdr.clone());
+            let hdr_allowed = hdr_config.is_some() && surface.hdr_supported;
+            let max_bpc = output_config
+                .map(|o| effective_max_bpc(o, &surface.max_bpc_range))
+                .unwrap_or(None);
+            let always_on = hdr_config.as_ref().is_some_and(|h| h.mode == HdrMode::On);
+            let reference_luminance = hdr_config
+                .as_ref()
+                .and_then(|h| h.reference_luminance)
+                .map(|v| v.0)
+                .unwrap_or(DEFAULT_REFERENCE_LUMINANCE);
+            drop(config);
+
+            let hdr_desc = hdr_allowed
+                .then(|| niri.output_hdr_image_description(output))
+                .flatten();
+            let blend_hdr = hdr_allowed && (always_on || hdr_desc.is_some());
+
+            let desired = if blend_hdr {
+                // Without fullscreen HDR content, the metadata comes from the sink's EDID.
+                let desc = hdr_desc.unwrap_or(ImageDescription {
+                    transfer: CmTransferFunction::St2084Pq,
+                    primaries: CmPrimariesOption {
+                        named: Some(CmPrimaries::Bt2020),
+                        values: None,
+                    },
+                    max_cll: None,
+                    max_fall: None,
+                    mastering_luminance: None,
+                    mastering_primaries: None,
+                    luminances: None,
+                    windows_scrgb: false,
+                    windows_bt2100: false,
+                });
+                ConnectorColorState {
+                    colorspace: Colorspace::Bt2020Rgb,
+                    hdr_metadata: Some(build_hdr_metadata(&desc, &surface.edid_hdr)),
+                    max_bpc,
+                }
+            } else {
+                ConnectorColorState {
+                    colorspace: Colorspace::Default,
+                    hdr_metadata: None,
+                    max_bpc,
+                }
+            };
+
+            if surface.compositor.pending_color_state() != desired
+                && surface.failed_color_state != Some(desired)
+            {
+                match surface.compositor.use_color_state(desired) {
+                    Ok(()) => {
+                        surface.failed_color_state = None;
+                        info!(
+                            connector = surface.name.connector,
+                            hdr = desired.hdr_metadata.is_some(),
+                            "updated HDR signalling to match content"
+                        );
+                    }
+                    Err(err) => {
+                        surface.failed_color_state = Some(desired);
+                        warn!("failed to update HDR signalling: {err:?}");
+                    }
+                }
+            }
+
+            (blend_hdr, hdr_desc.is_some(), reference_luminance)
+        };
+
+        // A blend-space change alters what every shader outputs without any element damage;
+        // force a full redraw.
+        let blend = blend_hdr.then_some(reference_luminance);
+        if surface.last_blend != Some(blend) {
+            surface.last_blend = Some(blend);
+            surface.compositor.reset_buffers();
+        }
+
         let mut renderer = match self.gpu_manager.renderer(
             &self.primary_render_node,
             &device.render_node.unwrap_or(self.primary_render_node),
@@ -2007,18 +2414,33 @@ impl Tty {
                 }
             }
 
+            if blend_hdr {
+                // The cursor plane is filled without going through GLES, so its content would
+                // bypass the blend transform; render the cursor on the primary plane instead.
+                flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+                flags.remove(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT);
+                if !hdr_content {
+                    // SDR content must go through the blend shader.
+                    flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
+                    flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT_ANY);
+                }
+            }
+
             (flags, presentation_mode)
         };
 
         // Hand them over to the DRM.
+        set_frame_blend(renderer.as_gles_renderer(), blend);
         let drm_compositor = &mut surface.compositor;
-        match drm_compositor.render_frame::<_, _>(
+        let render_frame_result = drm_compositor.render_frame::<_, _>(
             &mut renderer,
             &elements,
             [0.; 4],
             flags,
             presentation_mode,
-        ) {
+        );
+        set_frame_blend(renderer.as_gles_renderer(), None);
+        match render_frame_result {
             Ok(res) => {
                 let needs_sync = res.needs_sync()
                     || self
@@ -2524,12 +2946,10 @@ impl Tty {
                     },
                 };
 
-                if let Ok(mut props) = ConnectorProperties::try_new(&device.drm, surface.connector)
-                {
-                    set_connector_properties(&mut props, config.max_bpc, false);
-                } else {
-                    warn!("failed to get connector properties");
-                }
+                // max-bpc and hdr changes flow through the render loop's color state
+                // reconciliation; give a previously rejected state another chance with the
+                // new config.
+                surface.failed_color_state = None;
 
                 let change_mode = surface.compositor.pending_mode() != mode;
 
@@ -3470,8 +3890,61 @@ fn get_edid_info(
     libdisplay_info::info::Info::parse_edid(&data).context("error parsing EDID")
 }
 
-impl<'a> ConnectorProperties<'a> {
-    fn try_new(device: &'a DrmDevice, connector: connector::Handle) -> anyhow::Result<Self> {
+/// Builds the HDR static metadata to signal on the connector for a client's image description:
+/// a PQ infoframe with the description's mastering display primaries (target color volume),
+/// falling back to its container primaries when the client didn't provide any.
+///
+/// Luminance priority: what the client provided (clamped to the sink's EDID capabilities) >
+/// the sink's EDID desired-content values > conservative ~500 nit placeholders.
+fn build_hdr_metadata(desc: &ImageDescription, edid: &EdidHdrInfo) -> HdrOutputMetadata {
+    let to_u16 = |v: u32| v.min(u16::MAX as u32) as u16;
+    // Clamps a client-provided value to the sink's EDID capability, when the EDID has one.
+    let clamp_to = |v: u16, edid_cap: u16| if edid_cap > 0 { v.min(edid_cap) } else { v };
+
+    let max_luminance = desc
+        .mastering_luminance
+        .map(|(_, max)| clamp_to(to_u16(max), edid.max_luminance))
+        .or((edid.max_luminance > 0).then_some(edid.max_luminance))
+        .unwrap_or(500);
+    let min_luminance = desc
+        .mastering_luminance
+        .map(|(min, _)| to_u16(min).max(edid.min_luminance))
+        .or((edid.min_luminance > 0).then_some(edid.min_luminance))
+        .unwrap_or(50);
+    let max_cll = desc
+        .max_cll
+        .map(|v| clamp_to(to_u16(v), edid.max_luminance))
+        .or((edid.max_luminance > 0).then_some(edid.max_luminance))
+        .unwrap_or(500);
+    let max_fall = desc
+        .max_fall
+        .map(|v| clamp_to(to_u16(v), edid.max_frame_avg_luminance))
+        .or((edid.max_frame_avg_luminance > 0).then_some(edid.max_frame_avg_luminance))
+        .unwrap_or(500);
+
+    // ST 2086 mastering primaries: the client's target color volume, which may exceed the
+    // container primaries (extended target volume). Without one, the target defaults to the
+    // container primaries per the color-management protocol.
+    let chroma = desc.mastering_primaries.unwrap_or_else(|| {
+        Chromaticities::from_option(desc.primaries)
+            .unwrap_or(Chromaticities::from_named(CmPrimaries::Srgb))
+    });
+    // Protocol wire units (xy * 1e6) -> CTA-861.3 units (xy * 50000).
+    let coord = |(x, y): (i32, i32)| CtaCoordinate::from_xy(f64::from(x) / 1e6, f64::from(y) / 1e6);
+
+    HdrOutputMetadata {
+        eotf: Eotf::SmpteSt2084,
+        display_primaries: [coord(chroma.red), coord(chroma.green), coord(chroma.blue)],
+        white_point: coord(chroma.white),
+        max_display_mastering_luminance: max_luminance,
+        min_display_mastering_luminance: min_luminance,
+        max_cll,
+        max_fall,
+    }
+}
+
+impl ConnectorProperties {
+    fn try_new(device: &DrmDevice, connector: connector::Handle) -> anyhow::Result<Self> {
         let prop_vals = device
             .get_properties(connector)
             .context("error getting properties")?;
@@ -3486,13 +3959,7 @@ impl<'a> ConnectorProperties<'a> {
             properties.push((info, value));
         }
 
-        Ok(Self {
-            device,
-            connector,
-            properties,
-            has_change: false,
-            requests: AtomicModeReq::new(),
-        })
+        Ok(Self { properties })
     }
 
     fn find(&self, name: &std::ffi::CStr) -> anyhow::Result<&(property::Info, property::RawValue)> {
@@ -3522,97 +3989,22 @@ impl<'a> ConnectorProperties<'a> {
             _ => bail!("panel orientation has wrong value type"),
         }
     }
-
-    fn reset_hdr(&mut self) -> anyhow::Result<()> {
-        const DRM_MODE_COLORIMETRY_DEFAULT: u64 = 0;
-
-        let (info, value) = self.find(c"HDR_OUTPUT_METADATA")?;
-
-        let property::ValueType::Blob = info.value_type() else {
-            bail!("wrong property type")
-        };
-        if *value != 0 {
-            self.requests
-                .add_raw_property(self.connector.into(), info.handle(), 0);
-            self.has_change = true;
-        }
-
-        let (info, value) = self.find(c"Colorspace")?;
-        let property::ValueType::Enum(_) = info.value_type() else {
-            bail!("wrong property type")
-        };
-        if *value != DRM_MODE_COLORIMETRY_DEFAULT {
-            self.requests.add_raw_property(
-                self.connector.into(),
-                info.handle(),
-                DRM_MODE_COLORIMETRY_DEFAULT,
-            );
-            self.has_change = true;
-        }
-
-        Ok(())
-    }
-
-    fn set_max_bpc(&mut self, max_bpc: MaxBpc) -> anyhow::Result<u64> {
-        let (info, value) = self.find(c"max bpc")?;
-
-        let property::ValueType::UnsignedRange(min, max) = info.value_type() else {
-            bail!("wrong property type")
-        };
-
-        let max_bpc = max_bpc.0 as u64;
-        if !(min..=max).contains(&max_bpc) {
-            bail!("max-bpc {max_bpc} outside valid range of [{min}, {max}]");
-        }
-
-        let property::Value::UnsignedRange(value) = info.value_type().convert_value(*value) else {
-            bail!("wrong property type")
-        };
-
-        if value != max_bpc {
-            self.requests.add_raw_property(
-                self.connector.into(),
-                info.handle(),
-                property::Value::UnsignedRange(max_bpc).into(),
-            );
-            self.has_change = true;
-        }
-
-        Ok(max_bpc)
-    }
-
-    fn commit(&mut self) -> anyhow::Result<()> {
-        if self.has_change {
-            self.device.atomic_commit(
-                AtomicCommitFlags::ALLOW_MODESET,
-                std::mem::take(&mut self.requests),
-            )?;
-        }
-
-        Ok(())
-    }
 }
 
-fn set_connector_properties(
-    props: &mut ConnectorProperties,
-    max_bpc: Option<MaxBpc>,
-    reset_hdr: bool,
-) {
-    if let Some(max_bpc) = max_bpc {
-        if let Err(err) = props.set_max_bpc(max_bpc) {
-            debug!("failed to set `max bpc` property: {err}");
-        }
-    }
-
-    if reset_hdr {
-        if let Err(err) = props.reset_hdr() {
-            debug!("failed to set HDR properties: {err}");
-        }
-    }
-
-    if let Err(err) = props.commit() {
-        warn!("failed to atomically commit properties: {err}");
-    }
+/// The `max bpc` to request for an output: the configured value, or 10 when HDR is enabled but no
+/// explicit value was given (HDR needs at least 10 bits per channel so the PQ signal isn't
+/// crushed). Clamped to the connector's supported range; `None` when the connector has no
+/// `max bpc` property at all.
+fn effective_max_bpc(
+    output: &niri_config::Output,
+    range: &Option<RangeInclusive<u32>>,
+) -> Option<u32> {
+    let range = range.as_ref()?;
+    let requested = output
+        .max_bpc
+        .map(|max_bpc| max_bpc.0 as u32)
+        .or_else(|| output.hdr.is_some().then_some(10))?;
+    Some(requested.clamp(*range.start(), *range.end()))
 }
 
 fn is_vrr_capable(device: &DrmDevice, connector: connector::Handle) -> Option<bool> {
@@ -3737,7 +4129,120 @@ mod tests {
     use niri_config::output::Modeline;
     use niri_ipc::{HSyncPolarity, VSyncPolarity};
 
-    use crate::backend::tty::{calculate_drm_mode_from_modeline, calculate_mode_cvt};
+    use smithay::wayland::color::management::ImageDescription;
+
+    use crate::backend::tty::{
+        build_hdr_metadata, calculate_drm_mode_from_modeline, calculate_mode_cvt, EdidHdrInfo,
+    };
+
+    #[test]
+    fn hdr_metadata_luminance_priorities() {
+        let pq_desc = ImageDescription {
+            transfer: smithay::wayland::color::management::TransferFunction::St2084Pq,
+            primaries: smithay::wayland::color::management::PrimariesOption {
+                named: Some(smithay::wayland::color::management::Primaries::Bt2020),
+                values: None,
+            },
+            max_cll: None,
+            max_fall: None,
+            mastering_luminance: None,
+            mastering_primaries: None,
+            luminances: None,
+            windows_scrgb: false,
+            windows_bt2100: false,
+        };
+        let edid = EdidHdrInfo {
+            pq: true,
+            bt2020_rgb: true,
+            max_luminance: 800,
+            min_luminance: 100,
+            max_frame_avg_luminance: 600,
+        };
+
+        // No client data, no EDID data: conservative placeholders.
+        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default());
+        assert_eq!(meta.max_display_mastering_luminance, 500);
+        assert_eq!(meta.min_display_mastering_luminance, 50);
+        assert_eq!(meta.max_cll, 500);
+        assert_eq!(meta.max_fall, 500);
+
+        // No client data: EDID desired-content values win.
+        let meta = build_hdr_metadata(&pq_desc, &edid);
+        assert_eq!(meta.max_display_mastering_luminance, 800);
+        assert_eq!(meta.min_display_mastering_luminance, 100);
+        assert_eq!(meta.max_cll, 800);
+        assert_eq!(meta.max_fall, 600);
+
+        // Client data within the sink's capabilities is used as-is.
+        let desc = ImageDescription {
+            mastering_luminance: Some((200, 700)),
+            max_cll: Some(650),
+            max_fall: Some(300),
+            ..pq_desc
+        };
+        let meta = build_hdr_metadata(&desc, &edid);
+        assert_eq!(meta.max_display_mastering_luminance, 700);
+        assert_eq!(meta.min_display_mastering_luminance, 200);
+        assert_eq!(meta.max_cll, 650);
+        assert_eq!(meta.max_fall, 300);
+
+        // Client data beyond the sink's capabilities is clamped to the EDID.
+        let desc = ImageDescription {
+            mastering_luminance: Some((1, 4000)),
+            max_cll: Some(4000),
+            max_fall: Some(2000),
+            ..pq_desc
+        };
+        let meta = build_hdr_metadata(&desc, &edid);
+        assert_eq!(meta.max_display_mastering_luminance, 800);
+        assert_eq!(meta.min_display_mastering_luminance, 100);
+        assert_eq!(meta.max_cll, 800);
+        assert_eq!(meta.max_fall, 600);
+    }
+
+    #[test]
+    fn hdr_metadata_mastering_primaries() {
+        use smithay::backend::drm::CtaCoordinate;
+        use smithay::wayland::color::management::{Chromaticities, Primaries, PrimariesOption};
+
+        let pq_desc = ImageDescription {
+            transfer: smithay::wayland::color::management::TransferFunction::St2084Pq,
+            primaries: PrimariesOption {
+                named: Some(Primaries::Bt2020),
+                values: None,
+            },
+            max_cll: None,
+            max_fall: None,
+            mastering_luminance: None,
+            mastering_primaries: None,
+            luminances: None,
+            windows_scrgb: false,
+            windows_bt2100: false,
+        };
+
+        // Without mastering primaries the infoframe carries the container primaries
+        // (BT.2020, matching the previous hardcoded behavior).
+        let meta = build_hdr_metadata(&pq_desc, &EdidHdrInfo::default());
+        assert_eq!(meta.display_primaries[0], CtaCoordinate::BT2020_RED);
+        assert_eq!(meta.display_primaries[1], CtaCoordinate::BT2020_GREEN);
+        assert_eq!(meta.display_primaries[2], CtaCoordinate::BT2020_BLUE);
+        assert_eq!(meta.white_point, CtaCoordinate::D65_WHITE);
+
+        // Client-provided mastering primaries (e.g. a DCI-P3 mastered HDR10 stream) are
+        // forwarded to the sink.
+        let p3 = Chromaticities::from_named(Primaries::DisplayP3);
+        let desc = ImageDescription {
+            mastering_primaries: Some(p3),
+            ..pq_desc
+        };
+        let meta = build_hdr_metadata(&desc, &EdidHdrInfo::default());
+        // Display P3 red is (0.680, 0.320): x = 0.680 * 50000 = 34000.
+        assert_eq!(
+            meta.display_primaries[0],
+            CtaCoordinate { x: 34000, y: 16000 }
+        );
+        assert_eq!(meta.white_point, CtaCoordinate::D65_WHITE);
+    }
 
     #[test]
     fn test_calculate_drmmode_from_modeline() {

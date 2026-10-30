@@ -16,6 +16,7 @@ output "eDP-1" {
     focus-at-startup
     backdrop-color "#001100"
     // max-bpc 8
+    // hdr
 
     hot-corners {
         // off
@@ -298,6 +299,63 @@ Valid values are `6`, `8`, `10`, `12`, `14`, `16`.
 // Set 8 max-bpc on HDMI-A-1 to lower the bandwidth.
 output "HDMI-A-1" {
     max-bpc 8
+}
+```
+
+### `hdr`
+
+<sup>Since: next release</sup>
+
+> [!CAUTION]
+> HDR support is experimental and currently limited to a **single fullscreen application**.
+> There is no color-managed compositing yet, so HDR will only look correct when one HDR
+> application is fullscreen and alone on the output.
+
+Opts this output into HDR. When present, niri:
+
+- advertises the `wp-color-management-v1` protocol to clients (so an HDR app, e.g. `mpv --vo=gpu-next`
+  or gamescope, can tell niri its content is HDR);
+- requests a 10-bit (or wider) scanout buffer, and at least 10 `max-bpc`;
+- while a fullscreen application is showing HDR (PQ / BT.2020) content, switches the output into HDR
+  mode (sets the connector to BT.2020 and attaches a PQ `HDR_OUTPUT_METADATA` infoframe), and reverts
+  to SDR when it stops.
+
+With no `hdr` node on any output, color management is not advertised at all and behavior is unchanged.
+HDR signalling only works on the TTY backend, and requires a GPU/display that exposes the HDR
+connector properties (amdgpu, recent Intel, and nvidia do).
+
+The optional `mode` property controls when the output is in HDR:
+
+- `mode="auto"` (the default): the output stays SDR and switches into HDR while a fullscreen
+  application shows HDR content (passthrough). Applications are told to prefer HDR (PQ / BT.2020)
+  once they are the active fullscreen window, so clients that listen for preference changes (SDL3
+  games, mpv with `--target-colorspace-hint`) switch to HDR when they go fullscreen. Entering and
+  leaving HDR is a modeset (expect a brief blank).
+- `mode="on"`: the output is always in HDR. SDR content (the desktop, windowed applications) is
+  composited into the HDR blend space, windowed HDR content displays correctly alongside it, and
+  applications are told to prefer HDR upfront — use this for games that only probe HDR support once
+  at startup. There is no modeset when entering or leaving fullscreen. Costs: SDR-only fullscreen
+  applications lose direct scanout on this output, and the cursor is rendered without the cursor
+  plane.
+
+The optional `reference-luminance` child (in cd/m²) is the luminance that SDR white (full white in
+an SDR application) is displayed at while the output is in HDR. Defaults to 203 (the BT.2408
+reference); raise it if the SDR desktop looks too dim next to HDR content.
+
+Screenshots and screencasts of HDR outputs are rendered in SDR; HDR application content appears
+washed out in them.
+
+```kdl
+// Enable HDR on the internal display.
+output "eDP-1" {
+    hdr
+}
+
+// Games that only probe HDR at startup: advertise HDR upfront.
+output "DP-1" {
+    hdr mode="on" {
+        reference-luminance 203
+    }
 }
 ```
 
