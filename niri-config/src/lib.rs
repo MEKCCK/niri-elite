@@ -62,8 +62,8 @@ pub use crate::screen_cast_picker::ScreenCastPicker;
 pub use crate::utils::FloatOrInt;
 use crate::utils::{expand_home_path, Flag, MergeWith as _};
 pub use crate::window_rule::{
-    AllowTearing, FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules,
-    WindowRule,
+    FloatingPosition, OnXdgActivate, PopupsRule, RelativeTo, ResolvedPopupsRules,
+    TearingContentType, WindowRule,
 };
 pub use crate::workspace::{Workspace, WorkspaceLayoutPart};
 
@@ -2814,6 +2814,7 @@ mod tests {
                     baba_is_float: None,
                     block_out_from: None,
                     allow_tearing: None,
+                    allow_tearing_content_type: None,
                     variable_refresh_rate: Some(
                         FullscreenOnly,
                     ),

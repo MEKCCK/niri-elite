@@ -71,7 +71,10 @@ pub struct WindowRule {
     #[knuffel(child, unwrap(argument))]
     pub block_out_from: Option<BlockOutFrom>,
     #[knuffel(child, unwrap(argument))]
-    pub allow_tearing: Option<AllowTearing>,
+    pub allow_tearing: Option<bool>,
+    /// Content types that may tear, independently of `allow-tearing`.
+    #[knuffel(child, unwrap(arguments))]
+    pub allow_tearing_content_type: Option<Vec<TearingContentType>>,
     #[knuffel(child, unwrap(argument))]
     pub variable_refresh_rate: Option<VrrRule>,
     #[knuffel(child, unwrap(argument, str))]
@@ -92,18 +95,15 @@ pub struct WindowRule {
     pub popups: PopupsRule,
 }
 
-/// When a window may tear.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AllowTearing {
-    /// Never tear this window, even when the client asks for it.
-    Never,
-    /// Allow tearing whenever the window is visible on the output, regardless of what the client
-    /// asks for.
-    Always,
-    /// Allow tearing only while the window declares itself as game or video content with
-    /// `wp_content_type_v1`. Useful for trusting well-behaved players and games while keeping
-    /// everything else tear-free.
-    ContentType,
+/// A content type a window can declare with `wp_content_type_v1`.
+#[derive(knuffel::DecodeScalar, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TearingContentType {
+    /// Game content, as declared by the client.
+    Game,
+    /// Video content, as declared by the client.
+    Video,
+    /// Photo content, as declared by the client.
+    Photo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,44 +207,6 @@ pub enum RelativeTo {
     Right,
 }
 
-impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for AllowTearing {
-    fn raw_decode(
-        val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
-        _ctx: &mut knuffel::decode::Context<S>,
-    ) -> Result<AllowTearing, DecodeError<S>> {
-        const ERROR: &str = "expected `true`, `false`, or `\"content-type\"`";
-        match &**val {
-            knuffel::ast::Literal::Bool(b) => Ok(if *b {
-                AllowTearing::Always
-            } else {
-                AllowTearing::Never
-            }),
-            knuffel::ast::Literal::String(s) => match &s[..] {
-                // Also accept bool strings to reduce confusion.
-                "true" => Ok(AllowTearing::Always),
-                "false" => Ok(AllowTearing::Never),
-                "content-type" => Ok(AllowTearing::ContentType),
-                _ => Err(DecodeError::conversion(val, ERROR)),
-            },
-            _ => Err(DecodeError::conversion(val, ERROR)),
-        }
-    }
-
-    fn type_check(
-        type_name: &Option<knuffel::span::Spanned<knuffel::ast::TypeName, S>>,
-        ctx: &mut knuffel::decode::Context<S>,
-    ) {
-        if let Some(typ) = type_name {
-            ctx.emit_error(DecodeError::TypeName {
-                span: typ.span().clone(),
-                found: Some((**typ).clone()),
-                expected: knuffel::errors::ExpectedType::no_type(),
-                rust_type: stringify!(AllowTearing),
-            });
-        }
-    }
-}
-
 impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for VrrRule {
     fn raw_decode(
         val: &knuffel::span::Spanned<knuffel::ast::Literal, S>,
@@ -281,11 +243,11 @@ impl<S: knuffel::traits::ErrorSpan> knuffel::DecodeScalar<S> for VrrRule {
 
 #[cfg(test)]
 mod tests {
-    use super::AllowTearing;
+    use super::TearingContentType;
     use crate::Config;
 
     #[test]
-    fn allow_tearing_parses_bools_and_content_type() {
+    fn allow_tearing_parses_alongside_content_types() {
         let config = Config::parse_mem(
             r##"
             window-rule {
@@ -297,8 +259,12 @@ mod tests {
                 allow-tearing false
             }
             window-rule {
+                allow-tearing-content-type "game" "video"
+            }
+            window-rule {
                 match app-id="c"
-                allow-tearing "content-type"
+                allow-tearing true
+                allow-tearing-content-type "photo"
             }
             window-rule {
                 match app-id="d"
@@ -307,18 +273,19 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(config.window_rules[0].allow_tearing, Some(true));
+        assert_eq!(config.window_rules[1].allow_tearing, Some(false));
+        assert_eq!(config.window_rules[2].allow_tearing, None);
         assert_eq!(
-            config.window_rules[0].allow_tearing,
-            Some(AllowTearing::Always)
+            config.window_rules[2].allow_tearing_content_type,
+            Some(vec![TearingContentType::Game, TearingContentType::Video])
         );
+        // Both properties can be set in one rule; they are independent.
+        assert_eq!(config.window_rules[3].allow_tearing, Some(true));
         assert_eq!(
-            config.window_rules[1].allow_tearing,
-            Some(AllowTearing::Never)
+            config.window_rules[3].allow_tearing_content_type,
+            Some(vec![TearingContentType::Photo])
         );
-        assert_eq!(
-            config.window_rules[2].allow_tearing,
-            Some(AllowTearing::ContentType)
-        );
-        assert_eq!(config.window_rules[3].allow_tearing, None);
+        assert_eq!(config.window_rules[4].allow_tearing_content_type, None);
     }
 }

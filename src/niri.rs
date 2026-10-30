@@ -6888,7 +6888,7 @@ impl Niri {
         self.layout.windows_for_output(output).any(|mapped| {
             let mut visible = false;
             let mut hint = false;
-            let mut media_content = false;
+            let mut content_type = ContentType::None;
 
             mapped.window.with_surfaces(|surface, states| {
                 if surface_primary_scanout_output(surface, states).as_ref() != Some(output) {
@@ -6903,15 +6903,26 @@ impl Niri {
                 hint |= *state.current().presentation_hint() == PresentationHint::Async;
                 drop(state);
 
-                let mut content_type = states.cached_state.get::<ContentTypeSurfaceCachedState>();
-                media_content |= matches!(
-                    content_type.current().content_type(),
-                    ContentType::Game | ContentType::Video
-                );
+                let declared = *states
+                    .cached_state
+                    .get::<ContentTypeSurfaceCachedState>()
+                    .current()
+                    .content_type();
+                // Keep the most specific declaration: any surface that says game or video is what
+                // we are after, so prefer those over None/Photo.
+                if content_type == ContentType::None {
+                    content_type = declared;
+                }
             });
 
-            let rule = mapped.rules().allow_tearing;
-            tearing_allowed(rule, hint, media_content) && visible
+            let rules = mapped.rules();
+            let allowed = tearing_allowed(
+                rules.allow_tearing,
+                rules.allow_tearing_content_type.as_deref(),
+                hint,
+                content_type,
+            );
+            allowed && visible
         })
     }
 
@@ -9809,40 +9820,67 @@ mod magnifier_tests {
 
 /// Decide whether tearing may be enabled for a window.
 ///
-/// `client_hint` is the window's `wp_tearing_control` async request, and `media_content` is whether
-/// it declared itself as game or video content with `wp_content_type_v1`.
+/// `explicit` is the `allow-tearing` rule, `types` is `allow-tearing-content-type`, `client_hint` is
+/// the window's `wp_tearing_control` async request and `content_type` is what the window declared
+/// with `wp_content_type_v1`.
 fn tearing_allowed(
-    rule: Option<niri_config::AllowTearing>,
+    explicit: Option<bool>,
+    types: Option<&[niri_config::TearingContentType]>,
     client_hint: bool,
-    media_content: bool,
+    content_type: ContentType,
 ) -> bool {
-    match rule {
-        Some(niri_config::AllowTearing::Always) => true,
-        Some(niri_config::AllowTearing::Never) => false,
-        Some(niri_config::AllowTearing::ContentType) => media_content,
-        // No rule: keep the stock behavior and follow only what the client asked for. Content type
-        // is a hint, not permission, so it needs an explicit `allow-tearing \"content-type\"` rule.
-        None => client_hint,
+    // An explicit rule always wins, in both directions.
+    match explicit {
+        Some(false) => return false,
+        Some(true) => return true,
+        None => {}
     }
+
+    // Then a declared content type the rule accepts.
+    if let Some(types) = types {
+        if types.iter().any(|ty| content_type_allowed(*ty, content_type)) {
+            return true;
+        }
+    }
+
+    // Otherwise keep the stock behavior: only what the client asked for.
+    client_hint
+}
+
+/// Whether a rule entry accepts the given declared content type.
+fn content_type_allowed(rule: niri_config::TearingContentType, declared: ContentType) -> bool {
+    matches!(
+        (rule, declared),
+        (niri_config::TearingContentType::Game, ContentType::Game)
+            | (niri_config::TearingContentType::Video, ContentType::Video)
+            | (niri_config::TearingContentType::Photo, ContentType::Photo)
+    )
 }
 
 #[cfg(test)]
 mod tearing_tests {
     use super::tearing_allowed;
-    use niri_config::AllowTearing;
+    use niri_config::TearingContentType;
+    use smithay::reexports::wayland_protocols::wp::content_type::v1::server::wp_content_type_v1::Type as ContentType;
 
     #[test]
-    fn tearing_follows_the_rule() {
-        // Rules win over what the client asks for.
-        assert!(tearing_allowed(Some(AllowTearing::Always), false, false));
-        assert!(!tearing_allowed(Some(AllowTearing::Never), true, true));
-        assert!(tearing_allowed(Some(AllowTearing::ContentType), true, false) == false);
-        assert!(tearing_allowed(Some(AllowTearing::ContentType), false, true));
+    fn explicit_rules_win_over_content_type() {
+        let types = [TearingContentType::Game];
+        assert!(!tearing_allowed(Some(false), Some(&types), true, ContentType::Game));
+        assert!(tearing_allowed(Some(true), None, false, ContentType::None));
     }
 
     #[test]
-    fn without_a_rule_only_the_client_hint_counts() {
-        assert!(!tearing_allowed(None, false, true));
-        assert!(tearing_allowed(None, true, false));
+    fn content_types_allow_tearing_independently_of_the_bool() {
+        let types = [TearingContentType::Game, TearingContentType::Video];
+        // No allow-tearing, but a game or video declaration.
+        assert!(tearing_allowed(None, Some(&types), false, ContentType::Game));
+        assert!(tearing_allowed(None, Some(&types), false, ContentType::Video));
+        // Declared types the rule does not list, or no declaration at all.
+        assert!(!tearing_allowed(None, Some(&types), false, ContentType::Photo));
+        assert!(!tearing_allowed(None, Some(&types), false, ContentType::None));
+        // The client hint still works on its own.
+        assert!(tearing_allowed(None, None, true, ContentType::None));
+        assert!(!tearing_allowed(None, None, false, ContentType::Game));
     }
 }

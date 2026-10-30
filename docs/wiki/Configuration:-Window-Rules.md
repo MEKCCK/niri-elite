@@ -672,16 +672,8 @@ window-rule {
 
 #### `allow-tearing`
 
-When this window may tear on an output where it is visible. It takes three values:
-
-- `false` — never tear this window, even when the client asks for it.
-- `true` — allow tearing whenever the window is visible, regardless of what the client asks for.
-- `"content-type"` — allow tearing only while the window declares itself as game or video content
-  through `wp_content_type_v1`. This trusts players and games that label their content without
-  having to name each of them.
-
-When the property is absent, tearing is enabled only if the client asks for it with
-`wp_tearing_control`.
+Allow screen tearing on an output where this window is visible. Takes `true` or `false`; `false`
+also overrides a client that asks for tearing with `wp_tearing_control`.
 
 ```kdl
 // Allow tearing only when osu! has keyboard focus.
@@ -692,11 +684,25 @@ window-rule {
 }
 ```
 
+#### `allow-tearing-content-type`
+
+List the content types that may tear, so that windows declaring themselves with
+`wp_content_type_v1` do not need to be named one by one. Takes any of `"game"`, `"video"` and
+`"photo"`.
+
+This is independent of `allow-tearing`: you can keep an explicit rule for one application and let
+a content-type rule cover everything else at the same time. Precedence is:
+
+1. `allow-tearing false` — never tear this window.
+2. `allow-tearing true` — always allow tearing while the window is visible.
+3. `allow-tearing-content-type` — allow tearing when the window declared a listed type.
+4. Otherwise, tear only if the client asked for it with `wp_tearing_control`.
+
 ```kdl
-// Any window that declares itself as game or video content may tear, e.g. fullscreen players and
-// games that use wp_content_type_v1.
+// Anything that declares itself as game or video content may tear, e.g. fullscreen players and
+// games; everything else stays tear-free unless it explicitly asks.
 window-rule {
-    allow-tearing "content-type"
+    allow-tearing-content-type "game" "video"
 }
 ```
 
